@@ -1,0 +1,20 @@
+option(
+  'enable_tests',
+  type: 'boolean',
+  value: true,
+  description: 'Build unit and full stack tests'
+)
+
+option(
+  'enable_benchmarks',
+  type: 'boolean',
+  value: true,
+  description: 'Build performance benchmarks'
+)
+
+option(
+  'build_python_bindings',
+  type: 'boolean',
+  value: true,
+  description: 'Build pybind11 Python extension modules'
+)
