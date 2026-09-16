@@ -1,7 +1,7 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
-
+#include <optional>
 #include "HALTypes.hpp"
 
 
@@ -23,14 +23,21 @@ public:
 
 class DepthStream{
 private:
-    std::queue<Depth> depthQueue; // Queue to store depths 
-    std::mutex m_depthQueue; // Mutex to control access to depthQueue
-    std::condition_variable c_depthQueue; // Condition variable for new data
-
+    std::deque<Depth> depthBuffer; // Ring buffer for depth data 
+    std::mutex m_depthBuffer; // Mutex to control access to depthBuffer
+    std::condition_variable c_depthBuffer; // Condition variable for new data
+    uint32_t maxSize; // Maximum size of the ring buffer before it begins overwriting
+    bool fastPush(const Depth &depth); // FUnction to quickly move data into the ring buffer
 public:
-    void pushDepth(const Depth &depth); // Pushes depth onto the queue
-    Depth popDepth(); // Pops depth from the queue
-    Depth peekDepth(); // Peeks at the depth at the front of the queue
+    explicit DepthStream(uint32_t bufferSize) : maxSize(bufferSize){
+
+    }
+
+    bool pushDepth(const Depth &depth); // Pushes depth into the ring buffer in a thread safe manner
+    std::optional<Depth> getInterDepth(double targetTime); // Gets interpolated depth from the buffer at target time
+    double getLatestTime(); // Gets the timestamp of the latest depth in the buffer
+    void pruneUntil(double time); // Remove all items in the buffer older than time
+    void flush(); // Flush the buffer
 };
 
 

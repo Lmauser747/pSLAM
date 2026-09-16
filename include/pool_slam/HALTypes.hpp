@@ -25,7 +25,7 @@ struct Depth{
     double timestamp;
 
     // z is the distance below the surface of the water measured by the depth sensor
-    float z;
+    double z;
 };
 
 class PixelArray{
