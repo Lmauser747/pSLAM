@@ -1,3 +1,4 @@
+#pragma once
 #include <cstdint>
 #include <vector>
 
@@ -38,6 +39,10 @@ public:
     PixelArray(uint32_t width, uint32_t height) : w(width), h(height){
         arr.resize(w * h);
     }
+};
+
+enum SensorHealth{
+    ACTIVE, DEGRADED, DISABLED
 };
 
 }

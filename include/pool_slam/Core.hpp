@@ -1,3 +1,4 @@
+#pragma once
 #include "PoseTypes.hpp"
 
 namespace PoolSLAM{

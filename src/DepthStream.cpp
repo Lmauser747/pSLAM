@@ -1,9 +1,13 @@
-#include "HAL.hpp"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 
-constexpr double MAX_GAP = 0.1;
+#include "HAL.hpp"
+
+constexpr double MAX_GAP = 0.2;
+constexpr uint32_t MAX_DEPTH_MISSED_FRAMES = 10;
 
 namespace PoolSLAM{
 bool DepthStream::fastPush(const Depth &depth){
@@ -38,6 +42,9 @@ bool DepthStream::fastPush(const Depth &depth){
 }
 
 bool DepthStream::pushDepth(const Depth &depth){
+    if(health.load(std::memory_order_relaxed) == SensorHealth::DISABLED){
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lock(m_depthBuffer);
         if(!fastPush(depth)){
@@ -59,7 +66,7 @@ std::optional<Depth> DepthStream::getInterDepth(double targetTime){
     }
 
     // Check if the buffer containts data suitible for interpolating at targetTime
-    if((depthBuffer.front().timestamp < targetTime) || (depthBuffer.back().timestamp > targetTime)){
+    if((depthBuffer.front().timestamp > targetTime) || (depthBuffer.back().timestamp < targetTime)){
         return std::nullopt;
     }
 
@@ -78,7 +85,7 @@ std::optional<Depth> DepthStream::getInterDepth(double targetTime){
     const Depth& right = *iterator;
     const Depth& left = *(iterator - 1);
     double diff = right.timestamp - left.timestamp;
-    if(diff > MAX_GAP){
+    if(diff > MAX_GAP || diff <= 0.0){
         return std::nullopt;
     }
     
@@ -93,10 +100,39 @@ std::optional<Depth> DepthStream::getInterDepth(double targetTime){
     return d;
 }
 
-void DepthStream::pruneUntil(double time){
+SensorHealth DepthStream::waitUntil(double timestamp){
+    if(health.load(std::memory_order_relaxed) == SensorHealth::DISABLED){
+        return health;
+    }
+    std::unique_lock<std::mutex> lock(m_depthBuffer);
+    bool valid = c_depthBuffer.wait_for(
+        lock, std::chrono::milliseconds(100), 
+        [&](){return (!depthBuffer.empty()) && (depthBuffer.back().timestamp >= timestamp);}
+    ); 
+
+
+    // Update the sensor health if a frame is missed
+    if(!valid){
+        if(health.load(std::memory_order_relaxed) == SensorHealth::ACTIVE){
+            health.store(SensorHealth::DEGRADED, std::memory_order_relaxed);
+        }
+        missedFrames++;
+        // If too many frames are missed, disable the sensor
+        if(missedFrames > MAX_DEPTH_MISSED_FRAMES){
+            health.store(SensorHealth::DISABLED, std::memory_order_relaxed);
+        }
+        return health;
+    }
+
+    missedFrames = 0;
+    health.store(SensorHealth::ACTIVE, std::memory_order_relaxed);
+    return health;
+}
+
+void DepthStream::pruneUntil(double horizonTime){
     {
         std::lock_guard<std::mutex> lock(m_depthBuffer);
-        while(!depthBuffer.empty() && (depthBuffer.front().timestamp < time)){
+        while(!depthBuffer.empty() && (depthBuffer.front().timestamp < horizonTime)){
             depthBuffer.pop_front();
         }
     }
@@ -107,6 +143,10 @@ void DepthStream::flush(){
         std::lock_guard<std::mutex> lock(m_depthBuffer);
         depthBuffer.clear();
     }
+}
+
+SensorHealth DepthStream::getHealth(){
+    return health.load(std::memory_order_relaxed);
 }
 
 }
