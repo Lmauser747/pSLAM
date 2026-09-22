@@ -3,6 +3,7 @@
 #include <chrono>
 #include <mutex>
 #include <optional>
+#include <pthread.h>
 
 #include "HAL.hpp"
 #include "HALTypes.hpp"
@@ -83,7 +84,7 @@ std::optional<Depth> DepthStream::getInterDepth(double targetTime){
     const Depth& right = *iterator;
     const Depth& left = *(iterator - 1);
     double diff = right.timestamp - left.timestamp;
-    if(diff > MAX_GAP || diff <= 0.0){
+    if(diff > MAX_DIFF || diff < MIN_DIFF){
         return std::nullopt;
     }
     
@@ -105,7 +106,7 @@ SensorHealth DepthStream::waitUntil(double timestamp){
     
     std::unique_lock<std::mutex> lock(m_depthBuffer);
     bool valid = c_depthBuffer.wait_for(
-        lock, std::chrono::milliseconds(100), 
+        lock, WAIT_TIMEOUT, 
         [&](){return (!depthBuffer.empty()) && (depthBuffer.back().timestamp >= timestamp);}
     ); 
 
