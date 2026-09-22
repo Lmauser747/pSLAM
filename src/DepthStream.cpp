@@ -5,9 +5,7 @@
 #include <optional>
 
 #include "HAL.hpp"
-
-constexpr double MAX_GAP = 0.2;
-constexpr uint32_t MAX_DEPTH_MISSED_FRAMES = 10;
+#include "HALTypes.hpp"
 
 namespace PoolSLAM{
 bool DepthStream::fastPush(const Depth &depth){
@@ -102,8 +100,9 @@ std::optional<Depth> DepthStream::getInterDepth(double targetTime){
 
 SensorHealth DepthStream::waitUntil(double timestamp){
     if(health.load(std::memory_order_relaxed) == SensorHealth::DISABLED){
-        return health;
+        return SensorHealth::DISABLED;
     }
+    
     std::unique_lock<std::mutex> lock(m_depthBuffer);
     bool valid = c_depthBuffer.wait_for(
         lock, std::chrono::milliseconds(100), 
@@ -118,15 +117,16 @@ SensorHealth DepthStream::waitUntil(double timestamp){
         }
         missedFrames++;
         // If too many frames are missed, disable the sensor
-        if(missedFrames > MAX_DEPTH_MISSED_FRAMES){
+        if(missedFrames > MAX_MISSED_FRAMES){
             health.store(SensorHealth::DISABLED, std::memory_order_relaxed);
+            return SensorHealth::DISABLED;
         }
-        return health;
+        return SensorHealth::DEGRADED;
     }
 
     missedFrames = 0;
     health.store(SensorHealth::ACTIVE, std::memory_order_relaxed);
-    return health;
+    return SensorHealth::ACTIVE;
 }
 
 void DepthStream::pruneUntil(double horizonTime){

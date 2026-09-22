@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include <deque>
 #include <mutex>
 #include <condition_variable>
@@ -13,8 +14,11 @@ namespace PoolSLAM{
 constexpr uint32_t DEFAULT_DEPTH_BUFFER_SIZE = 500;
 constexpr uint32_t DEFAULT_IMU_BUFFER_SIZE = 1000;
 
-class IMUStream{
+class ImuStream{
 private:
+    static constexpr uint32_t MAX_MISSED_FRAMES = 10;
+    static constexpr std::chrono::milliseconds WAIT_TIMEOUT{100};
+
     std::vector<IMU> imuBuffer; // Flat buffer for IMU data
     uint32_t head = 0; // Index of front of buffer
     uint32_t maxHead; // Maximum value of head before shuffling is needed
@@ -27,10 +31,10 @@ private:
     uint32_t missedFrames; // Number of consectutive frames that can be missed
 
     bool fastPush(const IMU &imu); // Quickly moves IMU data into the flat buffer
-
+    IMU linInter(const IMU &first, const IMU &second, double target); // Linearly interpolate between two IMU measurements
     
 public:
-    IMUStream(uint32_t bufferSize = DEFAULT_IMU_BUFFER_SIZE) : initSize(bufferSize){
+    ImuStream(uint32_t bufferSize = DEFAULT_IMU_BUFFER_SIZE) : initSize(bufferSize){
         maxHead = initSize / 2;
         imuBuffer.reserve(initSize);
     }
@@ -39,11 +43,16 @@ public:
     bool extractRange(double tStart, double tEnd, std::vector<IMU> &targetBuffer); // Extracts a range of IMU data to target buffer
     SensorHealth waitUntil(double timestamp); // Blocking wait until imu data more recent then timestamp is ingested
     void pruneUntil(double horizonTime); // Remove all items older than horizonTime
-
+    void flush(); // Flush the buffer
+    SensorHealth getHealth(); // Get the health of the sensor
 };
 
 class DepthStream{
 private:
+    static constexpr double MAX_GAP = 0.2;
+    static constexpr uint32_t MAX_MISSED_FRAMES = 10;
+
+
     std::deque<Depth> depthBuffer; // Ring buffer for depth data
     uint32_t maxSize; // Maximum size of the ring buffer before it begins overwriting
 
