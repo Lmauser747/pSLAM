@@ -1,10 +1,11 @@
 #include <algorithm>
-
 #include <atomic>
-#include <eigen3/Eigen/Core>
 #include <iterator>
-#include <linux/limits.h>
 #include <mutex>
+#include <vector>
+#include <cstddef>
+
+#include <eigen3/Eigen/Core>
 
 #include "HAL.hpp"
 #include "HALTypes.hpp"

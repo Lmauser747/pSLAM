@@ -1,6 +1,6 @@
 add_library(pool_slam_core
-    DepthStream.cpp
-    ImuStream.cpp
+    hal/DepthStream.cpp
+    hal/ImuStream.cpp
 )
 
 target_include_directories(pool_slam_core PUBLIC

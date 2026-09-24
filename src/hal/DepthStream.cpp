@@ -1,9 +1,7 @@
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <mutex>
 #include <optional>
-#include <pthread.h>
 
 #include "HAL.hpp"
 #include "HALTypes.hpp"

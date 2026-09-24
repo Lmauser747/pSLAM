@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include <cstddef>
 
 #include <eigen3/Eigen/Core>
 
@@ -30,14 +31,17 @@ struct Depth{
 };
 
 class PixelArray{
-private:
-    uint32_t x, y; // Current pixel coordinates
 public:
     double timestamp; // timestamp is a time measured in seconds relative to some standard starting point
     std::vector<uint8_t> arr; // Pixel array
-    uint32_t w, h; // Width and height of the image
-    PixelArray(uint32_t width, uint32_t height) : w(width), h(height){
+    size_t w, h; // Width and height of the image
+    PixelArray(size_t width, size_t height) : w(width), h(height){
         arr.resize(w * h);
+    }
+
+    // Get raw pointer to the pixel data for SIMD stuff
+    uint8_t *data(){
+        return arr.data();
     }
 };
 
