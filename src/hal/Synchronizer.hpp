@@ -12,6 +12,7 @@
 
 #include "HAL.hpp"
 #include "HALTypes.hpp"
+#include "SystemTypes.hpp"
 
 namespace PoolSLAM{
 
@@ -32,6 +33,7 @@ struct SyncedPacket{
 class Synchronizer{
 private:
     static constexpr size_t DEFAULT_MAX_OUTPUT_QUEUE_SIZE = 10;
+    static constexpr std::chrono::milliseconds DEFAULT_PACKET_TIMEOUT{100};
 
     // Data streams
     ImuStream &imuStream;
@@ -48,17 +50,29 @@ private:
     std::atomic<bool> isRunning{false};
 
     double previousFrameTime = -1.0; // Timestamp of previous frame
-    const size_t maxOutputQueueSize = DEFAULT_MAX_OUTPUT_QUEUE_SIZE; // Maximum size of the output queue
+    const size_t maxOutputQueueSize; // Maximum size of the output queue
+
+    std::atomic<SyncStatus> syncStatus{SyncStatus::IDLE};
 
     void threadTask(); // Task to be run in syncThread
+
+    // Trigger a synchronizer based fatal shutdown and nreturn checked out frame to the image stream queue
+    void syncFatalShutdown(SyncStatus reason, PixelArray *checkedOutFrame); 
 public:
-    Synchronizer(ImuStream &imu, DepthStream &depth, ImageStream &image) : 
-    imuStream(imu), depthStream(depth), imageStream(image){}
+    Synchronizer(ImuStream &imu, DepthStream &depth, ImageStream &image, size_t queueSize = DEFAULT_MAX_OUTPUT_QUEUE_SIZE) : 
+    imuStream(imu), depthStream(depth), imageStream(image), maxOutputQueueSize(queueSize){}
 
     void start(); // Starts synchronizer
     void stop(); // Stops synchronizer
 
-    bool getNextPacket(SyncedPacket &target, std::chrono::milliseconds timeout); // Get the next synced packet in the queue
+    // Get the next synced packet in the queue
+    bool getNextPacket(
+        SyncedPacket &target, std::chrono::milliseconds timeout = DEFAULT_PACKET_TIMEOUT
+    ); 
+
+    ~Synchronizer(){
+        stop();
+    }
 };
 
 }
