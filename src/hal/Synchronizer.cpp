@@ -1,4 +1,7 @@
 #include <atomic>
+#include <mutex>
+#include <optional>
+#include <thread>
 
 #include "Synchronizer.hpp"
 #include "HALTypes.hpp"
@@ -22,19 +25,87 @@ void Synchronizer::threadTask(){
 
         // Deal with degraded/disabled camera
         if(camHealth == SensorHealth::DISABLED){
-            syncStatus.store(SyncStatus::FATALCAM, std::memory_order_relaxed);
-            syncFatalShutdown(syncStatus, nextFrame);
+            syncFatalShutdown(SyncStatus::FATALCAM, nextFrame);
             break;
         }else if(camHealth == SensorHealth::DEGRADED || nextFrame == nullptr){
-            if(nextFrame){
-                imageStream.recycleFrame(nextFrame);
-            }
-            break;
+            imageStream.recycleFrame(nextFrame);
+            continue;
         }
 
-    }
-        
+        SyncedPacket packet;
+        packet.image = nextFrame;
+        packet.timestamp = nextFrame->timestamp;
 
+        SensorHealth imuHealth = imuStream.waitUntil(packet.timestamp);
+
+
+        // Deal with degreaded or disabled IMU
+        if(imuHealth == SensorHealth::DISABLED){
+            syncFatalShutdown(SyncStatus::FATALIMU, nextFrame);
+            break;
+        }else if(imuHealth == SensorHealth::DEGRADED
+                || imuStream.extractRange(previousFrameTime, nextFrame->timestamp, packet.imu)){
+            imageStream.recycleFrame(nextFrame);
+            continue;
+        }
+
+        SensorHealth depthHealth = depthStream.waitUntil(packet.timestamp);
+
+
+        // Deal with degraded or disabled depth sensor
+        if(depthHealth == SensorHealth::ACTIVE){
+            packet.depth = depthStream.getInterDepth(packet.timestamp);
+        }else{
+            packet.depth = std::nullopt;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_outputQueue);
+            outputQueue.push(packet);
+            previousFrameTime = packet.timestamp;
+        }
+
+        c_outputQueue.notify_one();
+    }
+}
+
+void Synchronizer::syncFatalShutdown(SyncStatus reason, PixelArray *checkedOutFrame){
+    syncStatus.store(reason, std::memory_order_relaxed);
+    isRunning.store(false);
+
+    if(checkedOutFrame){
+        imageStream.recycleFrame(checkedOutFrame);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_outputQueue);
+        while(!outputQueue.empty()){
+            SyncedPacket &packet = outputQueue.front();
+            outputQueue.pop();
+            imageStream.recycleFrame(packet.image);
+        }
+    }
+
+    c_outputQueue.notify_all();
+}
+
+void Synchronizer::start(){
+    SyncStatus status = syncStatus.load(std::memory_order_relaxed);
+    if(syncThread.joinable() || (status != SyncStatus::IDLE && status != SyncStatus::STOPPED)){
+        return;
+    }
+    isRunning.store(true, std::memory_order_relaxed);
+    syncThread = std::thread(&Synchronizer::threadTask, this);
+    syncStatus.store(SyncStatus::RUNNING);
+}
+
+void Synchronizer::stop(){
+    if(!syncThread.joinable() || syncStatus.load(std::memory_order_relaxed) != SyncStatus::RUNNING){
+        return;
+    }
+    isRunning.store(false, std::memory_order_relaxed);
+    syncThread.join();
+    syncStatus.store(SyncStatus::STOPPED);
 }
 
 }
