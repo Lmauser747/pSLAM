@@ -72,6 +72,16 @@ public:
 
     ~Synchronizer(){
         stop();
+
+        // Drain the queue
+        std::lock_guard<std::mutex> lock(m_outputQueue);
+        while(!outputQueue.empty()){
+            SyncedPacket &packet = outputQueue.front();
+            if(packet.image){
+                imageStream.recycleFrame(packet.image);
+            }
+            outputQueue.pop();
+        }
     }
 };
 

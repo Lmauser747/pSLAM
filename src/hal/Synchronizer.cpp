@@ -2,6 +2,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <chrono>
 
 #include "Synchronizer.hpp"
 #include "HALTypes.hpp"
@@ -32,6 +33,28 @@ void Synchronizer::threadTask(){
             continue;
         }
 
+        // Handle first frame
+        if(previousFrameTime < 0.0){
+            SyncedPacket initPacket;
+            initPacket.timestamp = nextFrame->timestamp;
+            initPacket.image = nextFrame;
+            
+            SensorHealth depthHealth = depthStream.waitUntil(initPacket.timestamp);
+            if (depthHealth == SensorHealth::ACTIVE) {
+                initPacket.depth = depthStream.getInterDepth(initPacket.timestamp);
+            } else {
+                initPacket.depth = std::nullopt;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(m_outputQueue);
+                outputQueue.push(initPacket);
+                previousFrameTime = initPacket.timestamp;
+            }
+            c_outputQueue.notify_one();
+            continue;
+        }
+
         SyncedPacket packet;
         packet.image = nextFrame;
         packet.timestamp = nextFrame->timestamp;
@@ -44,7 +67,7 @@ void Synchronizer::threadTask(){
             syncFatalShutdown(SyncStatus::FATALIMU, nextFrame);
             break;
         }else if(imuHealth == SensorHealth::DEGRADED
-                || imuStream.extractRange(previousFrameTime, nextFrame->timestamp, packet.imu)){
+                || !imuStream.extractRange(previousFrameTime, nextFrame->timestamp, packet.imu)){
             imageStream.recycleFrame(nextFrame);
             continue;
         }
@@ -62,6 +85,8 @@ void Synchronizer::threadTask(){
         {
             std::lock_guard<std::mutex> lock(m_outputQueue);
             outputQueue.push(packet);
+            imuStream.pruneUntil(previousFrameTime);
+            depthStream.pruneUntil(packet.timestamp);
             previousFrameTime = packet.timestamp;
         }
 
@@ -77,6 +102,7 @@ void Synchronizer::syncFatalShutdown(SyncStatus reason, PixelArray *checkedOutFr
         imageStream.recycleFrame(checkedOutFrame);
     }
 
+    // Drain the queue
     {
         std::lock_guard<std::mutex> lock(m_outputQueue);
         while(!outputQueue.empty()){
@@ -86,6 +112,7 @@ void Synchronizer::syncFatalShutdown(SyncStatus reason, PixelArray *checkedOutFr
         }
     }
 
+    // Notify all of the consumers downstream 
     c_outputQueue.notify_all();
 }
 
@@ -94,18 +121,39 @@ void Synchronizer::start(){
     if(syncThread.joinable() || (status != SyncStatus::IDLE && status != SyncStatus::STOPPED)){
         return;
     }
+
+    // Reset previous frame time to allow for clean restarts
+    previousFrameTime = -1.0;
+
     isRunning.store(true, std::memory_order_relaxed);
     syncThread = std::thread(&Synchronizer::threadTask, this);
     syncStatus.store(SyncStatus::RUNNING);
 }
 
 void Synchronizer::stop(){
-    if(!syncThread.joinable() || syncStatus.load(std::memory_order_relaxed) != SyncStatus::RUNNING){
+    if(!syncThread.joinable()){
         return;
     }
     isRunning.store(false, std::memory_order_relaxed);
     syncThread.join();
     syncStatus.store(SyncStatus::STOPPED);
+}
+
+bool Synchronizer::getNextPacket(
+    SyncedPacket &target, std::chrono::milliseconds timeout
+){
+    std::unique_lock<std::mutex> lock(m_outputQueue);
+
+    bool valid = c_outputQueue.wait_for(lock, timeout,
+    [&](){return !outputQueue.empty() || !isRunning.load(std::memory_order_relaxed);});
+    
+    if(!valid || outputQueue.empty()){
+        return false;
+    }
+
+    target = outputQueue.front();
+    outputQueue.pop();
+    return true;
 }
 
 }
