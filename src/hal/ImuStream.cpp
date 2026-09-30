@@ -7,12 +7,12 @@
 
 #include <eigen3/Eigen/Core>
 
-#include "HAL.hpp"
-#include "HALTypes.hpp"
+#include "Hal.hpp"
+#include "HalTypes.hpp"
 
 namespace PoolSLAM {
 
-bool ImuStream::fastPush(const IMU &imu){
+bool ImuStream::fastPush(const Imu &imu){
     // If incoming data is in order, just add it to the buffer
     if(imuBuffer.empty() || imu.timestamp >= imuBuffer.back().timestamp){
         imuBuffer.push_back(imu);
@@ -27,14 +27,14 @@ bool ImuStream::fastPush(const IMU &imu){
     // If the data is out of order, insert it in the correct location
     auto insertPosition = std::upper_bound(
         imuBuffer.begin() + head, imuBuffer.end(), imu.timestamp, 
-        [](const IMU &i, double t){return t < i.timestamp;}
+        [](const Imu &i, double t){return t < i.timestamp;}
     );
 
     imuBuffer.insert(insertPosition, imu);
     return true;
 }
 
-bool ImuStream::pushIMU(const IMU &imu){
+bool ImuStream::pushImu(const Imu &imu){
     if(health.load(std::memory_order_relaxed) == SensorHealth::DISABLED){
         return false;
     }
@@ -50,19 +50,19 @@ bool ImuStream::pushIMU(const IMU &imu){
     return true;
 }
 
-IMU ImuStream::linInter(const IMU &first, const IMU &second, double target){
+Imu ImuStream::linInter(const Imu &first, const Imu &second, double target){
     double diff = (second.timestamp - first.timestamp);
 
     // Check for small diffs
     if(diff < MIN_DIFF){
-        IMU fallback = first;
+        Imu fallback = first;
         fallback.timestamp = target;
         return fallback;
     }
 
     double alpha = (target - first.timestamp) / diff;
 
-    IMU imu;
+    Imu imu;
 
     imu.timestamp = target;
 
@@ -73,7 +73,7 @@ IMU ImuStream::linInter(const IMU &first, const IMU &second, double target){
     return imu;
 }
 
-bool ImuStream::extractRange(double tStart, double tEnd, std::vector<IMU> &targetBuffer){
+bool ImuStream::extractRange(double tStart, double tEnd, std::vector<Imu> &targetBuffer){
     std::lock_guard<std::mutex> lock(m_imuBuffer);
     targetBuffer.clear();
 
@@ -95,18 +95,18 @@ bool ImuStream::extractRange(double tStart, double tEnd, std::vector<IMU> &targe
     // First timepoint before or after tStart
     auto startIt = std::lower_bound(
         imuBuffer.begin() + head, imuBuffer.end(), tStart,
-        [](const IMU &i, double t){return i.timestamp < t;}
+        [](const Imu &i, double t){return i.timestamp < t;}
     );
 
     // First timepoint after tEnd
     auto endIt = std::upper_bound(
         imuBuffer.begin() + head, imuBuffer.end(), tEnd,
-        [](const IMU &i, double t){return i.timestamp > t;}
+        [](const Imu &i, double t){return i.timestamp > t;}
     );
 
     // Check if there is a timestamp too close to tStart
     if((startIt->timestamp - tStart) < DB_EPSILON){
-        IMU startSample = *startIt;
+        Imu startSample = *startIt;
         startSample.timestamp = tStart;
         targetBuffer.push_back(startSample);
         startIt++;
@@ -115,7 +115,7 @@ bool ImuStream::extractRange(double tStart, double tEnd, std::vector<IMU> &targe
     }
 
     bool appendInterEnd = false;
-    IMU endInter;
+    Imu endInter;
 
 
     // Check if there is a timestamp too close to tEnd
@@ -178,7 +178,7 @@ void ImuStream::pruneUntil(double horizonTime){
     // Find the first sample with timestamp greater than horizonTime
     auto horizonIt = std::upper_bound(
         imuBuffer.begin() + head, imuBuffer.end(), horizonTime,
-        [](const IMU &i, double t){return i.timestamp > t;}
+        [](const Imu &i, double t){return i.timestamp > t;}
     );
 
     // Make sure we leave one piece of data before the horizon

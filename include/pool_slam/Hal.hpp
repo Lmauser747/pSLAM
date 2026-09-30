@@ -11,14 +11,11 @@
 #include <queue>
 #include <cstdint>
 
-#include "HALTypes.hpp"
+#include "HalTypes.hpp"
 
 
 
 namespace PoolSLAM{
-
-
-
 
 class ImuStream{
 private:
@@ -28,7 +25,7 @@ private:
     static constexpr double DB_EPSILON = 1e-5; // Epsilon for comparing doubles
     static constexpr size_t MAX_MISSED_FRAMES = 10; // Max number of missed frames before sensor is disabled
 
-    std::vector<IMU> imuBuffer; // Flat buffer for IMU data
+    std::vector<Imu> imuBuffer; // Flat buffer for IMU data
     size_t head = 0; // Index of front of buffer
     size_t compactThreshold; // Maximum value of head before compacting is needed
     size_t initSize; // Initial size of the buffer
@@ -39,8 +36,8 @@ private:
     std::atomic<SensorHealth> health; // Stores the health of the IMU
     size_t missedFrames; // Number of consectutive frames that can be missed
 
-    bool fastPush(const IMU &imu); // Quickly moves IMU data into the flat buffer
-    IMU linInter(const IMU &first, const IMU &second, double target); // Linearly interpolate between two IMU measurements
+    bool fastPush(const Imu &imu); // Quickly moves IMU data into the flat buffer
+    Imu linInter(const Imu &first, const Imu &second, double target); // Linearly interpolate between two IMU measurements
     
 public:
     ImuStream(size_t bufferSize = DEFAULT_IMU_BUFFER_SIZE) : initSize(bufferSize){
@@ -48,8 +45,8 @@ public:
         imuBuffer.reserve(initSize);
     }
 
-    bool pushIMU(const IMU &imu); // Pushes IMU data onto the stack
-    bool extractRange(double tStart, double tEnd, std::vector<IMU> &targetBuffer); // Extracts a range of IMU data to target buffer
+    bool pushImu(const Imu &imu); // Pushes IMU data onto the stack
+    bool extractRange(double tStart, double tEnd, std::vector<Imu> &targetBuffer); // Extracts a range of IMU data to target buffer
     SensorHealth waitUntil(double timestamp); // Blocking wait until imu data more recent then timestamp is ingested
     void pruneUntil(double horizonTime); // Remove all items older than horizonTime
     void flush(); // Flush the buffer

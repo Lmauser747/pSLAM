@@ -7,7 +7,7 @@
 
 namespace PoolSLAM{
 
-struct IMU{
+struct Imu{
     // timestamp is a time measured in seconds relative to some standard starting point
     double timestamp;
 

@@ -5,7 +5,7 @@
 #include <chrono>
 
 #include "Synchronizer.hpp"
-#include "HALTypes.hpp"
+#include "HalTypes.hpp"
 #include "SystemTypes.hpp"
 
 

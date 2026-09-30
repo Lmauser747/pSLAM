@@ -1,13 +1,15 @@
-find_package(GTest REQUIRED)
-
 add_executable(system_tests
-    test_hal_concurrency.cpp
-    test_dynamic_routing.cpp
+    test_synchronizer.cpp
+    test_pipeline_e2e.cpp
 )
 
 target_link_libraries(system_tests PRIVATE
-    pool_slam_core
+    poolslam_backend
+    poolslam_frontend
+    poolslam_hal
     GTest::gtest_main
+    Eigen3::Eigen
+    Threads::Threads
 )
 
-add_test(NAME SystemTests COMMAND system_tests)
+gtest_discover_tests(system_tests)

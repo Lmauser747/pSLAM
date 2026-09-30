@@ -10,8 +10,8 @@
 #include <atomic>
 #include <cstddef>
 
-#include "HAL.hpp"
-#include "HALTypes.hpp"
+#include "Hal.hpp"
+#include "HalTypes.hpp"
 #include "SystemTypes.hpp"
 
 namespace PoolSLAM{
@@ -24,7 +24,7 @@ struct SyncedPacket{
     PixelArray *image;
 
     // IMU data
-    std::vector<IMU> imu;
+    std::vector<Imu> imu;
 
     // Depth data
     std::optional<Depth> depth;

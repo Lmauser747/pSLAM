@@ -4,8 +4,8 @@
 #include <mutex>
 #include <cstring>
 
-#include "HAL.hpp"
-#include "HALTypes.hpp"
+#include "Hal.hpp"
+#include "HalTypes.hpp"
 
 namespace PoolSLAM{
 

@@ -3,8 +3,8 @@
 #include <mutex>
 #include <optional>
 
-#include "HAL.hpp"
-#include "HALTypes.hpp"
+#include "Hal.hpp"
+#include "HalTypes.hpp"
 
 namespace PoolSLAM{
 bool DepthStream::fastPush(const Depth &depth){

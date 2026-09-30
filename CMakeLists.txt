@@ -1,32 +1,42 @@
-cmake_minimum_required(VERSION 3.14)
-project(pool_slam VERSION 1.0.0 LANGUAGES CXX)
-
-if(NOT CMAKE_GENERATOR MATCHES "Ninja")
-    message(FATAL_ERROR "The required build backend is Ninja. Generate using -G Ninja.")
-endif()
-
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
-endif()
-set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "RelWithDebInfo" "Release")
+cmake_minimum_required(VERSION 3.16)
+project(PoolSLAM VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-include(CheckCXXCompilerFlag)
-check_cxx_compiler_flag("-mfpu=neon" HAS_ARM_NEON)
-if(HAS_ARM_NEON)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mfpu=neon")
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+option(BUILD_TESTING "Build unit and system test suites" ON)
+option(BUILD_BENCHMARKS "Build micro-benchmarks" OFF)
+option(BUILD_PYTHON_BINDINGS "Build Pybind11 Python wrappers" OFF)
+
+# Force colored diagnostics under Ninja build buffering
+if(CMAKE_GENERATOR STREQUAL "Ninja")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_compile_options(-fdiagnostics-color=always)
+    endif()
 endif()
 
-find_package(Eigen3 REQUIRED)
-#find_package(GTSAM REQUIRED)
-find_package(pybind11 REQUIRED)
+if(MSVC)
+    add_compile_options(/W4 /permissive-)
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+endif()
+
+find_package(Threads REQUIRED)
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 
 add_subdirectory(src)
-# add_subdirectory(python)
-# add_subdirectory(benchmarks)
 
-# enable_testing()
-# add_subdirectory(tests/unit)
-# add_subdirectory(tests/system)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
+
+if(BUILD_BENCHMARKS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks")
+    add_subdirectory(benchmarks)
+endif()
+
+if(BUILD_PYTHON_BINDINGS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bindings/python")
+    add_subdirectory(bindings/python)
+endif()
