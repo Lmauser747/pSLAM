@@ -70,3 +70,6 @@ Testing/
 
 # clangd
 .clangd
+
+# venv
+.venv

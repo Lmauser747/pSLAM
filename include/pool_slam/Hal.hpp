@@ -33,7 +33,7 @@ private:
     std::mutex m_imuBuffer; // Mutex to control access to imuBuffer
     std::condition_variable c_imuBuffer; // Condition variable for new data
 
-    std::atomic<SensorHealth> health; // Stores the health of the IMU
+    std::atomic<SensorHealth> health{SensorHealth::ACTIVE}; // Stores the health of the IMU
     size_t missedFrames; // Number of consectutive frames that can be missed
 
     bool fastPush(const Imu &imu); // Quickly moves IMU data into the flat buffer
@@ -102,11 +102,11 @@ private:
     std::mutex m_imPool; // Mutex for access to imPool
     std::condition_variable c_imPool; // Condition variable to denote new data in readyQueue
 
-    std::atomic<SensorHealth> health;
+    std::atomic<SensorHealth> health{SensorHealth::ACTIVE};
     size_t missedFrames;
 
 public:
-    ImageStream(size_t maxReadyQueueSize, size_t poolCap, size_t w, size_t h) : 
+    ImageStream(size_t w, size_t h, size_t maxReadyQueueSize = DEFAULT_MAX_QUEUE_SIZE, size_t poolCap = DEFAULT_POOL_CAPACITY) : 
     maxQueueSize(maxReadyQueueSize), poolCapacity(poolCap), imW(w), imH(h){
         imPool.reserve(poolCapacity);
         for(size_t i = 0; i < poolCap; i++){

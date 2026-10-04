@@ -4,9 +4,9 @@
 #include <thread>
 #include <chrono>
 
-#include "Synchronizer.hpp"
-#include "HalTypes.hpp"
-#include "SystemTypes.hpp"
+#include "hal/Synchronizer.hpp"
+#include "pool_slam/HalTypes.hpp"
+#include "pool_slam/SystemTypes.hpp"
 
 
 namespace PoolSLAM{

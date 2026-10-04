@@ -9,7 +9,6 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(googletest)
 
-enable_testing()
 include(GoogleTest)
 
 add_subdirectory(unit)

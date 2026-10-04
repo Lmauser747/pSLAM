@@ -4,11 +4,12 @@
 #include <mutex>
 #include <vector>
 #include <cstddef>
+#include <cmath>
 
 #include <eigen3/Eigen/Core>
 
-#include "Hal.hpp"
-#include "HalTypes.hpp"
+#include "pool_slam/Hal.hpp"
+#include "pool_slam/HalTypes.hpp"
 
 namespace PoolSLAM {
 
@@ -27,7 +28,7 @@ bool ImuStream::fastPush(const Imu &imu){
     // If the data is out of order, insert it in the correct location
     auto insertPosition = std::upper_bound(
         imuBuffer.begin() + head, imuBuffer.end(), imu.timestamp, 
-        [](const Imu &i, double t){return t < i.timestamp;}
+        [](double t, const Imu &i){return t < i.timestamp;}
     );
 
     imuBuffer.insert(insertPosition, imu);
@@ -68,7 +69,7 @@ Imu ImuStream::linInter(const Imu &first, const Imu &second, double target){
 
     imu.a = first.a + alpha * (second.a - first.a);
     imu.w = first.w + alpha * (second.w - first.w);
-    imu.t = first.t + alpha * (second.t - first.t);
+    imu.t = first.t + static_cast<float>(alpha) * (second.t - first.t);
 
     return imu;
 }
@@ -101,11 +102,11 @@ bool ImuStream::extractRange(double tStart, double tEnd, std::vector<Imu> &targe
     // First timepoint after tEnd
     auto endIt = std::upper_bound(
         imuBuffer.begin() + head, imuBuffer.end(), tEnd,
-        [](const Imu &i, double t){return i.timestamp > t;}
+        [](double t, const Imu &i){return t < i.timestamp;}
     );
 
     // Check if there is a timestamp too close to tStart
-    if((startIt->timestamp - tStart) < DB_EPSILON){
+    if(std::abs(startIt->timestamp - tStart) < DB_EPSILON){
         Imu startSample = *startIt;
         startSample.timestamp = tStart;
         targetBuffer.push_back(startSample);
@@ -119,21 +120,19 @@ bool ImuStream::extractRange(double tStart, double tEnd, std::vector<Imu> &targe
 
 
     // Check if there is a timestamp too close to tEnd
-    if(((endIt - 1)->timestamp - tEnd) < DB_EPSILON){
+    if(std::abs((endIt - 1)->timestamp - tEnd) < DB_EPSILON){
         appendInterEnd = false;
     }else{
         appendInterEnd = true;
         endInter = linInter(*(endIt - 1), *endIt, tEnd);
     }
 
-
-    auto innerCount = std::distance(startIt, endIt);
     targetBuffer.insert(targetBuffer.end(), startIt, endIt);
     
     if(appendInterEnd){
         targetBuffer.push_back(endInter);
     }
-    targetBuffer.push_back(endInter);
+    //targetBuffer.push_back(endInter);
 
     return true;
 }
@@ -178,7 +177,7 @@ void ImuStream::pruneUntil(double horizonTime){
     // Find the first sample with timestamp greater than horizonTime
     auto horizonIt = std::upper_bound(
         imuBuffer.begin() + head, imuBuffer.end(), horizonTime,
-        [](const Imu &i, double t){return i.timestamp > t;}
+        [](double t, const Imu &i){return i.timestamp > t;}
     );
 
     // Make sure we leave one piece of data before the horizon

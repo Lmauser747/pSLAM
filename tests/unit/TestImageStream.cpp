@@ -5,8 +5,8 @@
 
 #include <gtest/gtest.h>
 
-#include <Hal.hpp>
-#include <HalTypes.hpp>
+#include <pool_slam/Hal.hpp>
+#include <pool_slam/HalTypes.hpp>
 
 class TestImageStream : public ::testing::Test{
 protected:
@@ -15,7 +15,7 @@ protected:
     const size_t poolSize = 4;
     const size_t readyQueueSize = 2;
 
-    PoolSLAM::ImageStream stream{readyQueueSize, poolSize, width, height};
+    PoolSLAM::ImageStream stream{width, height, readyQueueSize, poolSize};
 
     std::vector<uint8_t> dummmyPixels{std::vector<uint8_t>(width * height, 128)};
 };

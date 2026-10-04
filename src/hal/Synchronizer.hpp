@@ -10,9 +10,9 @@
 #include <atomic>
 #include <cstddef>
 
-#include "Hal.hpp"
-#include "HalTypes.hpp"
-#include "SystemTypes.hpp"
+#include "pool_slam/Hal.hpp"
+#include "pool_slam/HalTypes.hpp"
+#include "pool_slam/SystemTypes.hpp"
 
 namespace PoolSLAM{
 

@@ -9,12 +9,12 @@ set(PUBLIC_INCLUDE_DIR $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
 #     ${PUBLIC_INCLUDE_DIR}
 # )
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|armv8)")
-    target_compile_definitions(poolslam_simd INTERFACE POOLSLAM_USE_NEON)
-    if(NOT MSVC)
-        target_compile_options(poolslam_simd INTERFACE -march=armv8-a+simd)
-    endif()
-endif()
+# if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|armv8)")
+#     target_compile_definitions(poolslam_simd INTERFACE POOLSLAM_USE_NEON)
+#     if(NOT MSVC)
+#         target_compile_options(poolslam_simd INTERFACE -march=armv8-a+simd)
+#     endif()
+# endif()
 
 # --- 2. HAL Target ---[cite: 1, 8]
 add_library(poolslam_hal STATIC
@@ -33,7 +33,7 @@ target_link_libraries(poolslam_hal
         Eigen3::Eigen
         Threads::Threads
     PRIVATE
-        poolslam_simd
+        # poolslam_simd
 )
 
 # --- 3. Frontend Target (Tracking / Odometry) ---[cite: 8]
