@@ -108,8 +108,8 @@ private:
 public:
     ImageStream(size_t w, size_t h, size_t maxReadyQueueSize = DEFAULT_MAX_QUEUE_SIZE, size_t poolCap = DEFAULT_POOL_CAPACITY) : 
     maxQueueSize(maxReadyQueueSize), poolCapacity(poolCap), imW(w), imH(h){
-        imPool.reserve(poolCapacity);
-        for(size_t i = 0; i < poolCap; i++){
+        imPool.resize(poolCapacity);
+        for(size_t i = 0; i < poolCapacity; i++){
             imPool[i] = std::make_unique<PixelArray>(imW, imH);
             poolFreeList.push(imPool[i].get());
         }

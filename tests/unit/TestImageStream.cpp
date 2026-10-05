@@ -26,7 +26,7 @@ TEST_F(TestImageStream, CheckoutAndRecycle){
     ASSERT_TRUE(pushed);
 
     PoolSLAM::PixelArray *frame = nullptr;
-    PoolSLAM::SensorHealth health = stream.waitForFrame(frame, std::chrono::milliseconds(50));
+    PoolSLAM::SensorHealth health = stream.waitForFrame(frame);
 
     // Make sure the frame comes back ok
     ASSERT_EQ(health, PoolSLAM::SensorHealth::ACTIVE);

@@ -34,7 +34,7 @@ class PixelArray{
 public:
     double timestamp; // timestamp is a time measured in seconds relative to some standard starting point
     std::vector<uint8_t> arr; // Pixel array
-    size_t w, h; // Width and height of the image
+    const size_t w, h; // Width and height of the image
     PixelArray(size_t width, size_t height) : w(width), h(height){
         arr.resize(w * h);
     }

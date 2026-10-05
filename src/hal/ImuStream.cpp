@@ -132,7 +132,6 @@ bool ImuStream::extractRange(double tStart, double tEnd, std::vector<Imu> &targe
     if(appendInterEnd){
         targetBuffer.push_back(endInter);
     }
-    //targetBuffer.push_back(endInter);
 
     return true;
 }
