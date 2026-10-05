@@ -111,6 +111,10 @@ bool ImuStream::extractRange(double tStart, double tEnd, std::vector<Imu> &targe
         startSample.timestamp = tStart;
         targetBuffer.push_back(startSample);
         startIt++;
+    }else if(startIt > (imuBuffer.begin() + head) && std::abs((startIt - 1)->timestamp - tStart) < DB_EPSILON){
+        Imu startSample = *(startIt - 1);
+        startSample.timestamp = tStart;
+        targetBuffer.push_back(startSample);
     }else{
         targetBuffer.push_back(linInter(*(startIt - 1),*startIt , tStart));
     }
