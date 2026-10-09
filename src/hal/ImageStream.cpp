@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <cstring>
@@ -10,6 +11,9 @@
 namespace PoolSLAM{
 
 bool ImageStream::pushFrame(uint8_t *rawPixels, double timestamp){
+    if(!rawPixels){
+        return false;
+    }
     PixelArray *copyTarget;
     {
         std::lock_guard<std::mutex> lock(m_imPool);
@@ -35,7 +39,7 @@ bool ImageStream::pushFrame(uint8_t *rawPixels, double timestamp){
     {
         std::lock_guard<std::mutex> lock(m_imPool);
         // Evict frames from readyQueue if it is too big
-        if(readyQueue.size() >= 3){
+        if(readyQueue.size() >= maxQueueSize){
             poolFreeList.push(readyQueue.front());
             readyQueue.pop();
         }

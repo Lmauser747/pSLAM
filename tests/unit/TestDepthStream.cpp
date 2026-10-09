@@ -1,4 +1,3 @@
-#include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -6,6 +5,8 @@
 #include <optional>
 #include <thread>
 #include <vector>
+
+#include <gtest/gtest.h>
 
 #include "pool_slam/Hal.hpp"
 #include "pool_slam/HalTypes.hpp"
