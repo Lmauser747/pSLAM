@@ -33,7 +33,7 @@ private:
     std::condition_variable c_depthBuffer; // Condition variable for new data
 
     std::atomic<SensorHealth> health{SensorHealth::ACTIVE}; // Stores the health of the depth sensor
-    size_t missedFrames; // Number of consecutive frames the stream failed to provide data for
+    size_t missedFrames = 0; // Number of consecutive frames the stream failed to provide data for
     
     bool fastPush(const Depth &depth); // Function to quickly move data into the ring buffer   
 public:
@@ -64,7 +64,7 @@ private:
     std::condition_variable c_imuBuffer; // Condition variable for new data
 
     std::atomic<SensorHealth> health{SensorHealth::ACTIVE}; // Stores the health of the IMU
-    size_t missedFrames; // Number of consectutive frames that can be missed
+    size_t missedFrames = 0; // Number of consectutive frames that can be missed
 
     bool fastPush(const Imu &imu); // Quickly moves IMU data into the flat buffer
     Imu linInter(const Imu &first, const Imu &second, double target); // Linearly interpolate between two IMU measurements
@@ -103,7 +103,7 @@ private:
     std::condition_variable c_imPool; // Condition variable to denote new data in readyQueue
 
     std::atomic<SensorHealth> health{SensorHealth::ACTIVE};
-    size_t missedFrames;
+    size_t missedFrames = 0;
 
 public:
     ImageStream(size_t w, size_t h, size_t maxReadyQueueSize = DEFAULT_MAX_QUEUE_SIZE, size_t poolCap = DEFAULT_POOL_CAPACITY) : 
