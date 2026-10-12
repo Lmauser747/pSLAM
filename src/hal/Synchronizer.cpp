@@ -47,9 +47,20 @@ void Synchronizer::threadTask(){
             }
 
             {
-                std::lock_guard<std::mutex> lock(m_outputQueue);
-                outputQueue.push(initPacket);
-                previousFrameTime = initPacket.timestamp;
+                {
+                    std::lock_guard<std::mutex> lock(m_outputQueue);
+
+                    if(outputQueue.size() >= maxOutputQueueSize){
+                        SyncedPacket &stale = outputQueue.front();
+                        if(stale.image){
+                            imageStream.recycleFrame(stale.image);
+                        }
+                        outputQueue.pop();
+                    }
+
+                    outputQueue.push(initPacket);
+                    previousFrameTime = initPacket.timestamp;
+                }
             }
             c_outputQueue.notify_one();
             continue;
@@ -84,9 +95,16 @@ void Synchronizer::threadTask(){
 
         {
             std::lock_guard<std::mutex> lock(m_outputQueue);
+            if(outputQueue.size() >= maxOutputQueueSize){
+                SyncedPacket &stale = outputQueue.front();
+                if(stale.image){
+                    imageStream.recycleFrame(stale.image);
+                }
+                outputQueue.pop();
+            }
             outputQueue.push(packet);
             imuStream.pruneUntil(previousFrameTime);
-            depthStream.pruneUntil(packet.timestamp);
+            depthStream.pruneUntil(previousFrameTime);
             previousFrameTime = packet.timestamp;
         }
 

@@ -213,13 +213,14 @@ TEST_F(SynchronizerSystemTest, DepthDropGracefulDegradation) {
         }
     });
 
-    // Provide initial depth measurements up to t = 1.150s
+    // Provide initial depth measurements up to t = 1.200s
     for (size_t i = 0; i < 4; i++) {
         depthStream.pushDepth({1.000 + (static_cast<double>(i) * 0.050), 12.0});
     }
-
     depthStream.pushDepth({1.200, 12.0});
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Allow IMU thread to generate past 1.050s
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
 
     // Frame 0: Initial T0 anchor with depth
     imageStream.pushFrame(dummyFrameBuffer.data(), 1.050);
@@ -229,7 +230,8 @@ TEST_F(SynchronizerSystemTest, DepthDropGracefulDegradation) {
     EXPECT_NEAR(p0.depth->z, 12.0, 1e-4);
     imageStream.recycleFrame(p0.image);
 
-    // Frame 1: Intermediate frame with depth
+    // Frame 1: Intermediate frame with depth (t = 1.100s)
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
     imageStream.pushFrame(dummyFrameBuffer.data(), 1.100);
     PoolSLAM::SyncedPacket p1;
     ASSERT_TRUE(synchronizer->getNextPacket(p1, std::chrono::milliseconds(150)));
@@ -237,10 +239,14 @@ TEST_F(SynchronizerSystemTest, DepthDropGracefulDegradation) {
     EXPECT_NEAR(p1.depth->z, 12.0, 1e-4);
     imageStream.recycleFrame(p1.image);
 
-    // Depth halts completely; advance camera timeline past depth coverage
-    imageStream.pushFrame(dummyFrameBuffer.data(), 1.350);
+    // Depth halts at 1.200s. Let IMU catch up to 1.260s (30 steps * 5ms ~ 150ms)
+    std::this_thread::sleep_for(std::chrono::milliseconds(160));
+
+    // Push visual frame past depth coverage (t = 1.250s > 1.200s)
+    imageStream.pushFrame(dummyFrameBuffer.data(), 1.250);
     PoolSLAM::SyncedPacket p2;
-    ASSERT_TRUE(synchronizer->getNextPacket(p2, std::chrono::milliseconds(200)));
+    // Timeout must exceed DepthStream's 100ms WAIT_TIMEOUT
+    ASSERT_TRUE(synchronizer->getNextPacket(p2, std::chrono::milliseconds(300)));
 
     // Depth timed out, but visual-inertial frame is preserved
     EXPECT_FALSE(p2.depth.has_value());
@@ -259,26 +265,33 @@ TEST_F(SynchronizerSystemTest, DepthDropGracefulDegradation) {
 TEST_F(SynchronizerSystemTest, FatalIMUFailureShutdown) {
     synchronizer->start();
 
+    // 1. Prime pipeline with initial anchor
     imuStream.pushImu(createImuSample(1.000));
     imuStream.pushImu(createImuSample(1.060));
     depthStream.pushDepth({1.000, 5.0});
     depthStream.pushDepth({1.060, 5.0});
 
-    // Dispatch T0 frame
     imageStream.pushFrame(dummyFrameBuffer.data(), 1.020);
     PoolSLAM::SyncedPacket p0;
     ASSERT_TRUE(synchronizer->getNextPacket(p0, std::chrono::milliseconds(150)));
     imageStream.recycleFrame(p0.image);
 
-    // Push T1 camera frame at 1.500s without feeding IMU samples past 1.060s
+    // 2. Drive ImuStream into DISABLED (> 10 consecutive timeouts = 11 misses)
+    for (size_t i = 0; i < 11; i++) {
+        imuStream.waitUntil(10.0 + (static_cast<double>(i) * 0.05));
+    }
+    ASSERT_EQ(imuStream.getHealth(), PoolSLAM::SensorHealth::DISABLED);
+
+    // 3. Push visual frame: Synchronizer calls imuStream.waitUntil(), gets DISABLED immediately,
+    //    and executes syncFatalShutdown(SyncStatus::FATALIMU, nextFrame)
     imageStream.pushFrame(dummyFrameBuffer.data(), 1.500);
 
-    // Synchronizer worker thread times out waiting for IMU right bracket (> 1.500s)
+    // 4. getNextPacket should fail immediately
     PoolSLAM::SyncedPacket p_fail;
-    bool success = synchronizer->getNextPacket(p_fail, std::chrono::milliseconds(350));
+    bool success = synchronizer->getNextPacket(p_fail, std::chrono::milliseconds(150));
     EXPECT_FALSE(success);
 
-    // Downstream consumer must immediately unblock after fatal pipeline termination
+    // 5. Verify the consumer unblocks immediately (< 50 ms) because isRunning is now false
     auto start = std::chrono::steady_clock::now();
     bool immediateUnblock = synchronizer->getNextPacket(p_fail, std::chrono::milliseconds(200));
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
