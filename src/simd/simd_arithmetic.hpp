@@ -1,10 +1,15 @@
 #pragma once
 
-#include <arm_neon.h>
 #include <cstdint>
 #include <limits>
+#include <cmath>
 
 #include "simd/simd_wrappers.hpp"
+#ifdef NEON_WRAPPERS
+    #include <arm_neon.h>
+#elif defined(AVX_WRAPPERS)
+    #include <immintrin.h>
+#endif
 
 namespace psSimd{
 

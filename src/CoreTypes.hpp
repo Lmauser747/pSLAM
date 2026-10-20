@@ -1,0 +1,31 @@
+#pragma once
+
+#include <cstdint>
+#include <array>
+
+#include <eigen3/Eigen/Dense>
+
+namespace PoolSLAM{
+
+template<int Radius>
+struct TrackedFeature{
+    uint32_t id; // Feature id for tracking
+    int age = 0; // Feature age in frames
+
+    // Using homogenous coordinates
+    Eigen::Vector2d ptCurr; // Sub-pixel position of feature
+    Eigen::Vector2d ptPrev; // Sub-pixel position of feature in previous frame
+
+
+    static constexpr int PATCH_SIZE = 2 * Radius + 1;
+    static constexpr int NUM_PIXELS = PATCH_SIZE * PATCH_SIZE;
+
+    std::array<uint8_t, NUM_PIXELS> patch; // Patch of pixels for IC-LK
+    std::array<int16_t, NUM_PIXELS> xGrad, yGrad; // Gradient in x and y directions 
+
+    uint32_t Mad; // Mead absolute difference between last two patches
+
+    Eigen::Matrix2f HInv{{0.0, 0.0}, {0.0, 0.0}};
+};
+
+}

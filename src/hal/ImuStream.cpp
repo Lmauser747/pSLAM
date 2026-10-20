@@ -27,7 +27,7 @@ bool ImuStream::fastPush(const Imu &imu){
 
     // If the data is out of order, insert it in the correct location
     auto insertPosition = std::upper_bound(
-        imuBuffer.begin() + head, imuBuffer.end(), imu.timestamp, 
+        imuBuffer.begin() + static_cast<ptrdiff_t>(head), imuBuffer.end(), imu.timestamp, 
         [](double t, const Imu &i){return t < i.timestamp;}
     );
 
@@ -95,13 +95,13 @@ bool ImuStream::extractRange(double tStart, double tEnd, std::vector<Imu> &targe
 
     // First timepoint before or after tStart
     auto startIt = std::lower_bound(
-        imuBuffer.begin() + head, imuBuffer.end(), tStart,
+        imuBuffer.begin() + static_cast<ptrdiff_t>(head), imuBuffer.end(), tStart,
         [](const Imu &i, double t){return i.timestamp < t;}
     );
 
     // First timepoint after tEnd
     auto endIt = std::upper_bound(
-        imuBuffer.begin() + head, imuBuffer.end(), tEnd,
+        imuBuffer.begin() + static_cast<ptrdiff_t>(head), imuBuffer.end(), tEnd,
         [](double t, const Imu &i){return t < i.timestamp;}
     );
 
@@ -111,7 +111,7 @@ bool ImuStream::extractRange(double tStart, double tEnd, std::vector<Imu> &targe
         startSample.timestamp = tStart;
         targetBuffer.push_back(startSample);
         startIt++;
-    }else if(startIt > (imuBuffer.begin() + head) && std::abs((startIt - 1)->timestamp - tStart) < DB_EPSILON){
+    }else if(startIt > (imuBuffer.begin() + static_cast<ptrdiff_t>(head)) && std::abs((startIt - 1)->timestamp - tStart) < DB_EPSILON){
         Imu startSample = *(startIt - 1);
         startSample.timestamp = tStart;
         targetBuffer.push_back(startSample);
@@ -179,20 +179,20 @@ void ImuStream::pruneUntil(double horizonTime){
 
     // Find the first sample with timestamp greater than horizonTime
     auto horizonIt = std::upper_bound(
-        imuBuffer.begin() + head, imuBuffer.end(), horizonTime,
+        imuBuffer.begin() + static_cast<ptrdiff_t>(head), imuBuffer.end(), horizonTime,
         [](double t, const Imu &i){return i.timestamp > t;}
     );
 
     // Make sure we leave one piece of data before the horizon
-    if(horizonIt > imuBuffer.begin() + head){
-        head = std::distance(imuBuffer.begin(), horizonIt - 1);
+    if(horizonIt > imuBuffer.begin() + static_cast<ptrdiff_t>(head)){
+        head = static_cast<size_t>(std::distance(imuBuffer.begin(), horizonIt - 1));
     }
 
     // Shift all the data so head = 0 if head is greater than some threshold
     compactThreshold = imuBuffer.capacity() / 2;
     if(head > compactThreshold && compactThreshold > 0){
-        size_t newSize = std::distance(imuBuffer.begin() + head, imuBuffer.end());
-        std::move(imuBuffer.begin() + head, imuBuffer.end(), imuBuffer.begin());
+        size_t newSize = static_cast<size_t>(std::distance(imuBuffer.begin() + static_cast<ptrdiff_t>(head), imuBuffer.end()));
+        std::move(imuBuffer.begin() + static_cast<ptrdiff_t>(head), imuBuffer.end(), imuBuffer.begin());
 
         imuBuffer.resize(newSize);
         head = 0;
