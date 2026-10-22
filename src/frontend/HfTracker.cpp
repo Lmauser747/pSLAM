@@ -4,6 +4,7 @@
 #include <cmath>
 #include <utility>
 #include <vector>
+#include <algorithm>
 
 #include <eigen3/Eigen/Dense>
 
@@ -18,6 +19,7 @@ size_t HfTracker::trackAndExtract(const uint8_t *curBuffer, double timestamp, co
         return false;
     }
     const bool usingPrior = R.has_value();
+    // Run IC-LK if we have previous features to track
     if(!activeFeatures.empty()){
         Eigen::Matrix3f prior;
         if(usingPrior){
@@ -40,6 +42,10 @@ size_t HfTracker::trackAndExtract(const uint8_t *curBuffer, double timestamp, co
         }
 
         activeFeatures.resize(survivorCount);
+
+        if(ransac(*R) != 0){
+            handleTrackingError();
+        }
     }
 }
 
@@ -61,6 +67,7 @@ FORCE_INLINE bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const 
         int32_t bY = 0;
         
         // Compute the accumulated error
+        // START VECTORIZE
         for(int dy = 0; dy <= RADIUS; dy++){
             for(int dx = 0; dx <= RADIUS; dx++){
                 size_t idx = static_cast<size_t>((dy + RADIUS) * feature.PATCH_SIZE + (dx + 5));
@@ -73,6 +80,7 @@ FORCE_INLINE bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const 
                 bY += static_cast<int32_t>(feature.yGrad[idx]) * diff;
             }
         }
+        // END VECTORIZE
 
         Eigen::Vector2f b = {static_cast<float>(bX), static_cast<float>(bY)};
         
@@ -130,25 +138,88 @@ FORCE_INLINE int16_t HfTracker::bilinear(const uint8_t *curBuffer, Eigen::Vector
     return static_cast<int16_t>(pixel) >> 16;
 }
 
-size_t HfTracker::RANSAC(){
-    size_t numFeatures = activeFeatures.size();
-    rays.xCurr.resize(numFeatures);
-    rays.xPrev.resize(numFeatures);
-    rays.yCurr.resize(numFeatures);
-    rays.yPrev.resize(numFeatures);
+int HfTracker::ransac(const Eigen::Matrix3f &R){
+    const size_t numFeatures = activeFeatures.size();
+    epi.xCurr.resize(numFeatures);
+    epi.xPrev.resize(numFeatures);
+    epi.yCurr.resize(numFeatures);
+    epi.yPrev.resize(numFeatures);
     // Unpack AoS to SoA
+    // START VECTORIZE
     for(size_t i = 0; i < numFeatures; i++){
-        rays.xCurr[i] = activeFeatures[i].ptCurr.x();
-        rays.yCurr[i] = activeFeatures[i].ptCurr.y();
-        rays.xPrev[i] = activeFeatures[i].ptPrev.x();
-        rays.yPrev[i] = activeFeatures[i].ptPrev.y();
+        epi.xCurr[i] = activeFeatures[i].ptCurr.x();
+        epi.yCurr[i] = activeFeatures[i].ptCurr.y();
+        epi.xPrev[i] = activeFeatures[i].ptPrev.x();
+        epi.yPrev[i] = activeFeatures[i].ptPrev.y();
+    }
+    // END VECTORIZE
+
+    epi.currRays.resize(static_cast<Eigen::Index>(numFeatures));
+    epi.prevRays.resize(static_cast<Eigen::Index>(numFeatures));
+    epi.scratch.resize(static_cast<Eigen::Index>(numFeatures));
+    epi.residual.resize(static_cast<Eigen::Index>(numFeatures));
+
+    undistort(epi.xPrev, epi.yPrev, epi.prevRays, numFeatures);
+    undistort(epi.xCurr, epi.yCurr, epi.prevRays, numFeatures);
+
+    // Rotate the rays from the previous frame to the current frame
+    epi.scratch.noalias() = R * epi.prevRays;
+
+    // cross the rays from the current frame with the rays from the old frame
+    for(size_t i = 0; i < numFeatures; i++){
+        auto iInt = static_cast<Eigen::Index>(i); // Why does Eigen use int for indexing??
+        Eigen::Vector3f qi = epi.scratch.col(iInt);
+        epi.scratch.col(iInt) = qi.cross(epi.currRays.col(iInt));
+    }
+    // epi.scratch is the matrix M in the RASAC calcs
+    int maxInliers = 0;
+    Eigen::Vector3f t, tBest;
+    for(int iter = 0; iter < RANSAC_ITERS; iter++){
+        auto a = static_cast<Eigen::Index>(ransacRng() % numFeatures);
+        auto b = static_cast<Eigen::Index>(ransacRng() % numFeatures);
+        b = a == b ? b + 1 : b;
+        t = epi.scratch.col(a).cross(epi.scratch.col(b));
+        if(t.norm() < RANSAC_TRANS_EP){
+            continue;
+        }
+        t = t.normalized();
+        epi.residual = epi.scratch.transpose() * t;
+        int inliers = 0;
+        // START VECTORIZE
+        for(size_t i = 0; i < numFeatures; i++){
+            auto d = std::abs(epi.residual(static_cast<Eigen::Index>(i)));
+            inliers = d < ransacTau ? inliers + 1 : inliers;
+        }
+        // END VECTORIZE
+        if(inliers > maxInliers){
+            maxInliers = inliers;
+            tBest = t;
+            if(maxInliers > static_cast<int>(RANSAC_EARLY_CONSENSUS * static_cast<float>(numFeatures))){
+                break;
+            }
+        }
     }
 
-    rays.currRays.resize(static_cast<Eigen::Index>(numFeatures));
-    rays.prevRays.resize(static_cast<Eigen::Index>(numFeatures));
+    if(maxInliers > RANSAC_MIN_INLIERS){
+        size_t writeIdx = 0;
+        epi.residual = epi.scratch.transpose() * tBest;
+        for(size_t readIdx = 0; readIdx < numFeatures; readIdx++){
+            auto d = epi.residual(static_cast<Eigen::Index>(readIdx));
+            if(d < ransacTau){
+                if(writeIdx != readIdx){
+                    activeFeatures[writeIdx] = activeFeatures[readIdx];
+                    epi.currRays.col(static_cast<Eigen::Index>(writeIdx));
+                }
+                writeIdx++;
+            }
+        }
+        activeFeatures.resize(writeIdx);
+        epi.currRays.conservativeResize(static_cast<Eigen::Index>(writeIdx));
+    }else{
+        maxInliers = 0;
+    }    
 
-    undistort(rays.xPrev, rays.yPrev, rays.prevRays, numFeatures);
-    undistort(rays.xCurr, rays.yCurr, rays.prevRays, numFeatures);
+    return maxInliers;
 }
 
 void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, Eigen::Matrix3Xf &ptUndist, size_t count){
@@ -156,13 +227,14 @@ void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, 
     float cy = K(1, 2);
     float fxInv = 1.0f / K(0, 0);
     float fyInv = 1.0f / K(1, 1);
+    // START VECTORIZE
     for(size_t i = 0; i < count; i++){
         float xd = (xDist[i] - cx) * fxInv;
         float yd = (yDist[i] = cy) * fyInv;
         float x = xd;
         float y = yd;
 
-        for(int iter = 0; iter < UNDISTORT_COUNT; iter++){
+        for(int iter = 0; iter < UNDISTORT_ITERS; iter++){
             float r2 = x * x + y * x;
             float r4 = r2 * r2;
             float xy = x * y;
@@ -179,7 +251,10 @@ void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, 
         ptUndist(1, static_cast<Eigen::Index>(i)) = y;
         ptUndist(2, static_cast<Eigen::Index>(i)) = 1.0f;
     }
+    // END VECTORIZE
 }
+
+
 
 }
 
