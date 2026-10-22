@@ -3,6 +3,7 @@
 #include <optional>
 #include <cmath>
 #include <utility>
+#include <vector>
 
 #include <eigen3/Eigen/Dense>
 
@@ -12,13 +13,13 @@
 
 namespace PoolSLAM{
 
-size_t HfTracker::trackAndExtract(const uint8_t *curBuffer, double timestamp, const std::optional<Eigen::Matrix3d> &R){
+size_t HfTracker::trackAndExtract(const uint8_t *curBuffer, double timestamp, const std::optional<Eigen::Matrix3f> &R){
     if(curBuffer == nullptr){
         return false;
     }
     const bool usingPrior = R.has_value();
     if(!activeFeatures.empty()){
-        Eigen::Matrix3d prior;
+        Eigen::Matrix3f prior;
         if(usingPrior){
             prior = K * (*R) * KInv;
         }
@@ -42,7 +43,8 @@ size_t HfTracker::trackAndExtract(const uint8_t *curBuffer, double timestamp, co
     }
 }
 
-FORCE_INLINE bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curBuffer, Eigen::Vector2d &ptEst){
+
+FORCE_INLINE bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst){
     const double ptLower = RADIUS + 1;
     const double ptUpperX = static_cast<double>(wImage) - RADIUS - 2;
     const double ptUpperY = static_cast<double>(hImage) - RADIUS - 2;
@@ -101,7 +103,7 @@ FORCE_INLINE bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const 
     return true;
 }
 
-FORCE_INLINE int16_t HfTracker::bilinear(const uint8_t *curBuffer, Eigen::Vector2d pt){
+FORCE_INLINE int16_t HfTracker::bilinear(const uint8_t *curBuffer, Eigen::Vector2f &pt){
     float x0 = static_cast<float>(std::floor(pt.x()));
     float y0 = static_cast<float>(std::floor(pt.y()));
 
@@ -126,6 +128,57 @@ FORCE_INLINE int16_t HfTracker::bilinear(const uint8_t *curBuffer, Eigen::Vector
     (w10 * curBuffer[(y + 1) * wImage + x]) + (w11 * curBuffer[(y + 1) * wImage + x + 1]);
 
     return static_cast<int16_t>(pixel) >> 16;
+}
+
+size_t HfTracker::RANSAC(){
+    size_t numFeatures = activeFeatures.size();
+    rays.xCurr.resize(numFeatures);
+    rays.xPrev.resize(numFeatures);
+    rays.yCurr.resize(numFeatures);
+    rays.yPrev.resize(numFeatures);
+    // Unpack AoS to SoA
+    for(size_t i = 0; i < numFeatures; i++){
+        rays.xCurr[i] = activeFeatures[i].ptCurr.x();
+        rays.yCurr[i] = activeFeatures[i].ptCurr.y();
+        rays.xPrev[i] = activeFeatures[i].ptPrev.x();
+        rays.yPrev[i] = activeFeatures[i].ptPrev.y();
+    }
+
+    rays.currRays.resize(static_cast<Eigen::Index>(numFeatures));
+    rays.prevRays.resize(static_cast<Eigen::Index>(numFeatures));
+
+    undistort(rays.xPrev, rays.yPrev, rays.prevRays, numFeatures);
+    undistort(rays.xCurr, rays.yCurr, rays.prevRays, numFeatures);
+}
+
+void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, Eigen::Matrix3Xf &ptUndist, size_t count){
+    float cx = K(0, 2);
+    float cy = K(1, 2);
+    float fxInv = 1.0f / K(0, 0);
+    float fyInv = 1.0f / K(1, 1);
+    for(size_t i = 0; i < count; i++){
+        float xd = (xDist[i] - cx) * fxInv;
+        float yd = (yDist[i] = cy) * fyInv;
+        float x = xd;
+        float y = yd;
+
+        for(int iter = 0; iter < UNDISTORT_COUNT; iter++){
+            float r2 = x * x + y * x;
+            float r4 = r2 * r2;
+            float xy = x * y;
+            float radial = 1.0f + dist.k1 * r2 + dist.k2 * r4;
+
+            float xEst = x * radial + 2.0f * dist.p1 * xy + dist.p2 * (r2 + 2 * x * x);
+            float yEst = y * radial + 2.0f * dist.p2 * xy + dist.p1 * (r2 + 2 * y * y);
+
+            x -= (xEst - xd);
+            y -= (yEst - yd);
+        }
+
+        ptUndist(0, static_cast<Eigen::Index>(i)) = x;
+        ptUndist(1, static_cast<Eigen::Index>(i)) = y;
+        ptUndist(2, static_cast<Eigen::Index>(i)) = 1.0f;
+    }
 }
 
 }

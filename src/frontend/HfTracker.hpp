@@ -25,6 +25,16 @@ struct GridBucket{
     int youngerIdx = -1; 
 };
 
+// Describes the rays used for Epipolar geometry
+struct NormalizedRays{
+    // Structure of arrays for vectorized normalization
+    std::vector<float> xCurr, xPrev;
+    std::vector<float> yCurr, yPrev;
+
+    Eigen::Matrix3Xf currRays;
+    Eigen::Matrix3Xf prevRays;
+};
+
 class HfTracker{
 private:
     static constexpr int RADIUS = 5; // Radius of feature patch
@@ -33,6 +43,7 @@ private:
     static constexpr int ICLK_ITERS = 10; // Number of ICLK iterations
     static constexpr float ICLK_CONVERGENCE_THRESHOLD = 0.0009f; // ICLK convergence threashold
     static constexpr uint32_t ICLK_MAD_THRESHOLD = 20 * (TrackedFeature<RADIUS>::PATCH_SIZE) * (TrackedFeature<RADIUS>::PATCH_SIZE);
+    static constexpr int UNDISTORT_COUNT = 5;
 
     const size_t wImage, hImage; // Image pixel array height and width
 
@@ -41,7 +52,11 @@ private:
     size_t xMargin, yMargin; // Bucket start point
     size_t totalBuckets; // xBuckets * yBuckets
 
-    Eigen::Matrix3d K, KInv;
+    Eigen::Matrix3f K, KInv; 
+
+    Distortion dist; // Disortion coefficients
+
+    NormalizedRays rays; // Normalized rays to be used in RANSAC and Epipolar geometry calcs
 
     std::vector<TrackedFeature<RADIUS>> activeFeatures;
     std::vector<GridBucket> gridOccupancy; // Stores the age of the oldest frame in the grid
@@ -53,14 +68,20 @@ private:
     FORCE_INLINE size_t offsetFromBucket(size_t row, size_t column) const;
 
     // Matches the new feature to a feature in the previous frame using IC-LK
-    FORCE_INLINE bool alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curBuffer, Eigen::Vector2d &ptEst);
+    FORCE_INLINE bool alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst);
 
     // Biliner interpolation helper
-    FORCE_INLINE int16_t bilinear(const uint8_t *curBuffer, Eigen::Vector2d pt);
+    FORCE_INLINE int16_t bilinear(const uint8_t *curBuffer, Eigen::Vector2f &pt);
+
+    // RANSAC helper
+    size_t RANSAC();
+
+    // Undistort into ptUndist
+    void undistort(std::vector<float> &xDist, std::vector<float> &yDist, Eigen::Matrix3Xf &ptUndist, size_t count);
 
 public:
-    HfTracker(size_t w, size_t h, Eigen::Matrix3d &K_, size_t nFeaturesTarget = NUM_FEATURES_TARGET_DEFAULT) : 
-    wImage(w), hImage(h), K(K_){
+    HfTracker(size_t w, size_t h, Eigen::Matrix3d &K_, Distortion &dist_, size_t nFeaturesTarget = NUM_FEATURES_TARGET_DEFAULT) : 
+    wImage(w), hImage(h), K(K_), dist(dist_){
         const size_t wUsable = wImage - 2 * MIN_MARGIN;
         const size_t hUsable = hImage - 2 * MIN_MARGIN;
         const size_t targetArea = (hUsable * wUsable) / nFeaturesTarget;
@@ -80,7 +101,7 @@ public:
         KInv = K.inverse();
     };
 
-    size_t trackAndExtract(const uint8_t *curBuffer, double timestamp, const std::optional<Eigen::Matrix3d> &R);
+    size_t trackAndExtract(const uint8_t *curBuffer, double timestamp, const std::optional<Eigen::Matrix3f> &R);
 
 };
 
