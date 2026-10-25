@@ -23,6 +23,7 @@ add_library(poolslam_hal STATIC
     hal/DepthStream.cpp
     hal/Synchronizer.cpp
 )
+
 target_include_directories(poolslam_hal
     PUBLIC
         ${PUBLIC_INCLUDE_DIR}
@@ -31,6 +32,7 @@ target_include_directories(poolslam_hal
 target_link_libraries(poolslam_hal
     PUBLIC
         Eigen3::Eigen
+        gtsam
         Threads::Threads
     PRIVATE
         # poolslam_simd

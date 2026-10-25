@@ -4,7 +4,6 @@
 #include <cmath>
 #include <utility>
 #include <vector>
-#include <algorithm>
 
 #include <eigen3/Eigen/Dense>
 
@@ -14,7 +13,7 @@
 
 namespace PoolSLAM{
 
-size_t HfTracker::trackAndExtract(const uint8_t *curBuffer, double timestamp, const std::optional<Eigen::Matrix3f> &R){
+size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const std::optional<Eigen::Matrix3f> &R){
     if(curBuffer == nullptr){
         return false;
     }
@@ -42,10 +41,18 @@ size_t HfTracker::trackAndExtract(const uint8_t *curBuffer, double timestamp, co
         }
 
         activeFeatures.resize(survivorCount);
-
+        
+        // Run RANSAC to filter out outliers. 
         if(ransac(*R) != 0){
             handleTrackingError();
         }
+
+        // Remove features from buckets with too many features
+        enforceBucketDensity();
+
+        return activeFeatures.size();
+    }else{
+        return 0;
     }
 }
 
@@ -208,7 +215,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             if(d < ransacTau){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = activeFeatures[readIdx];
-                    epi.currRays.col(static_cast<Eigen::Index>(writeIdx));
+                    epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
                 }
                 writeIdx++;
             }
@@ -254,7 +261,65 @@ void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, 
     // END VECTORIZE
 }
 
+void HfTracker::enforceBucketDensity(){
+    bool featureRemoved = false;
+    keep.resize(activeFeatures.size(), true);
+    for(size_t i = 0; i < activeFeatures.size(); i++){
+        auto feature = activeFeatures[i];
+        auto &bucket = gridOccupancy[getBucketIdx(feature.ptCurr.x(), feature.ptCurr.y())];
+        
+        if(bucket.count == 0){
+            bucket.olderIdx = i;
+            bucket.count = 1;
+        }else if(bucket.count == 1){
+            // Remove features that are too close
+            auto distL2 = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).norm();
+            if(distL2 < MIN_DIST_IN_BUCKET){
+                if(activeFeatures[bucket.olderIdx].age < feature.age){
+                    keep[bucket.olderIdx] = false;
+                    bucket.olderIdx = i;
+                    featureRemoved = true;
+                }else{
+                    keep[i] = false;
+                    featureRemoved = true;
+                }
+            }else{
+                bucket.count = 2;
+                if(activeFeatures[bucket.olderIdx].age < feature.age){
+                    bucket.youngerIdx = bucket.olderIdx;
+                    bucket.olderIdx = i;
+                }else{
+                    bucket.youngerIdx = i;
+                }
+            }
+        }else{
+            featureRemoved = 0;
+            if(activeFeatures[bucket.olderIdx].age < feature.age){
+                keep[bucket.youngerIdx] = false;
+                bucket.youngerIdx = bucket.olderIdx;
+                bucket.olderIdx = i;
+            }else if(activeFeatures[bucket.youngerIdx].age < feature.age){
+                keep[bucket.youngerIdx] = false;
+                bucket.youngerIdx = i;
+            }else{
+                keep[i] = false;
+            }
+        }
+    }
 
-
+    // Compact active features
+    // It is ok that the indexes in gridOccupancy become in invalidas they are no longer needed
+    if(featureRemoved){
+        size_t writeIdx = 0;
+        for(size_t readIdx = 0; readIdx < activeFeatures.size(); readIdx++){
+            if(keep[readIdx]){
+                if(writeIdx != readIdx){
+                    activeFeatures[writeIdx] = activeFeatures[readIdx];
+                }
+                writeIdx++;
+            }
+        }
+    }
 }
 
+}

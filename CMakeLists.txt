@@ -7,6 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+include(FetchContent)
+
 option(BUILD_TESTING "Build unit and system test suites" ON)
 option(BUILD_BENCHMARKS "Build micro-benchmarks" OFF)
 option(BUILD_PYTHON_BINDINGS "Build Pybind11 Python wrappers" OFF)
@@ -26,6 +28,7 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(gtsam REQUIRED)
 
 add_subdirectory(src)
 

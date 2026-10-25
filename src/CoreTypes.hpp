@@ -2,10 +2,17 @@
 
 #include <cstdint>
 #include <array>
+#include <cstddef>
+#include <vector>
+#include <optional>
 
 #include <eigen3/Eigen/Dense>
 
 namespace PoolSLAM{
+
+struct Distortion{
+    float k1, k2, p1, p2;
+};
 
 template<int Radius>
 struct TrackedFeature{
@@ -28,8 +35,24 @@ struct TrackedFeature{
     Eigen::Matrix2f HInv{{0.0, 0.0}, {0.0, 0.0}};
 };
 
-struct Distortion{
-    float k1, k2, p1, p2;
+struct VisualMeasurement{
+    uint32_t landmarkId;
+    // gtsam::Point2 pt;  
+};
+
+struct BackendPacket{
+    size_t frameIdx;
+    double timestamp;
+    bool isKeyframe = false;
+
+    // Vector of visual measurements
+    std::vector<VisualMeasurement> visualMreasurements;
+    
+    // Preintegrated IMU measurements
+    // std::unique_ptr<gtsam::PreintegratedImuMeasurements> 
+
+    // Depth in meters
+    std::optional<double> depth;
 };
 
 

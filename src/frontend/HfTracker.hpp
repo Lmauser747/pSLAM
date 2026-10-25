@@ -53,6 +53,7 @@ private:
     static constexpr float RANSAC_TRANS_EP = 1e-6f; // Epislon to exclude translations which are too close to zero
     static constexpr float RANSAC_EARLY_CONSENSUS = 0.9f; // If consenus exceeds this threshold, exit RANSAC early
     static constexpr int RANSAC_MIN_INLIERS = 20; // Minimum inliers for RANSAC to exceed 
+    static constexpr float MIN_DIST_IN_BUCKET = 6.0; // Minimum distance between two points in a bucket
 
     const size_t wImage, hImage; // Image pixel array height and width
 
@@ -69,8 +70,9 @@ private:
 
     EpipolarData epi; // Normalized rays to be used in RANSAC and Epipolar geometry calcs
 
-    std::vector<TrackedFeature<RADIUS>> activeFeatures;
+    std::vector<TrackedFeature<RADIUS>> activeFeatures; // Stores all active features
     std::vector<GridBucket> gridOccupancy; // Stores the age of the oldest frame in the grid
+    std::vector<bool> keep; // Stores all the features to keep during bucket size enforcing
 
     std::minstd_rand ransacRng; // Random number generation for RANSAC
 
@@ -94,6 +96,9 @@ private:
 
     // Undistort into ptUndist
     void undistort(std::vector<float> &xDist, std::vector<float> &yDist, Eigen::Matrix3Xf &ptUndist, size_t count);
+
+    // Remove excess features from buckets
+    void enforceBucketDensity();
 
 public:
     HfTracker(size_t w, size_t h, Eigen::Matrix3d &K_, Distortion &dist_, size_t nFeaturesTarget = NUM_FEATURES_TARGET_DEFAULT) : 
@@ -123,8 +128,15 @@ public:
         ransacTau = 3.0f / (K(0, 0) + K(1, 1));
     };
 
-    size_t trackAndExtract(const uint8_t *curBuffer, double timestamp, const std::optional<Eigen::Matrix3f> &R);
+    // Tracks existing features with IC-LK, removes outliers with RANSAC, and retunrs the number of active features
+    size_t trackExistingFeatures(const uint8_t *curBuffer, const std::optional<Eigen::Matrix3f> &R);
 
+    // Replenishs drained buckets with new keypoints obtained via FAST + Shi-Thomasi
+    size_t replenishBuckets(const uint8_t *curBuffer);
+
+    FORCE_INLINE const std::vector<TrackedFeature<RADIUS>> &getActiveFeatures() const{
+        return activeFeatures;
+    }
 };
 
 FORCE_INLINE size_t HfTracker::getBucketIdx(double x, double y) const{
