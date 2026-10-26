@@ -9,6 +9,7 @@ target_link_libraries(system_tests PRIVATE
     GTest::gtest_main
     Eigen3::Eigen
     Threads::Threads
+    gtsam
 )
 
 gtest_discover_tests(system_tests TEST_PREFIX "system_tests_.")

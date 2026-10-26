@@ -1,3 +1,5 @@
+enable_language(C)
+
 # Common include directory for all internal src/ components
 set(INTERNAL_INCLUDE_DIR $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
 set(PUBLIC_INCLUDE_DIR $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
@@ -32,11 +34,14 @@ target_include_directories(poolslam_hal
 target_link_libraries(poolslam_hal
     PUBLIC
         Eigen3::Eigen
-        gtsam
         Threads::Threads
     PRIVATE
         # poolslam_simd
+        gtsam
+        simde::simde
 )
+
+
 
 # --- 3. Frontend Target (Tracking / Odometry) ---[cite: 8]
 # add_library(poolslam_frontend STATIC

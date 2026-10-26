@@ -9,6 +9,7 @@ target_link_libraries(unit_tests_hal PRIVATE
     GTest::gtest_main
     Eigen3::Eigen
     Threads::Threads
+    gtsam
 )
 
 #[[

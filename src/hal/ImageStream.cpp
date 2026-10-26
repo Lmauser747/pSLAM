@@ -32,7 +32,7 @@ bool ImageStream::pushFrame(uint8_t *rawPixels, double timestamp){
     }
 
     // Copy to frame buffer
-    std::memcpy(copyTarget->arr.data(), rawPixels, imW * imH);
+    std::memcpy(copyTarget->arr.data(), rawPixels, size_t(imW * imH));
     copyTarget->timestamp = timestamp;
 
     {

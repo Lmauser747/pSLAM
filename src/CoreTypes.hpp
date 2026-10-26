@@ -5,8 +5,11 @@
 #include <cstddef>
 #include <vector>
 #include <optional>
+#include <memory>
 
 #include <eigen3/Eigen/Dense>
+#include <gtsam/geometry/Point2.h>
+#include <gtsam/navigation/ImuFactor.h>
 
 namespace PoolSLAM{
 
@@ -37,7 +40,7 @@ struct TrackedFeature{
 
 struct VisualMeasurement{
     uint32_t landmarkId;
-    // gtsam::Point2 pt;  
+    gtsam::Point2 pt;  
 };
 
 struct BackendPacket{
@@ -49,7 +52,7 @@ struct BackendPacket{
     std::vector<VisualMeasurement> visualMreasurements;
     
     // Preintegrated IMU measurements
-    // std::unique_ptr<gtsam::PreintegratedImuMeasurements> 
+    std::unique_ptr<gtsam::PreintegratedImuMeasurements> imuDelta;
 
     // Depth in meters
     std::optional<double> depth;

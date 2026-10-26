@@ -19,7 +19,7 @@ namespace PoolSLAM{
 
 class DepthStream{
 private:
-    static constexpr int DEFAULT_DEPTH_BUFFER_SIZE = 500;
+    static constexpr size_t DEFAULT_DEPTH_BUFFER_SIZE = 500;
     static constexpr std::chrono::milliseconds WAIT_TIMEOUT{100}; // Maximum wait for valid data
     static constexpr double MAX_DIFF = 0.2; // Maximum gap between timestamps for interpolation
     static constexpr double MIN_DIFF = 1e-6; // Minimum gap between timestamps for interpolation
@@ -27,7 +27,7 @@ private:
 
 
     std::deque<Depth> depthBuffer; // Ring buffer for depth data
-    const int maxSize; // Maximum size of the ring buffer before it begins overwriting
+    const size_t maxSize; // Maximum size of the ring buffer before it begins overwriting
 
     std::mutex m_depthBuffer; // Mutex to control access to depthBuffer
     std::condition_variable c_depthBuffer; // Condition variable for new data
@@ -37,7 +37,7 @@ private:
     
     bool fastPush(const Depth &depth); // Function to quickly move data into the ring buffer   
 public:
-    DepthStream(int bufferSize = DEFAULT_DEPTH_BUFFER_SIZE) : maxSize(bufferSize){}
+    DepthStream(size_t bufferSize = DEFAULT_DEPTH_BUFFER_SIZE) : maxSize(bufferSize){}
 
     bool pushDepth(const Depth &depth); // Pushes depth into the ring buffer in a thread safe manner
     std::optional<Depth> getInterDepth(double targetTime); // Gets interpolated depth from the buffer at target time
@@ -91,7 +91,7 @@ private:
     static constexpr std::chrono::milliseconds DEFAULT_TIMEOUT{100};
     static constexpr int MAX_MISSED_FRAMES = 3;
 
-    const int maxQueueSize; // Maximum size of the ready queue
+    const size_t maxQueueSize; // Maximum size of the ready queue
     const size_t poolCapacity; // Number of PixelArrays allocated in the pool
     const int imW, imH; // Width and height of the image in pixels
 
@@ -106,7 +106,7 @@ private:
     int missedFrames = 0;
 
 public:
-    ImageStream(int w, int h, int maxReadyQueueSize = DEFAULT_MAX_QUEUE_SIZE, size_t poolCap = DEFAULT_POOL_CAPACITY) : 
+    ImageStream(int w, int h, size_t maxReadyQueueSize = DEFAULT_MAX_QUEUE_SIZE, size_t poolCap = DEFAULT_POOL_CAPACITY) : 
     maxQueueSize(maxReadyQueueSize), poolCapacity(poolCap), imW(w), imH(h){
         imPool.resize(poolCapacity);
         for(size_t i = 0; i < poolCapacity; i++){
