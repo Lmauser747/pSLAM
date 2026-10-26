@@ -22,8 +22,8 @@ namespace PoolSLAM{
 
 struct GridBucket{
     uint8_t count = 0;
-    int olderIdx = -1;
-    int youngerIdx = -1; 
+    size_t olderIdx;
+    size_t youngerIdx; 
 };
 
 // Describes the data used for Epipolar geometry
@@ -54,6 +54,7 @@ private:
     static constexpr float RANSAC_EARLY_CONSENSUS = 0.9f; // If consenus exceeds this threshold, exit RANSAC early
     static constexpr int RANSAC_MIN_INLIERS = 20; // Minimum inliers for RANSAC to exceed 
     static constexpr float MIN_DIST_IN_BUCKET = 6.0; // Minimum distance between two points in a bucket
+    static constexpr int FAST_THRESHOLD = 9;
 
     const size_t wImage, hImage; // Image pixel array height and width
 
@@ -73,6 +74,7 @@ private:
     std::vector<TrackedFeature<RADIUS>> activeFeatures; // Stores all active features
     std::vector<GridBucket> gridOccupancy; // Stores the age of the oldest frame in the grid
     std::vector<bool> keep; // Stores all the features to keep during bucket size enforcing
+    std::vector<Eigen::Vector2i> fastPoints; // Scratch buffer to store all the fast points inside a given bucket
 
     std::minstd_rand ransacRng; // Random number generation for RANSAC
 
@@ -83,7 +85,7 @@ private:
     FORCE_INLINE size_t getBucketIdx(double x, double y) const;
 
     // Gets the offset within the image array for a given bucket
-    FORCE_INLINE size_t offsetFromBucket(size_t row, size_t column) const;
+    FORCE_INLINE size_t offsetFromBucket(size_t bucket) const;
 
     // Matches the new feature to a feature in the previous frame using IC-LK
     FORCE_INLINE bool alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst);
@@ -99,6 +101,15 @@ private:
 
     // Remove excess features from buckets
     void enforceBucketDensity();
+
+    // Find all the FAST keypoints in a given bucket and store them in fastPoints
+    size_t getFast(const uint8_t *curBuffer, size_t bucketOffset);
+
+    // Get the best keypoint out of the FAST points using Shi-Tomasi
+    std::optional<Eigen::Vector2i> bestKp(const uint8_t *curBuffer);
+
+    // Calculates gradient and Hessian and then adds to activeFeatures array. If Hessian is degenerate, do not add feature
+    bool addKp(const uint8_t *curBuffer, Eigen::Vector2i &kp);
 
 public:
     HfTracker(size_t w, size_t h, Eigen::Matrix3d &K_, Distortion &dist_, size_t nFeaturesTarget = NUM_FEATURES_TARGET_DEFAULT) : 
@@ -145,7 +156,9 @@ FORCE_INLINE size_t HfTracker::getBucketIdx(double x, double y) const{
     return row * bCols + col;
 }
 
-FORCE_INLINE size_t HfTracker::offsetFromBucket(size_t row, size_t col) const{
+FORCE_INLINE size_t HfTracker::offsetFromBucket(size_t bucketIdx) const{
+    size_t col = bucketIdx % bCols;
+    size_t row = (bucketIdx - col) / bRows;
     return ((yMargin + row * hBucket) * wImage + (xMargin + col * wBucket));
 }
 

@@ -15,7 +15,8 @@ namespace PoolSLAM{
 
 size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const std::optional<Eigen::Matrix3f> &R){
     if(curBuffer == nullptr){
-        return false;
+        handleTrackingError();
+        return 0;
     }
     const bool usingPrior = R.has_value();
     // Run IC-LK if we have previous features to track
@@ -45,6 +46,7 @@ size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const std::opt
         // Run RANSAC to filter out outliers. 
         if(ransac(*R) != 0){
             handleTrackingError();
+            return 0;
         }
 
         // Remove features from buckets with too many features
@@ -54,6 +56,29 @@ size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const std::opt
     }else{
         return 0;
     }
+}
+
+size_t HfTracker::replenishBuckets(const uint8_t *curBuffer){
+    if(curBuffer == nullptr){
+        return 0;
+    }
+    size_t bucketsReplenished = 0;
+    
+    for(size_t bucket = 0;  bucket < gridOccupancy.size(); bucket++){
+        if(gridOccupancy[bucket].count == 0){
+            auto offset = offsetFromBucket(bucket);
+            fastPoints.clear();
+            getFast(curBuffer, offset);
+            auto kpCanidate = bestKp(curBuffer);
+            if(!kpCanidate.has_value()){
+                continue;
+            }
+            if(!addKp(curBuffer, *kpCanidate)){
+                bucketsReplenished++;
+            }
+        }
+    }
+    return bucketsReplenished;
 }
 
 
