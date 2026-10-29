@@ -7,6 +7,7 @@
 #include <cmath>
 #include <algorithm>
 #include <random>
+#include <array>
 
 #include <eigen3/Eigen/Dense>
 
@@ -54,7 +55,10 @@ private:
     static constexpr float RANSAC_EARLY_CONSENSUS = 0.9f; // If consenus exceeds this threshold, exit RANSAC early
     static constexpr int RANSAC_MIN_INLIERS = 20; // Minimum inliers for RANSAC to exceed 
     static constexpr float MIN_DIST_IN_BUCKET = 6.0; // Minimum distance between two points in a bucket
-    static constexpr int FAST_THRESHOLD = 9;
+    static constexpr uint8_t FAST_THRESHOLD = 20; // Threshold for FAST keypoint detection
+    static constexpr float ST_THRESHOLD = 30.0f; // Minimum Shi-Tomasi score of canidate feature
+    static constexpr int ST_PATCH_SIZE = 7; // Width and height of patch for Shi-Thomasi gradient computation
+    static constexpr float MIN_BUCKET_OCCUPANCY = 0.5;
 
     const size_t wImage, hImage; // Image pixel array height and width
 
@@ -74,7 +78,10 @@ private:
     std::vector<TrackedFeature<RADIUS>> activeFeatures; // Stores all active features
     std::vector<GridBucket> gridOccupancy; // Stores the age of the oldest frame in the grid
     std::vector<bool> keep; // Stores all the features to keep during bucket size enforcing
+
     std::vector<Eigen::Vector2i> fastPoints; // Scratch buffer to store all the fast points inside a given bucket
+    const ptrdiff_t w_;
+    const std::array<ptrdiff_t, 16> fastOffsets; // Offsets for FAST circle
 
     std::minstd_rand ransacRng; // Random number generation for RANSAC
 
@@ -113,7 +120,12 @@ private:
 
 public:
     HfTracker(size_t w, size_t h, Eigen::Matrix3d &K_, Distortion &dist_, size_t nFeaturesTarget = NUM_FEATURES_TARGET_DEFAULT) : 
-    wImage(w), hImage(h), K(K_), dist(dist_){
+    wImage(w), hImage(h), K(K_), dist(dist_), w_(static_cast<ptrdiff_t>(wImage)), fastOffsets{
+            -3 + 0 * w_, -3 + 1 * w_, -2 + 2 * w_, -1 + 3 * w_, 
+            0 + 3 * w_, 1 + 3 * w_, 2 + 2 * w_, 3+ 1 * w_,
+            3 + 0 * w_, 3 + (-1) * w_, 2 + (-2) * w_, 1 + (-3) * w_,
+            0 + -3 * w_, -1 + (-3) * w_, -2 + (-2) * w_, -3 + (-1) * w_
+        }{
         const size_t wUsable = wImage - 2 * MIN_MARGIN;
         const size_t hUsable = hImage - 2 * MIN_MARGIN;
         const size_t targetArea = (hUsable * wUsable) / nFeaturesTarget;
@@ -129,7 +141,7 @@ public:
 
         gridOccupancy.resize(totalBuckets);
         activeFeatures.reserve(totalBuckets * 2);
-
+        
         KInv = K.inverse();
 
         // Always seed the RNG with 0
@@ -137,6 +149,8 @@ public:
 
         // 1.5 / (average focal length)
         ransacTau = 3.0f / (K(0, 0) + K(1, 1));
+
+        
     };
 
     // Tracks existing features with IC-LK, removes outliers with RANSAC, and retunrs the number of active features
