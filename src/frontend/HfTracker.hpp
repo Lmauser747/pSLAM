@@ -13,6 +13,8 @@
 
 #include <CoreTypes.hpp>
 
+
+// idgaf about MSVC
 #if defined(__GNUC__) || defined(__clang__)
   #define FORCE_INLINE inline __attribute__((always_inline))
 #else
@@ -23,8 +25,8 @@ namespace PoolSLAM{
 
 struct GridBucket{
     uint8_t count = 0;
-    size_t olderIdx;
-    size_t youngerIdx; 
+    uint32_t olderIdx = UINT32_MAX;
+    uint32_t youngerIdx = UINT32_MAX; 
 };
 
 // Describes the data used for Epipolar geometry
@@ -38,7 +40,7 @@ struct EpipolarData{
 
     Eigen::Matrix3Xf scratch; // Scratch space to hold intermediate values
 
-    Eigen::Vector3f residual; // Residual for inliear/outlier checking
+    Eigen::VectorXf residual; // Residual for inliear/outlier checking
 };
 
 class HfTracker{
@@ -77,7 +79,9 @@ private:
 
     std::vector<TrackedFeature<RADIUS>> activeFeatures; // Stores all active features
     std::vector<GridBucket> gridOccupancy; // Stores the age of the oldest frame in the grid
-    std::vector<bool> keep; // Stores all the features to keep during bucket size enforcing
+    std::vector<uint8_t> keep; // Stores all the features to keep during bucket size enforcing
+    // Note: Using uint8_t for keep is better than bool. std::vector<bool> requires bitmasks for eac access
+    // which can be slow
 
     std::vector<Eigen::Vector2i> fastPoints; // Scratch buffer to store all the fast points inside a given bucket
     const ptrdiff_t w_;
@@ -97,10 +101,10 @@ private:
     FORCE_INLINE size_t offsetFromBucket(size_t bucket) const;
 
     // Matches the new feature to a feature in the previous frame using IC-LK
-    FORCE_INLINE bool alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst);
+    bool alignFeatureICLK(TrackedFeature<RADIUS> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst);
 
     // Biliner interpolation helper
-    FORCE_INLINE int16_t bilinear(const uint8_t *curBuffer, Eigen::Vector2f &pt);
+    int16_t bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt);
 
     // Does RANSAC on the active features using R as the IMU prior
     int ransac(const Eigen::Matrix3f &R);
@@ -121,7 +125,7 @@ private:
     bool addKp(const uint8_t *curBuffer, Eigen::Vector2i &kp);
 
 public:
-    HfTracker(size_t w, size_t h, Eigen::Matrix3d &K_, Distortion &dist_, size_t nFeaturesTarget = NUM_FEATURES_TARGET_DEFAULT) : 
+    HfTracker(size_t w, size_t h, const Eigen::Matrix3f &K_, const Distortion &dist_, size_t nFeaturesTarget = NUM_FEATURES_TARGET_DEFAULT) : 
     wImage(w), hImage(h), K(K_), dist(dist_), w_(static_cast<ptrdiff_t>(wImage)), fastOffsets{
             -3 + 0 * w_, -3 + 1 * w_, -2 + 2 * w_, -1 + 3 * w_, 
             0 + 3 * w_, 1 + 3 * w_, 2 + 2 * w_, 3+ 1 * w_,
@@ -133,9 +137,9 @@ public:
         const size_t targetArea = (hUsable * wUsable) / nFeaturesTarget;
         const size_t idealSideSize = static_cast<size_t>((std::sqrt(static_cast<float>(targetArea))));
 
-        wBucket = std::max(static_cast<size_t>(16), ((idealSideSize + 8) / 16) / 16);
+        wBucket = std::max(static_cast<size_t>(16), ((idealSideSize + 8) / 16) * 16);
         bCols = wUsable / wBucket;
-        bRows = std::max(1u, static_cast<uint32_t>(std::round(nFeaturesTarget / bCols)));
+        bRows = std::max(1u, static_cast<uint32_t>(std::round(static_cast<float>(nFeaturesTarget) / static_cast<float>(bCols))));
         hBucket = hUsable / bRows;
         xMargin = (wImage - (bCols * wBucket)) / 2;
         yMargin = (hImage - (bRows * hBucket)) / 2;
@@ -152,7 +156,10 @@ public:
         // 1.5 / (average focal length)
         ransacTau = 3.0f / (K(0, 0) + K(1, 1));
 
-        
+        epi.currRays.resize(static_cast<Eigen::Index>(totalBuckets * 2));
+        epi.prevRays.resize(static_cast<Eigen::Index>(totalBuckets * 2));
+        epi.scratch.resize(static_cast<Eigen::Index>(totalBuckets * 2));
+        epi.residual.resize(static_cast<Eigen::Index>(totalBuckets * 2));
     };
 
     // Tracks existing features with IC-LK, removes outliers with RANSAC, and retunrs the number of active features
@@ -167,14 +174,14 @@ public:
 };
 
 FORCE_INLINE size_t HfTracker::getBucketIdx(double x, double y) const{
-    const size_t col = static_cast<size_t>((x - static_cast<double>(xMargin) / static_cast<double>(wBucket)));
+    const size_t col = static_cast<size_t>((x - static_cast<double>(xMargin)) / static_cast<double>(wBucket));
     const size_t row = static_cast<size_t>((y - static_cast<double>(yMargin)) / static_cast<double>(hBucket));
     return row * bCols + col;
 }
 
 FORCE_INLINE size_t HfTracker::offsetFromBucket(size_t bucketIdx) const{
     size_t col = bucketIdx % bCols;
-    size_t row = (bucketIdx - col) / bRows;
+    size_t row = (bucketIdx - col) / bCols;
     return ((yMargin + row * hBucket) * wImage + (xMargin + col * wBucket));
 }
 

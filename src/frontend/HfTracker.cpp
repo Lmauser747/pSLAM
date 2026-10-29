@@ -11,7 +11,6 @@
 
 #include "frontend/HfTracker.hpp"
 #include "CoreTypes.hpp"
-#include "simd/simd_wrappers.hpp"
 
 namespace PoolSLAM{
 
@@ -90,7 +89,7 @@ size_t HfTracker::replenishBuckets(const uint8_t *curBuffer){
 }
 
 
-FORCE_INLINE bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst){
+bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst){
     const double ptLower = RADIUS + 1;
     const double ptUpperX = static_cast<double>(wImage) - RADIUS - 2;
     const double ptUpperY = static_cast<double>(hImage) - RADIUS - 2;
@@ -151,7 +150,7 @@ FORCE_INLINE bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const 
     return true;
 }
 
-FORCE_INLINE int16_t HfTracker::bilinear(const uint8_t *curBuffer, Eigen::Vector2f &pt){
+int16_t HfTracker::bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt){
     float x0 = static_cast<float>(std::floor(pt.x()));
     float y0 = static_cast<float>(std::floor(pt.y()));
 
@@ -200,10 +199,10 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
     epi.residual.resize(static_cast<Eigen::Index>(numFeatures));
 
     undistort(epi.xPrev, epi.yPrev, epi.prevRays, numFeatures);
-    undistort(epi.xCurr, epi.yCurr, epi.prevRays, numFeatures);
+    undistort(epi.xCurr, epi.yCurr, epi.currRays, numFeatures);
 
     // Rotate the rays from the previous frame to the current frame
-    epi.scratch.noalias() = R * epi.prevRays;
+    epi.scratch.noalias() = R * epi.prevRays.leftCols(numFeatures);
 
     // cross the rays from the current frame with the rays from the old frame
     for(size_t i = 0; i < numFeatures; i++){
@@ -223,7 +222,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             continue;
         }
         t = t.normalized();
-        epi.residual = epi.scratch.transpose() * t;
+        epi.residual = epi.scratch.leftCols(numFeatures).transpose() * t;
         int inliers = 0;
         // START VECTORIZE
         for(size_t i = 0; i < numFeatures; i++){
@@ -242,7 +241,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
 
     if(maxInliers > RANSAC_MIN_INLIERS){
         size_t writeIdx = 0;
-        epi.residual = epi.scratch.transpose() * tBest;
+        epi.residual = epi.scratch.leftCols(numFeatures).transpose() * tBest;
         for(size_t readIdx = 0; readIdx < numFeatures; readIdx++){
             auto d = epi.residual(static_cast<Eigen::Index>(readIdx));
             if(d < ransacTau){
@@ -297,7 +296,7 @@ void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, 
 void HfTracker::enforceBucketDensity(){
     bool featureRemoved = false;
     keep.resize(activeFeatures.size(), true);
-    for(size_t i = 0; i < activeFeatures.size(); i++){
+    for(uint32_t i = 0; i < activeFeatures.size(); i++){
         auto feature = activeFeatures[i];
         auto &bucket = gridOccupancy[getBucketIdx(feature.ptCurr.x(), feature.ptCurr.y())];
         
