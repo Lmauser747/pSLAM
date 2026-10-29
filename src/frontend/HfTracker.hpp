@@ -156,9 +156,9 @@ public:
         // 1.5 / (average focal length)
         ransacTau = 3.0f / (K(0, 0) + K(1, 1));
 
-        epi.currRays.resize(static_cast<Eigen::Index>(totalBuckets * 2));
-        epi.prevRays.resize(static_cast<Eigen::Index>(totalBuckets * 2));
-        epi.scratch.resize(static_cast<Eigen::Index>(totalBuckets * 2));
+        epi.currRays.resize(3, static_cast<Eigen::Index>(totalBuckets * 2));
+        epi.prevRays.resize(3, static_cast<Eigen::Index>(totalBuckets * 2));
+        epi.scratch.resize(3, static_cast<Eigen::Index>(totalBuckets * 2));
         epi.residual.resize(static_cast<Eigen::Index>(totalBuckets * 2));
     };
 

@@ -35,29 +35,29 @@ target_link_libraries(poolslam_hal
     PUBLIC
         Eigen3::Eigen
         Threads::Threads
-    PRIVATE
-        # poolslam_simd
-        gtsam
-        simde::simde
 )
 
 
 
 # --- 3. Frontend Target (Tracking / Odometry) ---[cite: 8]
-# add_library(poolslam_frontend STATIC
-#     frontend/feature_tracker.cpp
-# )
-# target_include_directories(poolslam_frontend
-#     PUBLIC
-#         ${PUBLIC_INCLUDE_DIR}
-#         ${INTERNAL_INCLUDE_DIR}
-# )
-# target_link_libraries(poolslam_frontend
-#     PUBLIC
-#         poolslam_hal
-#         poolslam_simd
-#         Eigen3::Eigen
-# )
+add_library(poolslam_frontend STATIC
+    frontend/ReplenishHfFeatures.cpp
+    frontend/TrackHfFeatures.cpp
+)
+target_include_directories(poolslam_frontend
+    PUBLIC
+        ${PUBLIC_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+target_link_libraries(poolslam_frontend
+    PUBLIC
+        poolslam_hal
+        Eigen3::Eigen
+    PRIVATE
+        # poolslam_simd
+        gtsam
+        simde::simde
+)
 
 # --- 4. Backend Target (Factor Graph / Optimization) ---[cite: 8]
 # find_package(GTSAM REQUIRED)
