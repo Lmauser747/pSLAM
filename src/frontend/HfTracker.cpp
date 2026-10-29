@@ -416,7 +416,6 @@ size_t HfTracker::getFast(const uint8_t *curBuffer, size_t bucketOffset){
 std::optional<Eigen::Vector2i> HfTracker::bestKp(const uint8_t *curBuffer){
     // Initialize the gradients with one extra pixel on each size to make Sobel filter easier
     int Ixx, Iyy, Ixy;
-    const size_t stride = TrackedFeature<RADIUS + 1>::NUM_PIXELS;
     float bestEigenvalue  = 0;
     Eigen::Vector2i bestPt;
     for(auto kp : fastPoints){
@@ -462,6 +461,44 @@ std::optional<Eigen::Vector2i> HfTracker::bestKp(const uint8_t *curBuffer){
     }else{
         return bestPt;
     }
+}
+
+bool HfTracker::addKp(const uint8_t *curBuffer, Eigen::Vector2i &kp){
+    TrackedFeature<RADIUS> feature;
+    constexpr size_t PATCH_SIZE = static_cast<size_t>(TrackedFeature<RADIUS>::PATCH_SIZE);
+    feature.id = nextId;
+    nextId++;
+
+    feature.ptCurr = kp;
+    feature.ptPrev = kp;
+
+    ptrdiff_t xPt = static_cast<ptrdiff_t>(kp.x());
+    ptrdiff_t yPt = static_cast<ptrdiff_t>(kp.y());
+
+    // Top left of the grid
+    const uint8_t *topLeft = curBuffer + (yPt - RADIUS) * static_cast<ptrdiff_t>(wImage) + (xPt - RADIUS);
+
+    // Find the patch around the keypoint and the gradient within the patch
+    for(size_t y = 0; y < PATCH_SIZE; y++){
+        const size_t patchRowOffset = PATCH_SIZE * y;
+        const uint8_t *rowPtr = topLeft + y * wImage;
+        for(size_t x = 0; x < PATCH_SIZE; x++){
+            const size_t flatIdx = patchRowOffset + x;
+            feature.patch[flatIdx] =*(rowPtr + x);
+
+            feature.xGrad[flatIdx] = (2 * (*(rowPtr + x - 1) - *(rowPtr + x + 1)) +
+                *(rowPtr + wImage + x - 1) + *(rowPtr - wImage + x - 1) - 
+                *(rowPtr + wImage + x + 1) - *(rowPtr - wImage + x - 1));
+                
+            feature.yGrad[flatIdx] = (2 * *(rowPtr - wImage + x) - *(rowPtr + wImage + x) +
+                *(rowPtr - wImage + x - 1) + *(rowPtr - wImage + x + 1) -
+                *(rowPtr + wImage + x - 1) + *(rowPtr + wImage + x + 1));
+        }
+    }
+
+    activeFeatures.push_back(feature);
+
+    return true;
 }
 
 }

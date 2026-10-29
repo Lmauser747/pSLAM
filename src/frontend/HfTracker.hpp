@@ -58,7 +58,7 @@ private:
     static constexpr uint8_t FAST_THRESHOLD = 20; // Threshold for FAST keypoint detection
     static constexpr float ST_THRESHOLD = 30.0f; // Minimum Shi-Tomasi score of canidate feature
     static constexpr int ST_PATCH_SIZE = 7; // Width and height of patch for Shi-Thomasi gradient computation
-    static constexpr float MIN_BUCKET_OCCUPANCY = 0.5;
+    static constexpr float MIN_BUCKET_OCCUPANCY = 0.5; // Minimum number of buckets occupied after replesshment before an error
 
     const size_t wImage, hImage; // Image pixel array height and width
 
@@ -82,6 +82,8 @@ private:
     std::vector<Eigen::Vector2i> fastPoints; // Scratch buffer to store all the fast points inside a given bucket
     const ptrdiff_t w_;
     const std::array<ptrdiff_t, 16> fastOffsets; // Offsets for FAST circle
+
+    uint32_t nextId = 0; // id to assign to next keypoint
 
     std::minstd_rand ransacRng; // Random number generation for RANSAC
 
