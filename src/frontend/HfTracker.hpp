@@ -156,14 +156,21 @@ public:
         // 1.5 / (average focal length)
         ransacTau = 3.0f / (K(0, 0) + K(1, 1));
 
-        epi.currRays.resize(3, static_cast<Eigen::Index>(totalBuckets * 2));
-        epi.prevRays.resize(3, static_cast<Eigen::Index>(totalBuckets * 2));
-        epi.scratch.resize(3, static_cast<Eigen::Index>(totalBuckets * 2));
-        epi.residual.resize(static_cast<Eigen::Index>(totalBuckets * 2));
+        size_t maxFeatures = totalBuckets * 2;
+
+        epi.currRays.resize(3, static_cast<Eigen::Index>(maxFeatures));
+        epi.prevRays.resize(3, static_cast<Eigen::Index>(maxFeatures));
+        epi.scratch.resize(3, static_cast<Eigen::Index>(maxFeatures));
+        epi.residual.resize(static_cast<Eigen::Index>(maxFeatures));
+
+        epi.xCurr.resize(maxFeatures);
+        epi.yCurr.resize(maxFeatures);
+        epi.xPrev.resize(maxFeatures);
+        epi.yPrev.resize(maxFeatures);
     };
 
     // Tracks existing features with IC-LK, removes outliers with RANSAC, and retunrs the number of active features
-    size_t trackExistingFeatures(const uint8_t *curBuffer, const std::optional<Eigen::Matrix3f> &R);
+    size_t trackExistingFeatures(const uint8_t *curBuffer, const Eigen::Matrix3f &R);
 
     // Replenishs drained buckets with new keypoints obtained via FAST + Shi-Thomasi
     size_t replenishBuckets(const uint8_t *curBuffer);

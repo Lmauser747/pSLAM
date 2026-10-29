@@ -53,7 +53,7 @@ private:
     static constexpr std::chrono::milliseconds WAIT_TIMEOUT{100}; // Maximum wait for valid data
     static constexpr double MIN_DIFF = 1e-6; // Minimum gap between interpolated samples
     static constexpr double DB_EPSILON = 1e-5; // Epsilon for comparing doubles
-    static constexpr int MAX_MISSED_FRAMES = 10; // Max number of missed frames before sensor is disabled
+    static constexpr int MAX_MISSED_FRAMES = 3; // Max number of missed frames before sensor is disabled
 
     std::vector<Imu> imuBuffer; // Flat buffer for IMU data
     size_t head = 0; // Index of front of buffer

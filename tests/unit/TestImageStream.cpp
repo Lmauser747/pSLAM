@@ -26,6 +26,7 @@ protected:
     std::vector<uint8_t> createPattern(uint8_t val) {
         return std::vector<uint8_t>(kFrameBytes, val);
     }
+    
 };
 
 // ============================================================================

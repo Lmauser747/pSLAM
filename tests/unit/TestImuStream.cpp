@@ -26,6 +26,8 @@ protected:
         sample.t = static_cast<float>(val);
         return sample;
     }
+
+    static constexpr int MAX_MISSES = 3;
 };
 
 // ============================================================================
@@ -512,7 +514,7 @@ TEST_F(ImuStreamTest, healthSingleTimeoutTransitionsToDegraded) {
 
 // Verifies up to 10 consecutive timeouts maintain DEGRADED (strictly greater threshold)
 TEST_F(ImuStreamTest, healthConsecutiveMissesAccumulate) {
-    for (size_t i = 0; i < 10; i++) {
+    for (size_t i = 0; i < MAX_MISSES; i++) {
         PoolSLAM::SensorHealth health = stream.waitUntil(10.0 + (static_cast<double>(i) * 0.05));
         EXPECT_EQ(health, PoolSLAM::SensorHealth::DEGRADED);
         EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
@@ -521,7 +523,7 @@ TEST_F(ImuStreamTest, healthConsecutiveMissesAccumulate) {
 
 // Verifies timely arrival of strictly newer data restores health from DEGRADED back to ACTIVE
 TEST_F(ImuStreamTest, healthRecoveryDegradedToActive) {
-    for (size_t i = 0; i < 5; i++) {
+    for (size_t i = 0; i < MAX_MISSES - 1; i++) {
         EXPECT_EQ(stream.waitUntil(10.0 + (static_cast<double>(i) * 0.05)), PoolSLAM::SensorHealth::DEGRADED);
     }
     EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
@@ -536,7 +538,7 @@ TEST_F(ImuStreamTest, healthRecoveryDegradedToActive) {
 
 // Verifies exceeding 10 misses latches into DISABLED strictly on the 11th miss
 TEST_F(ImuStreamTest, healthMaxMissThresholdLatchesDisabled) {
-    for (size_t i = 0; i < 10; i++) {
+    for (size_t i = 0; i < MAX_MISSES; i++) {
         EXPECT_EQ(stream.waitUntil(1.00 + (static_cast<double>(i) * 0.05)), PoolSLAM::SensorHealth::DEGRADED);
         EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
     }
@@ -549,7 +551,7 @@ TEST_F(ImuStreamTest, healthMaxMissThresholdLatchesDisabled) {
 
 // Verifies DISABLED is a strict one-way latch that rejects recovery despite arrival of newer data
 TEST_F(ImuStreamTest, healthDisabledOneWayLatch) {
-    for (size_t i = 0; i < 11; i++) {
+    for (size_t i = 0; i < MAX_MISSES + 1; i++) {
         stream.waitUntil(1.00 + (static_cast<double>(i) * 0.05));
     }
     ASSERT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DISABLED);
@@ -564,7 +566,7 @@ TEST_F(ImuStreamTest, healthDisabledOneWayLatch) {
 
 // Verifies waitUntil bypasses condition variable delays once DISABLED
 TEST_F(ImuStreamTest, healthDisabledFastBypass) {
-    for (size_t i = 0; i < 11; i++) {
+    for (size_t i = 0; i < MAX_MISSES + 1; i++) {
         stream.waitUntil(1.00 + (static_cast<double>(i) * 0.05));
     }
     ASSERT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DISABLED);

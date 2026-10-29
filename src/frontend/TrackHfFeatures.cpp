@@ -1,9 +1,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
-#include <optional>
 #include <utility>
 #include <cmath>
+#include <algorithm>
 
 #include <eigen3/Eigen/Dense>
 
@@ -12,26 +12,20 @@
 
 namespace PoolSLAM{
 
-size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const std::optional<Eigen::Matrix3f> &R){
+size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const Eigen::Matrix3f &R){
     if(curBuffer == nullptr){
         handleTrackingError();
         return 0;
     }
-    const bool usingPrior = R.has_value();
+
     // Run IC-LK if we have previous features to track
     if(!activeFeatures.empty()){
-        Eigen::Matrix3f prior;
-        if(usingPrior){
-            prior = K * (*R) * KInv;
-        }
+        Eigen::Matrix3f prior = K * R * KInv;
 
         size_t survivorCount = 0;
         for(size_t i = 0; i < activeFeatures.size(); i++){
-            auto feature = activeFeatures[i];
-            auto ptEst = feature.ptPrev;
-            if(usingPrior){
-                ptEst = (prior * ptEst.homogeneous()).topRows(2);
-            }
+            auto &feature = activeFeatures[i];
+            Eigen::Vector2f ptEst = (prior * feature.ptCurr.homogeneous()).hnormalized();
             if(alignFeatureICLK(feature, curBuffer, ptEst)){
                 if(survivorCount != i){
                     activeFeatures[survivorCount] = std::move(activeFeatures[i]);
@@ -43,7 +37,7 @@ size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const std::opt
         activeFeatures.resize(survivorCount);
         
         // Run RANSAC to filter out outliers. 
-        if(ransac(*R) != 0){
+        if(ransac(R) == 0){
             handleTrackingError();
             return 0;
         }
@@ -75,13 +69,14 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
         
         // Compute the accumulated error
         // START VECTORIZE
-        for(int dy = 0; dy <= RADIUS; dy++){
-            for(int dx = 0; dx <= RADIUS; dx++){
-                size_t idx = static_cast<size_t>((dy + RADIUS) * feature.PATCH_SIZE + (dx + 5));
+        for(int dy = -RADIUS; dy <= RADIUS; dy++){
+            for(int dx = -RADIUS; dx <= RADIUS; dx++){
+                size_t idx = static_cast<size_t>((dy + RADIUS) * feature.PATCH_SIZE + (dx + RADIUS));
+                Eigen::Vector2f offset{dy, dx};
 
-                int16_t sampleI = bilinear(curBuffer, ptEst);
+                int16_t sampleI = bilinear(curBuffer, ptEst + offset);
                 int16_t diff = sampleI - static_cast<int16_t>(feature.patch[idx]);
-                madError += static_cast<uint32_t>(std::abs(diff));
+                madError = static_cast<uint32_t>(std::abs(diff));
 
                 bX += static_cast<int32_t>(feature.xGrad[idx]) * diff;
                 bY += static_cast<int32_t>(feature.yGrad[idx]) * diff;
@@ -129,10 +124,10 @@ int16_t HfTracker::bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt)
     uint32_t yWeightC = 256u - yWeight;
 
     uint32_t w00, w01, w10, w11;
-    w00 = xWeight * yWeight;
+    w00 = xWeightC * yWeightC;
     w01 = xWeightC * yWeight;
     w10 = xWeight * yWeightC;
-    w11 = xWeightC * yWeightC;
+    w11 = xWeight * yWeight;
 
     size_t x, y;
     x = static_cast<size_t>(x0);
@@ -142,15 +137,14 @@ int16_t HfTracker::bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt)
     (w00 * curBuffer[y * wImage + x]) + (w01 * curBuffer[y * wImage + x + 1]) +
     (w10 * curBuffer[(y + 1) * wImage + x]) + (w11 * curBuffer[(y + 1) * wImage + x + 1]);
 
-    return static_cast<int16_t>(pixel) >> 16;
+    return static_cast<int16_t>(pixel >> 16);
 }
 
 int HfTracker::ransac(const Eigen::Matrix3f &R){
     const size_t numFeatures = activeFeatures.size();
-    epi.xCurr.resize(numFeatures);
-    epi.xPrev.resize(numFeatures);
-    epi.yCurr.resize(numFeatures);
-    epi.yPrev.resize(numFeatures);
+    if(numFeatures < 2){
+        return 0;
+    }
     // Unpack AoS to SoA
     // START VECTORIZE
     for(size_t i = 0; i < numFeatures; i++){
@@ -177,9 +171,9 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
     int maxInliers = 0;
     Eigen::Vector3f t, tBest;
     for(int iter = 0; iter < RANSAC_ITERS; iter++){
-        auto a = static_cast<Eigen::Index>(ransacRng() % numFeatures);
-        auto b = static_cast<Eigen::Index>(ransacRng() % numFeatures);
-        b = a == b ? b + 1 : b;
+        auto a = static_cast<Eigen::Index>((ransacRng() * numFeatures) >> 31);
+        auto b = static_cast<Eigen::Index>((ransacRng() * numFeatures) >> 31);
+        b = a == b ? (static_cast<size_t>(b) == numFeatures ? b - 1 : b + 1) : b;
         t = epi.scratch.col(a).cross(epi.scratch.col(b));
         if(t.norm() < RANSAC_TRANS_EP){
             continue;
@@ -209,7 +203,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             auto d = epi.residual(static_cast<Eigen::Index>(readIdx));
             if(d < ransacTau){
                 if(writeIdx != readIdx){
-                    activeFeatures[writeIdx] = activeFeatures[readIdx];
+                    activeFeatures[writeIdx] = std::move(activeFeatures[readIdx]);
                     epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
                 }
                 writeIdx++;
@@ -231,12 +225,12 @@ void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, 
     // START VECTORIZE
     for(size_t i = 0; i < count; i++){
         float xd = (xDist[i] - cx) * fxInv;
-        float yd = (yDist[i] = cy) * fyInv;
+        float yd = (yDist[i] - cy) * fyInv;
         float x = xd;
         float y = yd;
 
         for(int iter = 0; iter < UNDISTORT_ITERS; iter++){
-            float r2 = x * x + y * x;
+            float r2 = x * x + y * y;
             float r4 = r2 * r2;
             float xy = x * y;
             float radial = 1.0f + dist.k1 * r2 + dist.k2 * r4;
@@ -257,7 +251,8 @@ void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, 
 
 void HfTracker::enforceBucketDensity(){
     bool featureRemoved = false;
-    keep.resize(activeFeatures.size(), true);
+    std::fill(gridOccupancy.begin(), gridOccupancy.end(), GridBucket{0, 0, 0});
+    keep.assign(activeFeatures.size(), true);
     for(uint32_t i = 0; i < activeFeatures.size(); i++){
         auto feature = activeFeatures[i];
         auto &bucket = gridOccupancy[getBucketIdx(feature.ptCurr.x(), feature.ptCurr.y())];
@@ -287,7 +282,7 @@ void HfTracker::enforceBucketDensity(){
                 }
             }
         }else{
-            featureRemoved = 0;
+            featureRemoved = true;
             if(activeFeatures[bucket.olderIdx].age < feature.age){
                 keep[bucket.youngerIdx] = false;
                 bucket.youngerIdx = bucket.olderIdx;
@@ -308,11 +303,12 @@ void HfTracker::enforceBucketDensity(){
         for(size_t readIdx = 0; readIdx < activeFeatures.size(); readIdx++){
             if(keep[readIdx]){
                 if(writeIdx != readIdx){
-                    activeFeatures[writeIdx] = activeFeatures[readIdx];
+                    activeFeatures[writeIdx] = std::move(activeFeatures[readIdx]);
                 }
                 writeIdx++;
             }
         }
+        activeFeatures.resize(writeIdx);
     }
 }
 }
