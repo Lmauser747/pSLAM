@@ -113,7 +113,7 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
     return true;
 }
 
-int16_t HfTracker::bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt){
+int16_t HfTracker::bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const{
     float x0 = static_cast<float>(std::floor(pt.x()));
     float y0 = static_cast<float>(std::floor(pt.y()));
 

@@ -60,7 +60,8 @@ private:
     static constexpr uint8_t FAST_THRESHOLD = 20; // Threshold for FAST keypoint detection
     static constexpr float ST_THRESHOLD = 30.0f; // Minimum Shi-Tomasi score of canidate feature
     static constexpr int ST_PATCH_SIZE = 7; // Width and height of patch for Shi-Thomasi gradient computation
-    static constexpr float MIN_BUCKET_OCCUPANCY = 0.5; // Minimum number of buckets occupied after replesshment before an error
+    static constexpr float MIN_BUCKET_OCCUPANCY = 0.5f; // Minimum number of buckets occupied after replesshment before an error
+    static constexpr float HESSIAN_STABILITY_THRESHOLD = 0.1f; // Minimum absolute value of the determinant of the Hessian
 
     const size_t wImage, hImage; // Image pixel array height and width
 
@@ -100,11 +101,14 @@ private:
     // Gets the offset within the image array for a given bucket
     FORCE_INLINE size_t offsetFromBucket(size_t bucket) const;
 
+    // Gets the point at the top-left of the bucket
+    FORCE_INLINE Eigen::Vector2i topLeftBucket(size_t bucket) const;
+
     // Matches the new feature to a feature in the previous frame using IC-LK
     bool alignFeatureICLK(TrackedFeature<RADIUS> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst);
 
     // Biliner interpolation helper
-    int16_t bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt);
+    int16_t bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const;
 
     // Does RANSAC on the active features using R as the IMU prior
     int ransac(const Eigen::Matrix3f &R);
@@ -116,7 +120,7 @@ private:
     void enforceBucketDensity();
 
     // Find all the FAST keypoints in a given bucket and store them in fastPoints
-    size_t getFast(const uint8_t *curBuffer, size_t bucketOffset);
+    size_t getFast(const uint8_t *curBuffer, size_t bucket);
 
     // Get the best keypoint out of the FAST points using Shi-Tomasi
     std::optional<Eigen::Vector2i> bestKp(const uint8_t *curBuffer);
@@ -163,10 +167,12 @@ public:
         epi.scratch.resize(3, static_cast<Eigen::Index>(maxFeatures));
         epi.residual.resize(static_cast<Eigen::Index>(maxFeatures));
 
-        epi.xCurr.resize(maxFeatures);
-        epi.yCurr.resize(maxFeatures);
-        epi.xPrev.resize(maxFeatures);
-        epi.yPrev.resize(maxFeatures);
+        epi.xCurr.reserve(maxFeatures);
+        epi.yCurr.reserve(maxFeatures);
+        epi.xPrev.reserve(maxFeatures);
+        epi.yPrev.reserve(maxFeatures);
+
+        fastPoints.reserve(wBucket);
     };
 
     // Tracks existing features with IC-LK, removes outliers with RANSAC, and retunrs the number of active features
@@ -186,10 +192,16 @@ FORCE_INLINE size_t HfTracker::getBucketIdx(double x, double y) const{
     return row * bCols + col;
 }
 
-FORCE_INLINE size_t HfTracker::offsetFromBucket(size_t bucketIdx) const{
-    size_t col = bucketIdx % bCols;
-    size_t row = (bucketIdx - col) / bCols;
+FORCE_INLINE size_t HfTracker::offsetFromBucket(size_t bucket) const{
+    size_t col = bucket % bCols;
+    size_t row = (bucket - col) / bCols;
     return ((yMargin + row * hBucket) * wImage + (xMargin + col * wBucket));
+}
+
+FORCE_INLINE Eigen::Vector2i HfTracker::topLeftBucket(size_t bucket) const{
+    size_t col = bucket % bCols;
+    size_t row = (bucket - col) / bCols;
+    return {xMargin + col * wBucket, yMargin + row * hBucket};
 }
 
 }

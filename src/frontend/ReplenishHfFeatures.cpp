@@ -21,15 +21,13 @@ size_t HfTracker::replenishBuckets(const uint8_t *curBuffer){
     
     for(size_t bucket = 0;  bucket < gridOccupancy.size(); bucket++){
         if(gridOccupancy[bucket].count == 0){
-            auto offset = offsetFromBucket(bucket);
             fastPoints.clear();
-            getFast(curBuffer, offset);
+            getFast(curBuffer, bucket);
             auto kpCanidate = bestKp(curBuffer);
             if(!kpCanidate.has_value()){
                 continue;
             }
             if(addKp(curBuffer, *kpCanidate)){
-                gridOccupancy[bucket].count = 1;
                 bucketsOccipied++;
             }
         }else{
@@ -42,9 +40,12 @@ size_t HfTracker::replenishBuckets(const uint8_t *curBuffer){
     return bucketsOccipied;
 }
 
-size_t HfTracker::getFast(const uint8_t *curBuffer, size_t bucketOffset){
+size_t HfTracker::getFast(const uint8_t *curBuffer, size_t bucket){
+    auto bucketOffset = offsetFromBucket(bucket);
     std::array<uint8_t, 16> ring = {0};
     size_t nPts = 0;
+    Eigen::Vector2i topLeft = topLeftBucket(bucket);
+    // START VECTORIZE
     for(size_t y = 0; y < hBucket; y++){
         auto rowPtr = curBuffer + bucketOffset + y * wImage;
         for(size_t x = 0; x < wBucket; x++){
@@ -90,28 +91,31 @@ size_t HfTracker::getFast(const uint8_t *curBuffer, size_t bucketOffset){
                 darkerRun &= darker32 >> i;
             }
 
-            if(((brighterRun || darkerRun) & 0xFFFF)!= 0){
-                fastPoints.push_back(Eigen::Vector2i(static_cast<int>(x), static_cast<int>(y)));
+            // END VECTORIZE
+
+            if(((brighterRun | darkerRun) & 0xFFFF)!= 0){
+                fastPoints.push_back(topLeft + Eigen::Vector2i(static_cast<int>(x), static_cast<int>(y)));
                 nPts++;
             }
         }
     }
-
+    
     return nPts;
 }
 
 std::optional<Eigen::Vector2i> HfTracker::bestKp(const uint8_t *curBuffer){
     // Initialize the gradients with one extra pixel on each size to make Sobel filter easier
-    int Ixx = 0;
-    int Iyy = 0;
-    int Ixy = 0;
     float bestEigenvalue  = 0;
     Eigen::Vector2i bestPt;
     for(auto kp : fastPoints){
         size_t xPt = static_cast<size_t>(kp.x());
         size_t yPt = static_cast<size_t>(kp.y());
 
-        auto topLeft = curBuffer + yPt * wImage + xPt; // Top left of patch
+        constexpr size_t PATCH_RADIUS = (ST_PATCH_SIZE - 1) / 2;
+        auto topLeft = curBuffer + (yPt - PATCH_RADIUS)  * wImage + xPt + PATCH_RADIUS; // Top left of patch
+        int Ixx = 0;
+        int Iyy = 0;
+        int Ixy = 0;
 
         // Find structure tensor
         for(Eigen::Index y = 0; y < ST_PATCH_SIZE; y++){
@@ -119,11 +123,11 @@ std::optional<Eigen::Vector2i> HfTracker::bestKp(const uint8_t *curBuffer){
             for(Eigen::Index x = 0; x < ST_PATCH_SIZE; x++){
                 int Ix = (2 * (*(rowPtr + x - 1) - *(rowPtr + x + 1)) +
                 *(rowPtr + wImage + x - 1) + *(rowPtr - wImage + x - 1) - 
-                *(rowPtr + wImage + x + 1) - *(rowPtr - wImage + x - 1));
+                *(rowPtr + wImage + x + 1) - *(rowPtr - wImage + x + 1));
                 
-                int Iy = (2 * *(rowPtr - wImage + x) - *(rowPtr + wImage + x) +
+                int Iy = (2 * (*(rowPtr - wImage + x) - *(rowPtr + wImage + x)) +
                 *(rowPtr - wImage + x - 1) + *(rowPtr - wImage + x + 1) -
-                *(rowPtr + wImage + x - 1) + *(rowPtr + wImage + x + 1));
+                *(rowPtr + wImage + x - 1) - *(rowPtr + wImage + x + 1));
 
                 Ixx += Ix * Ix;
                 Iyy += Iy * Iy;
@@ -167,6 +171,11 @@ bool HfTracker::addKp(const uint8_t *curBuffer, Eigen::Vector2i &kp){
     // Top left of the grid
     const uint8_t *topLeft = curBuffer + (yPt - RADIUS) * static_cast<ptrdiff_t>(wImage) + (xPt - RADIUS);
 
+    int Tx, Ty;
+    int Txx = 0;
+    int Tyy = 0;
+    int Txy = 0;
+
     // Find the patch around the keypoint and the gradient within the patch
     for(size_t y = 0; y < PATCH_SIZE; y++){
         const size_t patchRowOffset = PATCH_SIZE * y;
@@ -175,15 +184,34 @@ bool HfTracker::addKp(const uint8_t *curBuffer, Eigen::Vector2i &kp){
             const size_t flatIdx = patchRowOffset + x;
             feature.patch[flatIdx] =*(rowPtr + x);
 
-            feature.xGrad[flatIdx] = (2 * (*(rowPtr + x - 1) - *(rowPtr + x + 1)) +
+            Tx = (2 * (*(rowPtr + x - 1) - *(rowPtr + x + 1)) +
                 *(rowPtr + wImage + x - 1) + *(rowPtr - wImage + x - 1) - 
-                *(rowPtr + wImage + x + 1) - *(rowPtr - wImage + x - 1));
+                *(rowPtr + wImage + x + 1) - *(rowPtr - wImage + x + 1));
                 
-            feature.yGrad[flatIdx] = (2 * *(rowPtr - wImage + x) - *(rowPtr + wImage + x) +
+            Ty = (2 * (*(rowPtr - wImage + x) - *(rowPtr + wImage + x)) +
                 *(rowPtr - wImage + x - 1) + *(rowPtr - wImage + x + 1) -
-                *(rowPtr + wImage + x - 1) + *(rowPtr + wImage + x + 1));
+                *(rowPtr + wImage + x - 1) - *(rowPtr + wImage + x + 1));
+
+            feature.xGrad[flatIdx] = Tx;
+            feature.yGrad[flatIdx] = Ty;
+
+            Txx += Tx * Tx;
+            Tyy += Ty * Ty;
+            Txy += Tx * Ty;
         }
     }
+
+    Eigen::Matrix2f H{
+        {static_cast<float>(Txx), static_cast<float>(Txy)},
+        {static_cast<float>(Txy), static_cast<float>(Tyy)}
+    };
+
+    // Make sure Hessian is not unstable
+    if(std::abs(H.determinant()) < HESSIAN_STABILITY_THRESHOLD){
+        return false;
+    }
+
+    feature.HInv = H.inverse();
 
     activeFeatures.push_back(feature);
 
