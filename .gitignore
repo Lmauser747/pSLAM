@@ -73,3 +73,6 @@ Testing/
 
 # venv
 .venv
+
+# test outputs
+unit.txt

@@ -48,14 +48,14 @@ private:
     static constexpr int RADIUS = 5; // Radius of feature patch
     static constexpr size_t MIN_MARGIN = 16; // Minimum bucket margin in pixels
     static constexpr size_t NUM_FEATURES_TARGET_DEFAULT = 200; // Target number of features
-    static constexpr int ICLK_ITERS = 10; // Number of ICLK iterations
+    static constexpr int ICLK_ITERS = 12; // Number of ICLK iterations
     static constexpr float ICLK_CONVERGENCE_THRESHOLD = 0.0009f; // ICLK convergence threashold
-    static constexpr uint32_t ICLK_MAD_THRESHOLD = 20 * (TrackedFeature<RADIUS>::PATCH_SIZE) * (TrackedFeature<RADIUS>::PATCH_SIZE);
+    static constexpr uint32_t ICLK_MAD_THRESHOLD = 5 * (TrackedFeature<RADIUS>::PATCH_SIZE) * (TrackedFeature<RADIUS>::PATCH_SIZE);
     static constexpr int UNDISTORT_ITERS = 5; // Number of times to undistort each point
     static constexpr int RANSAC_ITERS = 20; // Number of random samples to inspect in RANSAC
     static constexpr float RANSAC_TRANS_EP = 1e-6f; // Epislon to exclude translations which are too close to zero
     static constexpr float RANSAC_EARLY_CONSENSUS = 0.9f; // If consenus exceeds this threshold, exit RANSAC early
-    static constexpr int RANSAC_MIN_INLIERS = 20; // Minimum inliers for RANSAC to exceed 
+    static constexpr int RANSAC_MIN_INLIERS = 20; // Minimum inliers for RANSAC to succeed 
     static constexpr float MIN_DIST_IN_BUCKET = 6.0; // Minimum distance between two points in a bucket
     static constexpr uint8_t FAST_THRESHOLD = 20; // Threshold for FAST keypoint detection
     static constexpr float ST_THRESHOLD = 30.0f; // Minimum Shi-Tomasi score of canidate feature
@@ -93,7 +93,9 @@ private:
     std::minstd_rand ransacRng; // Random number generation for RANSAC
 
     // Handle errors in the tracking
-    void handleTrackingError();
+    void handleTrackingError(){
+        return;
+    }
 
     // Gets the index of a bucket given sub-pixel coordinates
     FORCE_INLINE size_t getBucketIdx(double x, double y) const;
@@ -127,6 +129,9 @@ private:
 
     // Calculates gradient and Hessian and then adds to activeFeatures array. If Hessian is degenerate, do not add feature
     bool addKp(const uint8_t *curBuffer, Eigen::Vector2i &kp);
+
+    // Make the unit test class a friend for testing
+    friend class HfTrackerTest;
 
 public:
     HfTracker(size_t w, size_t h, const Eigen::Matrix3f &K_, const Distortion &dist_, size_t nFeaturesTarget = NUM_FEATURES_TARGET_DEFAULT) : 

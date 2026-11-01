@@ -36,8 +36,8 @@ size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const Eigen::M
 
         activeFeatures.resize(survivorCount);
         
-        // Run RANSAC to filter out outliers. 
-        if(ransac(R) == 0){
+        // Run RANSAC to filter out outliers.
+        if(ransac(R) < RANSAC_MIN_INLIERS){
             handleTrackingError();
             return 0;
         }
@@ -60,6 +60,7 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
     uint32_t madError = 0;
 
     for(int iter = 0; iter < ICLK_ITERS; iter++){
+        madError = 0;
         if((ptEst.x() < ptLower) || (ptEst.y() < ptLower) || (ptEst.x() > ptUpperX) || (ptEst.y() > ptUpperY)){
             return false;
         }
@@ -72,11 +73,11 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
         for(int dy = -RADIUS; dy <= RADIUS; dy++){
             for(int dx = -RADIUS; dx <= RADIUS; dx++){
                 size_t idx = static_cast<size_t>((dy + RADIUS) * feature.PATCH_SIZE + (dx + RADIUS));
-                Eigen::Vector2f offset{dy, dx};
+                const Eigen::Vector2f offset{dx, dy};
 
                 int16_t sampleI = bilinear(curBuffer, ptEst + offset);
                 int16_t diff = sampleI - static_cast<int16_t>(feature.patch[idx]);
-                madError = static_cast<uint32_t>(std::abs(diff));
+                madError += static_cast<uint32_t>(std::abs(diff));
 
                 bX += static_cast<int32_t>(feature.xGrad[idx]) * diff;
                 bY += static_cast<int32_t>(feature.yGrad[idx]) * diff;
@@ -89,7 +90,7 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
         Eigen::Vector2f delta = feature.HInv * b;
 
         // Update estimate based on the gradient
-        ptEst -= delta;
+        ptEst += delta;
 
         // Check for convergence
         float stepMagSqaured = delta.dot(delta);
@@ -124,18 +125,18 @@ int16_t HfTracker::bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt)
     uint32_t yWeightC = 256u - yWeight;
 
     uint32_t w00, w01, w10, w11;
-    w00 = xWeightC * yWeightC;
+    w00 = xWeight * yWeight;
     w01 = xWeightC * yWeight;
     w10 = xWeight * yWeightC;
-    w11 = xWeight * yWeight;
+    w11 = xWeightC * yWeightC;
 
     size_t x, y;
     x = static_cast<size_t>(x0);
     y = static_cast<size_t>(y0);
 
     uint32_t pixel = 
-    (w00 * curBuffer[y * wImage + x]) + (w01 * curBuffer[y * wImage + x + 1]) +
-    (w10 * curBuffer[(y + 1) * wImage + x]) + (w11 * curBuffer[(y + 1) * wImage + x + 1]);
+    (w11 * curBuffer[y * wImage + x]) + (w10 * curBuffer[y * wImage + x + 1]) +
+    (w01 * curBuffer[(y + 1) * wImage + x]) + (w00 * curBuffer[(y + 1) * wImage + x + 1]);
 
     return static_cast<int16_t>(pixel >> 16);
 }
@@ -160,33 +161,54 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
 
     // Rotate the rays from the previous frame to the current frame
     epi.scratch.noalias() = R * epi.prevRays.leftCols(numFeatures);
+    
+
+    // Check for pure rotation
+    bool isPureRotation = true;
+
+    for(Eigen::Index i = 0; i < static_cast<Eigen::Index>(numFeatures); i++){
+        auto p = epi.scratch.col(i).hnormalized();
+        auto q = epi.prevRays.col(i).hnormalized();
+        if((p - q).norm() > ransacTau){
+            isPureRotation = false;
+            break;
+        }
+    }
+
+    if(isPureRotation){
+        return static_cast<int>(numFeatures);
+    }
 
     // cross the rays from the current frame with the rays from the old frame
-    for(size_t i = 0; i < numFeatures; i++){
-        auto iInt = static_cast<Eigen::Index>(i); // Why does Eigen use int for indexing??
-        Eigen::Vector3f qi = epi.scratch.col(iInt);
-        epi.scratch.col(iInt) = qi.cross(epi.currRays.col(iInt));
+    for(Eigen::Index i = 0; i < static_cast<Eigen::Index>(numFeatures); i++){
+        Eigen::Vector3f qi = epi.scratch.col(i);
+        epi.scratch.col(i) = qi.cross(epi.currRays.col(i));
     }
+
     // epi.scratch is the matrix M in the RASAC calcs
     int maxInliers = 0;
     Eigen::Vector3f t, tBest;
     for(int iter = 0; iter < RANSAC_ITERS; iter++){
+        // Select two distinct reandom numbers
         auto a = static_cast<Eigen::Index>((ransacRng() * numFeatures) >> 31);
         auto b = static_cast<Eigen::Index>((ransacRng() * numFeatures) >> 31);
         b = a == b ? (static_cast<size_t>(b) == numFeatures ? b - 1 : b + 1) : b;
+
         t = epi.scratch.col(a).cross(epi.scratch.col(b));
         if(t.norm() < RANSAC_TRANS_EP){
             continue;
         }
         t = t.normalized();
         epi.residual = epi.scratch.leftCols(numFeatures).transpose() * t;
+
         int inliers = 0;
         // START VECTORIZE
         for(size_t i = 0; i < numFeatures; i++){
             auto d = std::abs(epi.residual(static_cast<Eigen::Index>(i)));
-            inliers = d < ransacTau ? inliers + 1 : inliers;
+            inliers = (d < ransacTau) ? inliers + 1 : inliers;
         }
         // END VECTORIZE
+        
         if(inliers > maxInliers){
             maxInliers = inliers;
             tBest = t;
@@ -210,9 +232,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             }
         }
         activeFeatures.resize(writeIdx);
-    }else{
-        maxInliers = 0;
-    }    
+    }
 
     return maxInliers;
 }
@@ -251,7 +271,7 @@ void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, 
 
 void HfTracker::enforceBucketDensity(){
     bool featureRemoved = false;
-    std::fill(gridOccupancy.begin(), gridOccupancy.end(), GridBucket{0, 0, 0});
+    std::fill(gridOccupancy.begin(), gridOccupancy.end(), GridBucket{0, UINT32_MAX, UINT32_MAX});
     keep.assign(activeFeatures.size(), true);
     for(uint32_t i = 0; i < activeFeatures.size(); i++){
         auto feature = activeFeatures[i];
