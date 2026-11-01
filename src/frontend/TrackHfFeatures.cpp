@@ -56,7 +56,9 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
     const double ptUpperX = static_cast<double>(wImage) - RADIUS - 2;
     const double ptUpperY = static_cast<double>(hImage) - RADIUS - 2;
 
-    bool converged = false;
+    // Converged is set to true for now because we eliminated the coinvergence early exit. 
+    // Bring back later if we have performance issues
+    bool converged = true;
     uint32_t madError = 0;
 
     for(int iter = 0; iter < ICLK_ITERS; iter++){
@@ -93,11 +95,11 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
         ptEst += delta;
 
         // Check for convergence
-        float stepMagSqaured = delta.dot(delta);
-        if(stepMagSqaured < ICLK_CONVERGENCE_THRESHOLD){
-            converged =  true;
-            break;
-        }
+        // float stepMagSqaured = delta.dot(delta);
+        // if(stepMagSqaured < ICLK_CONVERGENCE_THRESHOLD){
+        //     converged =  true;
+        //     break;
+        // }
     }
 
     if(!converged || (madError > ICLK_MAD_THRESHOLD)){

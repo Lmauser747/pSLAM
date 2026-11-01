@@ -48,8 +48,8 @@ private:
     static constexpr int RADIUS = 5; // Radius of feature patch
     static constexpr size_t MIN_MARGIN = 16; // Minimum bucket margin in pixels
     static constexpr size_t NUM_FEATURES_TARGET_DEFAULT = 200; // Target number of features
-    static constexpr int ICLK_ITERS = 12; // Number of ICLK iterations
-    static constexpr float ICLK_CONVERGENCE_THRESHOLD = 0.0009f; // ICLK convergence threashold
+    static constexpr int ICLK_ITERS = 20; // Number of ICLK iterations
+    static constexpr float ICLK_CONVERGENCE_THRESHOLD = 0.0f; // ICLK convergence threashold
     static constexpr uint32_t ICLK_MAD_THRESHOLD = 5 * (TrackedFeature<RADIUS>::PATCH_SIZE) * (TrackedFeature<RADIUS>::PATCH_SIZE);
     static constexpr int UNDISTORT_ITERS = 5; // Number of times to undistort each point
     static constexpr int RANSAC_ITERS = 20; // Number of random samples to inspect in RANSAC
