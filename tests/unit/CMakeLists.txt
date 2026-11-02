@@ -16,6 +16,7 @@ target_link_libraries(unit_tests_hal PRIVATE
 # --- Frontend Unit Tests ---[cite: 8]
 add_executable(unit_tests_frontend
     TestTrackHfFeatures.cpp
+    TestReplenishHfFeatures.cpp
 )
 target_link_libraries(unit_tests_frontend PRIVATE
     poolslam_frontend

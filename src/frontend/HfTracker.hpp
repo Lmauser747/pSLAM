@@ -58,7 +58,7 @@ private:
     static constexpr int RANSAC_MIN_INLIERS = 20; // Minimum inliers for RANSAC to succeed 
     static constexpr float MIN_DIST_IN_BUCKET = 6.0; // Minimum squared distance between two points in a bucket
     static constexpr uint8_t FAST_THRESHOLD = 20; // Threshold for FAST keypoint detection
-    static constexpr float ST_THRESHOLD = 30.0f; // Minimum Shi-Tomasi score of canidate feature
+    static constexpr float ST_THRESHOLD = 500.0f; // Minimum Shi-Tomasi score of canidate feature
     static constexpr int ST_PATCH_SIZE = 7; // Width and height of patch for Shi-Thomasi gradient computation
     static constexpr float MIN_BUCKET_OCCUPANCY = 0.5f; // Minimum number of buckets occupied after replesshment before an error
     static constexpr float HESSIAN_STABILITY_THRESHOLD = 0.1f; // Minimum absolute value of the determinant of the Hessian
@@ -132,6 +132,7 @@ private:
 
     // Make the unit test class a friend for testing
     friend class HfTrackerTest;
+    friend class HfTrackerReplenishTest;
 
 public:
     HfTracker(size_t w, size_t h, const Eigen::Matrix3f &K_, const Distortion &dist_, size_t nFeaturesTarget = NUM_FEATURES_TARGET_DEFAULT) : 

@@ -112,7 +112,7 @@ std::optional<Eigen::Vector2i> HfTracker::bestKp(const uint8_t *curBuffer){
         size_t yPt = static_cast<size_t>(kp.y());
 
         constexpr size_t PATCH_RADIUS = (ST_PATCH_SIZE - 1) / 2;
-        auto topLeft = curBuffer + (yPt - PATCH_RADIUS)  * wImage + xPt + PATCH_RADIUS; // Top left of patch
+        auto topLeft = curBuffer + (yPt - PATCH_RADIUS)  * wImage + xPt - PATCH_RADIUS; // Top left of patch
         int Ixx = 0;
         int Iyy = 0;
         int Ixy = 0;
@@ -140,7 +140,7 @@ std::optional<Eigen::Vector2i> HfTracker::bestKp(const uint8_t *curBuffer){
         float b = static_cast<float>(Ixy);
         float c = static_cast<float>(Iyy);
 
-        float minEigenvalue = 0.5f * ((a + c) - std::sqrt((a - c) * (a - c) + + 4 * b * b));
+        float minEigenvalue = 0.5f * ((a + c) - std::sqrt((a - c) * (a - c) + 4 * b * b));
 
         if(minEigenvalue > bestEigenvalue){
             bestEigenvalue = minEigenvalue;
