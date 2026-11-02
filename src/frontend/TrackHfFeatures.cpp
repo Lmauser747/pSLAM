@@ -166,19 +166,34 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
     
 
     // Check for pure rotation
-    bool isPureRotation = true;
+    int pureRotations = 0;
 
     for(Eigen::Index i = 0; i < static_cast<Eigen::Index>(numFeatures); i++){
         auto p = epi.scratch.col(i).hnormalized();
-        auto q = epi.prevRays.col(i).hnormalized();
-        if((p - q).norm() > ransacTau){
-            isPureRotation = false;
-            break;
+        auto q = epi.currRays.col(i).hnormalized();
+        if((p - q).norm() <= ransacTau){
+            pureRotations++;
         }
     }
 
-    if(isPureRotation){
-        return static_cast<int>(numFeatures);
+    if(pureRotations >= RANSAC_MIN_INLIERS && pureRotations >= static_cast<int>(numFeatures / 2)){
+
+        size_t writeIdx = 0;
+        for(size_t readIdx = 0; readIdx < numFeatures; readIdx++){
+            auto i = static_cast<Eigen::Index>(readIdx);
+            auto p = epi.scratch.col(i).hnormalized();
+            auto q = epi.currRays.col(i).hnormalized();
+            if((p - q).norm() <= ransacTau){
+                if(writeIdx != readIdx){
+                    activeFeatures[writeIdx] = activeFeatures[readIdx];
+                }
+                writeIdx++;  
+            }
+        }
+
+        activeFeatures.resize(writeIdx);
+
+        return static_cast<int>(writeIdx);
     }
 
     // cross the rays from the current frame with the rays from the old frame
@@ -194,7 +209,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
         // Select two distinct reandom numbers
         auto a = static_cast<Eigen::Index>((ransacRng() * numFeatures) >> 31);
         auto b = static_cast<Eigen::Index>((ransacRng() * numFeatures) >> 31);
-        b = a == b ? (static_cast<size_t>(b) == numFeatures ? b - 1 : b + 1) : b;
+        b = a == b ? (static_cast<size_t>(b) == (numFeatures - 1) ? b - 1 : b + 1) : b;
 
         t = epi.scratch.col(a).cross(epi.scratch.col(b));
         if(t.norm() < RANSAC_TRANS_EP){
@@ -220,15 +235,15 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
         }
     }
 
-    if(maxInliers > RANSAC_MIN_INLIERS){
+    if(maxInliers >= RANSAC_MIN_INLIERS){
         size_t writeIdx = 0;
         epi.residual = epi.scratch.leftCols(numFeatures).transpose() * tBest;
         for(size_t readIdx = 0; readIdx < numFeatures; readIdx++){
             auto d = epi.residual(static_cast<Eigen::Index>(readIdx));
-            if(d < ransacTau){
+            if(std::abs(d) < ransacTau){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = std::move(activeFeatures[readIdx]);
-                    epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
+                    //epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
                 }
                 writeIdx++;
             }
@@ -286,13 +301,12 @@ void HfTracker::enforceBucketDensity(){
             // Remove features that are too close
             auto distL2 = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).norm();
             if(distL2 < MIN_DIST_IN_BUCKET){
+                featureRemoved = true;
                 if(activeFeatures[bucket.olderIdx].age < feature.age){
                     keep[bucket.olderIdx] = false;
                     bucket.olderIdx = i;
-                    featureRemoved = true;
                 }else{
                     keep[i] = false;
-                    featureRemoved = true;
                 }
             }else{
                 bucket.count = 2;
@@ -305,13 +319,22 @@ void HfTracker::enforceBucketDensity(){
             }
         }else{
             featureRemoved = true;
+            // Remove features that are too close
+            auto distOlderL2 = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).norm();
             if(activeFeatures[bucket.olderIdx].age < feature.age){
-                keep[bucket.youngerIdx] = false;
-                bucket.youngerIdx = bucket.olderIdx;
+                if(distOlderL2 < MIN_DIST_IN_BUCKET){
+                    keep[bucket.olderIdx] = false;
+                }else{
+                    keep[bucket.youngerIdx] = false;
+                }
                 bucket.olderIdx = i;
             }else if(activeFeatures[bucket.youngerIdx].age < feature.age){
-                keep[bucket.youngerIdx] = false;
-                bucket.youngerIdx = i;
+                if(distOlderL2 < MIN_DIST_IN_BUCKET){
+                    keep[i] = false;
+                }else{
+                    keep[bucket.youngerIdx] = false;
+                    bucket.youngerIdx = i;
+                }
             }else{
                 keep[i] = false;
             }
