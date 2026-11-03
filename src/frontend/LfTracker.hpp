@@ -1,3 +1,5 @@
+#pragma once
+
 #include <cstdint>
 #include <cstddef>
 #include <string>
@@ -6,23 +8,25 @@
 #include <condition_variable>
 #include <optional>
 #include <vector>
+#include <memory>
 
 #include <eigen3/Eigen/Dense>
 
 #include <CoreTypes.hpp>
-#include <descriptor/Orb.hpp>
+#include <descriptor/Qov.hpp>
 
 namespace PoolSLAM{
 
 struct LfTrackerConfig{
     size_t wImage, hImage; // Width and height of image
     size_t numBuckets; // Number of buckets for features to go in
-    
-    Eigen::Matrix3f K; // Camera matrix
+
+    const Eigen::Matrix3f K; // Camera matrix
     Distortion dist; // Distortion parameters
     
-    size_t targetFeatureCount; // Target number of ORB features per-frame
-    float fastThreshold = 20.0f; // Threshold for FAST in ORB
+    // Disabled right now because we aren't generating new features in LfTracker right now
+    // size_t targetFeatureCount; // Target number of QOV features per-frame
+    // float fastThreshold = 20.0f; // Threshold for FAST in QOV
 
     std::string vocabularyPath; // Path to binary file containing BoW vocabulary
     float minTfIdfScore; // Minimum score for TF-IDF
@@ -31,16 +35,20 @@ struct LfTrackerConfig{
     uint32_t RansacInliearThreshold = 20; // Minimum number of RANSAC inliers
     float minInliearRatio = 0.30f; // Minimum ratio of inlier to total landmarks
     float maxReprojectionError = 2.00f; // Maximum reprojection error from mathec frame to current frame
+
 };
+
 
 class LfTracker{
 private:
-    static constexpr int ST_RADIUS = 5;
-    static constexpr int ORB_RADIUS = 15;
+    static constexpr int FEATURE_RADIUS = 5; // Radius of the feature patch from HfTracker
+    static constexpr int QOV_RADIUS = 15; // Radius of the patched used by QOV
+
     const LfTrackerConfig config; // Class configuration
 
-    descriptor::FrameData frame; // Orb Descriptors in the current image
-    const descriptor::RoatedOrbPairs orbPairs; // Pairs of points for ORB compairisons
+    std::unique_ptr<uint8_t[]> localBuffer; // Local buffer to store image frame
+    descriptor::FrameData frame; // QOV Descriptors in the current image
+    const descriptor::RoatedQovPairs qovPairs; // Pairs of points for QOV compairisons
 
     std::optional<BackendLfPacket> stagedMatch; // Match staged for sending to backend
 
@@ -53,12 +61,17 @@ private:
 
     std::condition_variable c_passKeyframe; // Condition varaiable to signal new keyframe
 
+    // Blur the image with Gaussian blur kernel of radius 5
+    void blur();
+
 public:
     LfTracker(LfTrackerConfig c) : config(c), frame(config.numBuckets * 2),
-    orbPairs(config.wImage){}
+    qovPairs(config.wImage){
+
+    }
 
     // Function to pass keyframe from the frontend to the LfTracker
-    bool calculateDescriptors(uint64_t id, double timestamp, const uint8_t *curBuffer, const std::vector<TrackedFeature<ST_RADIUS>> &features);
+    bool passKeyframe(uint64_t id, double timestamp, const uint8_t *curBuffer, const std::vector<TrackedFeature<FEATURE_RADIUS>> &features);
     
     // Function to get the packet from the LfTracker to the backend through outPacket
     bool getMatch(BackendLfPacket &outPacket);

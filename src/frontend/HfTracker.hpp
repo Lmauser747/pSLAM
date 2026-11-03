@@ -45,6 +45,7 @@ struct EpipolarData{
     Eigen::VectorXf residual; // Residual for inliear/outlier checking
 };
 
+
 class HfTracker{
 private:
     static constexpr int RADIUS = 5; // Radius of feature patch
@@ -61,7 +62,7 @@ private:
     static constexpr float MIN_DIST_IN_BUCKET = 6.0; // Minimum squared distance between two points in a bucket
     static constexpr uint8_t FAST_THRESHOLD = 20; // Threshold for FAST keypoint detection
     static constexpr float ST_THRESHOLD = 500.0f; // Minimum Shi-Tomasi score of canidate feature
-    static constexpr int ST_PATCH_SIZE = 7; // Width and height of patch for Shi-Thomasi gradient computation
+    static constexpr int ST_PATCH_SIZE = 7; // Width and height of patch for Shi-Tomasi gradient computation
     static constexpr float MIN_BUCKET_OCCUPANCY = 0.5f; // Minimum number of buckets occupied after replesshment before an error
     static constexpr float HESSIAN_STABILITY_THRESHOLD = 0.1f; // Minimum absolute value of the determinant of the Hessian
 

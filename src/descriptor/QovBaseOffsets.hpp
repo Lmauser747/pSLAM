@@ -7,7 +7,7 @@ namespace descriptor{
 
 // Stored x1, y1, x2, y2
 // All taken from OpenCV ORB impelmentation
-constexpr std::array<int, 256*4> ORB_BASE_OFFSETS =
+constexpr std::array<int, 256*4> QOV_BASE_OFFSETS =
 {
     8,-3, 9,5/*mean (0), correlation (0)*/,
     4,2, 7,-12/*mean (1.12461e-05), correlation (0.0437584)*/,
