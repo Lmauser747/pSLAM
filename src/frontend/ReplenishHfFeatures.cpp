@@ -10,6 +10,7 @@
 
 #include "frontend/HfTracker.hpp"
 #include "CoreTypes.hpp"
+#include "simd/Fast.hpp"
 
 namespace PoolSLAM{
 
@@ -42,14 +43,22 @@ size_t HfTracker::replenishBuckets(const uint8_t *curBuffer){
 
 size_t HfTracker::getFast(const uint8_t *curBuffer, size_t bucket){
     auto bucketOffset = offsetFromBucket(bucket);
-    std::array<uint8_t, 16> ring = {0};
-    size_t nPts = 0;
     Eigen::Vector2i topLeft = topLeftBucket(bucket);
+    size_t nPts = 0;
+    #ifdef POOL_SLAM_SIMD
+    size_t lineWidth = 16;
+    #else
+    size_t lineWidth = 1
+    std::array<uint8_t, 16> ring = {0};
+    #endif
     // START VECTORIZE
     for(size_t y = 0; y < hBucket; y++){
         auto rowPtr = curBuffer + bucketOffset + y * wImage;
-        for(size_t x = 0; x < wBucket; x++){
+        for(size_t x = 0; x < wBucket; x += lineWidth){
             auto centerPtr = rowPtr + x;
+            #ifdef POOL_SLAM_SIMD
+            nPts += simd::fastLine16(centerPtr, topLeft + Eigen::Vector2i(x, y), fastOffsets, FAST_THRESHOLD, fastPoints);
+            #else
             auto center = *centerPtr;
 
             uint8_t upper = static_cast<uint8_t>(std::min(255, center + FAST_THRESHOLD));
@@ -91,14 +100,14 @@ size_t HfTracker::getFast(const uint8_t *curBuffer, size_t bucket){
                 darkerRun &= darker32 >> i;
             }
 
-            // END VECTORIZE
-
             if(((brighterRun | darkerRun) & 0xFFFF)!= 0){
                 fastPoints.push_back(topLeft + Eigen::Vector2i(static_cast<int>(x), static_cast<int>(y)));
                 nPts++;
             }
+            #endif
         }
     }
+    // END VECTORIZE
     
     return nPts;
 }

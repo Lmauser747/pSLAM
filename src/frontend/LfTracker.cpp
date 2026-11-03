@@ -1,15 +1,18 @@
 #include <atomic>
 #include <cstdint>
-#include <cstring>
+#include <vector>
 #include <mutex>
 #include <utility>
+#include <cstddef>
+#include <cmath>
 
 #include "frontend/LfTracker.hpp"
+#include "descriptor/Orb.hpp"
 #include "CoreTypes.hpp"
 
 namespace PoolSLAM{
 
-bool LfTracker::passKeyframe(uint64_t id, double timestamp, const uint8_t *curBuffer){
+bool LfTracker::calculateDescriptors(uint64_t id, double timestamp, const uint8_t *curBuffer, const std::vector<TrackedFeature<ST_RADIUS>> &features){
     // Check if tracker is busy
     if(busy.load(std::memory_order_relaxed)){
         return false;
@@ -17,12 +20,31 @@ bool LfTracker::passKeyframe(uint64_t id, double timestamp, const uint8_t *curBu
 
     {
         std::lock_guard<std::mutex> lock(m_passKeyframe);
+        frame.features.clear();
+        frame.id = id;
+        frame.timestamp = timestamp;
+        for(auto &feature : features){
+            uint32_t m01 = 0; // Vectical center of mass
+            uint32_t m10 = 0; // Horizontal center of mass
+            for(ptrdiff_t y = -ORB_RADIUS; y <= ORB_RADIUS; y++){
+                auto rowPtr  = curBuffer + static_cast<size_t>(y) * config.wImage;
+                for(ptrdiff_t x = -ORB_RADIUS; x <= ORB_RADIUS; x++){
+                    auto ptPtr = rowPtr + x;
+                    m10 += *(ptPtr) * x;
+                    m01 += *(ptPtr) * y;
+                }
+            }
 
-        curFrame.id = id;
-        curFrame.timestamp = timestamp;
-        // Copy frame to a local buffer
-        std::memcpy(localBuffer.get(), curBuffer, config.wImage * config.hImage);
-        busy.store(true, std::memory_order_relaxed);
+            // get the angle of the feature
+            auto theta = std::atan2(static_cast<double>(m01), static_cast<double>(m10));
+
+            Eigen::Vector2i pt = feature.ptCurr.cast<Eigen::Vector2i>();
+            auto centerPtr = curBuffer + static_cast<size_t>(pt.y()) * config.wImage + pt.x();
+
+            auto des = descriptor::generateDescriptor(centerPtr, orbPairs.offsetAtAngleRad(theta));
+
+            frame.addDes(des, pt);
+        }
     }
 
     c_passKeyframe.notify_all();

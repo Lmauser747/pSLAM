@@ -44,6 +44,10 @@ add_library(poolslam_frontend STATIC
     frontend/ReplenishHfFeatures.cpp
     frontend/TrackHfFeatures.cpp
 )
+target_compile_definitions(poolslam_frontend
+    PRIVATE
+        POOL_SLAM_SIMD
+)
 target_include_directories(poolslam_frontend
     PUBLIC
         ${PUBLIC_INCLUDE_DIR}
@@ -54,7 +58,6 @@ target_link_libraries(poolslam_frontend
         poolslam_hal
         Eigen3::Eigen
     PRIVATE
-        # poolslam_simd
         gtsam
         simde::simde
 )

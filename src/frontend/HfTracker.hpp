@@ -15,10 +15,12 @@
 
 
 // idgaf about MSVC
+#ifndef FORCE_INLINE
 #if defined(__GNUC__) || defined(__clang__)
   #define FORCE_INLINE inline __attribute__((always_inline))
 #else
   #define FORCE_INLINE inline
+#endif
 #endif
 
 namespace PoolSLAM{
@@ -187,9 +189,9 @@ public:
     // Replenishs drained buckets with new keypoints obtained via FAST + Shi-Thomasi
     size_t replenishBuckets(const uint8_t *curBuffer);
 
-    FORCE_INLINE const std::vector<TrackedFeature<RADIUS>> &getActiveFeatures() const{
-        return activeFeatures;
-    }
+    FORCE_INLINE const std::vector<TrackedFeature<RADIUS>> getActiveFeatures() const{return activeFeatures;}
+
+    FORCE_INLINE size_t getNumBuckets() const{return totalBuckets;}
 };
 
 FORCE_INLINE size_t HfTracker::getBucketIdx(double x, double y) const{

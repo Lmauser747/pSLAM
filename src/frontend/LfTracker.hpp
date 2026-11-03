@@ -1,21 +1,22 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
-#include <memory>
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <optional>
+#include <vector>
 
 #include <eigen3/Eigen/Dense>
 
 #include <CoreTypes.hpp>
+#include <descriptor/Orb.hpp>
 
 namespace PoolSLAM{
 
 struct LfTrackerConfig{
-    // Width and height of image
-    size_t wImage, hImage;
+    size_t wImage, hImage; // Width and height of image
+    size_t numBuckets; // Number of buckets for features to go in
     
     Eigen::Matrix3f K; // Camera matrix
     Distortion dist; // Distortion parameters
@@ -32,17 +33,14 @@ struct LfTrackerConfig{
     float maxReprojectionError = 2.00f; // Maximum reprojection error from mathec frame to current frame
 };
 
-struct CurrentLfFrame{
-    uint64_t id;
-    double timestamp = 0.0;
-};
-
 class LfTracker{
 private:
+    static constexpr int ST_RADIUS = 5;
+    static constexpr int ORB_RADIUS = 15;
     const LfTrackerConfig config; // Class configuration
 
-    std::unique_ptr<uint8_t[]> localBuffer; // Local buffer of image frame to allow the frontend to recycle
-    CurrentLfFrame curFrame; // Current frame data
+    descriptor::FrameData frame; // Orb Descriptors in the current image
+    const descriptor::RoatedOrbPairs orbPairs; // Pairs of points for ORB compairisons
 
     std::optional<BackendLfPacket> stagedMatch; // Match staged for sending to backend
 
@@ -56,12 +54,11 @@ private:
     std::condition_variable c_passKeyframe; // Condition varaiable to signal new keyframe
 
 public:
-    LfTracker(LfTrackerConfig c) : config(c){
-        localBuffer = std::make_unique<uint8_t[]>(config.wImage * config.hImage);
-    }
+    LfTracker(LfTrackerConfig c) : config(c), frame(config.numBuckets * 2),
+    orbPairs(config.wImage){}
 
     // Function to pass keyframe from the frontend to the LfTracker
-    bool passKeyframe(uint64_t id, double timestamp, const uint8_t *curBuffer);
+    bool calculateDescriptors(uint64_t id, double timestamp, const uint8_t *curBuffer, const std::vector<TrackedFeature<ST_RADIUS>> &features);
     
     // Function to get the packet from the LfTracker to the backend through outPacket
     bool getMatch(BackendLfPacket &outPacket);
