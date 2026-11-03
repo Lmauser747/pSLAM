@@ -117,12 +117,12 @@ FORCE_INLINE size_t fastLine16(const uint8_t *start, const Eigen::Vector2i &star
 
     auto features = simde_vorrq_u8(darkFeatures, brightFeatures);
     
-    alignas(16) uint8_t mask[16];
-    simde_vst1q_u8(mask, features);
+    alignas(16) std::array<uint8_t, 16> mask;
+    simde_vst1q_u8(mask.data(), features);
 
     size_t featureCount = 0;
     for (int i = 0; i < 16; ++i) {
-        if (mask[i]) {
+        if (mask[static_cast<size_t>(i)]) {
             kps.emplace_back(startPt.x() + i, startPt.y());
             featureCount++;
         }

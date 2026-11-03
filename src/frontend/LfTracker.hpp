@@ -9,6 +9,7 @@
 #include <optional>
 #include <vector>
 #include <memory>
+#include <array>
 
 #include <eigen3/Eigen/Dense>
 
@@ -38,6 +39,14 @@ struct LfTrackerConfig{
 
 };
 
+// Struct to store data for Gaussian blur
+struct BlurData{
+    // Separated blur kernel
+    static constexpr std::array<uint16_t, 5> KERNEL = {1, 4, 6, 4, 1};
+    std::unique_ptr<uint8_t[]> rowBuffer; // Bufer to store rows being blured by row kerner
+    std::array<std::unique_ptr<uint8_t[]>, 3> ringBuffer; // Buffer to store rows after being blured by column kernel
+};
+
 
 class LfTracker{
 private:
@@ -47,6 +56,7 @@ private:
     const LfTrackerConfig config; // Class configuration
 
     std::unique_ptr<uint8_t[]> localBuffer; // Local buffer to store image frame
+    BlurData blurData; // Data for blur functions
     descriptor::FrameData frame; // QOV Descriptors in the current image
     const descriptor::RoatedQovPairs qovPairs; // Pairs of points for QOV compairisons
 
@@ -62,12 +72,16 @@ private:
     std::condition_variable c_passKeyframe; // Condition varaiable to signal new keyframe
 
     // Blur the image with Gaussian blur kernel of radius 5
-    void blur();
+    void gaussianBlur();
 
 public:
     LfTracker(LfTrackerConfig c) : config(c), frame(config.numBuckets * 2),
     qovPairs(config.wImage){
-
+        localBuffer = std::make_unique<uint8_t[]>(config.wImage * config.hImage);
+        blurData.rowBuffer = std::make_unique<uint8_t[]>(config.wImage * config.hImage);
+        for(auto &buf : blurData.ringBuffer){
+            buf = std::make_unique<uint8_t[]>(config.wImage * config.hImage);
+        }
     }
 
     // Function to pass keyframe from the frontend to the LfTracker
