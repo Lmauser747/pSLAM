@@ -1,11 +1,13 @@
 #pragma once
 
+#include "simd/Utils.hpp"
 #include <cstdint>
 #include <array>
 #include <gtsam/linear/NoiseModel.h>
 #include <vector>
 #include <optional>
 #include <memory>
+#include <cstddef>
 
 #include <eigen3/Eigen/Dense>
 #include <gtsam/geometry/Point2.h>
@@ -13,6 +15,7 @@
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/linear/NoiseModel.h>
 
+#include <descriptor/Qov.hpp>
 
 namespace PoolSLAM{
 
@@ -82,8 +85,33 @@ struct BackendLfPacket{
     uint32_t inlierCount = 0; // Number of inlier landmarks
     float inlierRatio = 0.0f; // Ratio of inlier landmarks to total landmarks
     float matchScore = 0.0f; // Similarlity score between frames
+};
 
-    
+// Data associated with each key frame
+class Keyframe{
+public: 
+    std::vector<size_t> words; // Words associated with the image
+    std::vector<descriptor::QovFeature> features; // Features in the frame
+    uint64_t id; // Frame id
+    double timestamp; // Timestamp of the frame
+    size_t idx; // Index of frame in keyframe array
+    float score = 0; // Score of the frame compared to the current frame 
+
+    Keyframe(size_t numFeatures, uint64_t frameId, double time, size_t frameIdx) : 
+    id(frameId), timestamp(time), idx(frameIdx){
+        features.reserve(numFeatures);
+    }
+
+    void addKp(const Eigen::Vector2f &kp){
+        features.emplace_back(descriptor::QovDescriptor{0}, kp);
+    }
+
+    size_t finalSize(){
+        features.shrink_to_fit();
+        words.reserve(features.size());
+        return features.size();
+    }
+
 
 };
 

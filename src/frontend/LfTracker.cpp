@@ -11,6 +11,7 @@
 #include "frontend/LfTracker.hpp"
 #include "descriptor/Qov.hpp"
 #include "CoreTypes.hpp"
+#include "descriptor/BinaryBow.hpp"
 
 namespace PoolSLAM{
 
@@ -26,13 +27,17 @@ bool LfTracker::passKeyframe(uint64_t id, double timestamp, const uint8_t *curBu
             localBuffer[i] = curBuffer[i];
         }
 
-        frame.id = id;
-        frame.timestamp = timestamp;
-        frame.features.clear();
+        Keyframe newFrame(features.size(),  id, timestamp, nextFrameIdx);
 
         for(auto &feature : features){
-            frame.addDes(descriptor::QovDescriptor{0}, feature.ptCurr.cast<Eigen::Vector2i>());
+            newFrame.addKp(feature.ptCurr.cast<Eigen::Vector2i>());
         }
+
+        // Resizes features buffer and allocates words buffer
+        newFrame.finalSize();
+
+        keyframes.push_back(newFrame);
+        nextFrameIdx++;
     }
 
     c_passKeyframe.notify_all();
@@ -61,6 +66,138 @@ bool LfTracker::getMatch(BackendLfPacket &outPacket){
     }
     return true;
 }
+
+void LfTracker::processKeyframe(){
+    while(runTracker.load(std::memory_order_relaxed)){
+        {
+            std::unique_lock<std::mutex> lock(m_passKeyframe);
+
+            c_passKeyframe.wait(lock);
+            busy.store(true, std::memory_order_acquire);
+
+            // Blur the image
+            gaussianBlur();
+            
+            // Find the QOV descriptors of the image
+            calculateDescriptors();
+
+            // Iterate over descriptors and update respective words
+            auto &kf = keyframes.back();
+            float freq = 1.0f / static_cast<float>(kf.features.size());
+            for(auto &feat : kf.features){
+                auto &data = vocabTree.matchWord(feat.des, freq, kf.idx);
+                kf.words.emplace_back(data.id);
+                for(auto frame : data.images){
+                    keyframes[frame.first].score += std::min(data.images.back().second, frame.second);
+                }
+            }
+
+            // Find the best frame
+            Keyframe &bestFrame = keyframes.front();
+            float bestScore = 0.0;
+            for(auto &frame : keyframes){
+                if(frame.score > bestScore && frame.idx < (kf.idx - config.excludedFrames)){
+                    bestFrame = frame;
+                    bestScore = frame.score;
+                }
+            }
+
+            // Find the ratio between the score of the best frame and the score of the previous frame
+            auto scoreRatio = bestScore / (keyframes.end() - 1)->score;
+
+            if(bestScore >= config.minTfIdfScore && scoreRatio >= MIN_SCORE_RATIO){
+                matchFeatures(kf.idx, bestFrame.idx);
+            }else{
+                // reject frame
+            }
+
+  
+        }
+        
+
+    }
+    
+}
+
+void LfTracker::calculateDescriptors(){
+    auto &kf = keyframes.back();
+    for(auto &feat : kf.features){
+        uint16_t m10 = 0;
+        uint16_t m01 = 0;
+        // BEGIN VECTORIZE
+        for(int y = -QOV_RADIUS; y <= QOV_RADIUS; y++){
+            auto rowPtr = localBuffer.get() + (feat.pt.y() + y) + feat.pt.x();
+            for(int x = -QOV_RADIUS; x <= QOV_RADIUS; x++){
+                m10 += *(rowPtr + x) * x;
+                m01 += *(rowPtr + y) * y;
+            }
+        }
+        // END VECTORIZE
+        auto angle = std::atan2(m01, m10);
+        auto featPtr = localBuffer.get() + config.wImage * static_cast<size_t>(feat.pt.y()) + feat.pt.x();
+        auto offsets = qovPairs.offsetAtAngleRad(angle);
+        feat.des = descriptor::generateDescriptor(featPtr, offsets);
+    }
+}
+
+size_t LfTracker::matchFeatures(size_t curIdx, size_t matchIdx){
+    auto &curKf = keyframes[curIdx];
+    auto &matchKf = keyframes[matchIdx];
+
+    // Match features
+    for(size_t featIdx = 0; featIdx < curKf.features.size(); featIdx++){
+        auto word = curKf.words[featIdx];
+        auto parent = vocabTree.vocabulary[featIdx].parent;
+        auto &des = curKf.features[featIdx];
+
+        size_t match1, match2; // Best and second best match
+        int dist1 = 0;
+        int dist2 = 0;
+        // 
+        for(size_t i = 0; i < matchKf.features.size(); i++){
+            if(vocabTree.vocabulary[matchKf.words[i]].parent == parent){
+                
+                descriptor::fastHamming(matchKf.features[i].des, des.des);
+            }
+        }
+    }
+}
+
+void LfTracker::undistort(const std::vector<descriptor::QovFeature> &ptDist, Eigen::Matrix3Xf &ptUndist){    
+    auto count = ptDist.size();
+    float cx = config.K(0, 2);
+    float cy = config.K(1, 2);
+    float fxInv = 1.0f / config.K(0, 0);
+    float fyInv = 1.0f / config.K(1, 1);
+    // START VECTORIZE
+    for(size_t i = 0; i < count; i++){
+        auto idx = static_cast<int>(i);
+        auto pt = ptDist[i].pt.cast<float>();
+        float xd = (pt.x() - cx) * fxInv;
+        float yd = (pt.y() - cy) * fyInv;
+        float x = xd;
+        float y = yd;
+
+        for(int iter = 0; iter < UNDISTORT_ITERS; iter++){
+            float r2 = x * x + y * y;
+            float r4 = r2 * r2;
+            float xy = x * y;
+            float radial = 1.0f + config.dist.k1 * r2 + config.dist.k2 * r4;
+
+            float xEst = x * radial + 2.0f * config.dist.p1 * xy + config.dist.p2 * (r2 + 2 * x * x);
+            float yEst = y * radial + 2.0f * config.dist.p2 * xy + config.dist.p1 * (r2 + 2 * y * y);
+
+            x -= (xEst - xd);
+            y -= (yEst - yd);
+        }
+
+        ptUndist(0, idx) = x;
+        ptUndist(1, idx) = y;
+        ptUndist(2, idx) = 1.0f;
+    }
+    // END VECTORIZE
+}
+
 
 void LfTracker::gaussianBlur(){
     // First pass using [1, 4, 6, 4, 1]

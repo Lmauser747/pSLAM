@@ -13,8 +13,10 @@
 
 #include <eigen3/Eigen/Dense>
 
-#include <CoreTypes.hpp>
-#include <descriptor/Qov.hpp>
+#include "CoreTypes.hpp"
+#include "descriptor/Qov.hpp"
+#include "descriptor/BinaryBow.hpp"
+#include "simd/Utils.hpp"
 
 namespace PoolSLAM{
 
@@ -29,7 +31,6 @@ struct LfTrackerConfig{
     // size_t targetFeatureCount; // Target number of QOV features per-frame
     // float fastThreshold = 20.0f; // Threshold for FAST in QOV
 
-    std::string vocabularyPath; // Path to binary file containing BoW vocabulary
     float minTfIdfScore; // Minimum score for TF-IDF
     size_t excludedFrames; // Number of previous frames to exclude to ensure long-term matches
 
@@ -47,18 +48,30 @@ struct BlurData{
     std::array<std::unique_ptr<uint8_t[]>, 3> ringBuffer; // Buffer to store rows after being blured by column kernel
 };
 
+// Stores structs needed to caclulate the tranformation between frames
+struct LfMatching{
+    Eigen::Matrix3Xf curFeatures; // Homogenous points from the current frame
+    Eigen::Matrix3Xf matchFeatures; // Homogenous points from the previous frame
+
+};
 
 class LfTracker{
 private:
     static constexpr int FEATURE_RADIUS = 5; // Radius of the feature patch from HfTracker
     static constexpr int QOV_RADIUS = 15; // Radius of the patched used by QOV
+    static constexpr int UNDISTORT_ITERS = 5; // Number of iterations in undistortion
+    static constexpr float MIN_SCORE_RATIO = 0.3f; // Make sure the 
 
     const LfTrackerConfig config; // Class configuration
 
     std::unique_ptr<uint8_t[]> localBuffer; // Local buffer to store image frame
     BlurData blurData; // Data for blur functions
-    descriptor::FrameData frame; // QOV Descriptors in the current image
+    std::vector<Keyframe> keyframes; // All keyframes
     const descriptor::RoatedQovPairs qovPairs; // Pairs of points for QOV compairisons
+    descriptor::BinaryBowTree vocabTree; // Tree to store vocabulary and associated frames
+    LfMatching matching; // Stores the data needed for Lf matching
+
+    size_t nextFrameIdx = 0; // Next 
 
     std::optional<BackendLfPacket> stagedMatch; // Match staged for sending to backend
 
@@ -71,12 +84,24 @@ private:
 
     std::condition_variable c_passKeyframe; // Condition varaiable to signal new keyframe
 
+    // Process keyframe. Runs in thread
+    void processKeyframe();
+
     // Blur the image with Gaussian blur kernel of radius 5
     void gaussianBlur();
 
+    // Calculate the Qov descriptors
+    void calculateDescriptors();
+
+    // Match features
+    size_t matchFeatures(size_t curIdx, size_t matchIdx);
+
+    // Undistort the features
+    void undistort(const std::vector<descriptor::QovFeature> &ptDist, Eigen::Matrix3Xf &ptUndist);
+
 public:
-    LfTracker(LfTrackerConfig c) : config(c), frame(config.numBuckets * 2),
-    qovPairs(config.wImage){
+    LfTracker(LfTrackerConfig c, std::string &vocabPath) : config(c), qovPairs(config.wImage),
+    vocabTree(vocabPath){
         localBuffer = std::make_unique<uint8_t[]>(config.wImage * config.hImage);
         blurData.rowBuffer = std::make_unique<uint8_t[]>(config.wImage * config.hImage);
         for(auto &buf : blurData.ringBuffer){

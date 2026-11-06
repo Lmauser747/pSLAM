@@ -1,8 +1,5 @@
 #pragma once
 
-#include "frontend/HfTracker.hpp"
-#include <Eigen/src/Core/Matrix.h>
-#include <Eigen/src/Geometry/Rotation2D.h>
 #include <bitset>
 #include <cstdint>
 #include <vector>
@@ -12,8 +9,9 @@
 
 #include <eigen3/Eigen/Dense>
 
-#include <simd/Utils.hpp>
-#include <descriptor/QovBaseOffsets.hpp>
+#include "simd/Utils.hpp"
+#include "descriptor/QovBaseOffsets.hpp"
+
 
 // QOV(Quick ORB Variant) descriptor implementations
 
@@ -24,7 +22,7 @@ namespace descriptor{
 constexpr size_t QOV_BITS = 256;
 
 struct QovDescriptor{
-    std::bitset<QOV_BITS> bits = 0;
+    std::array<uint64_t, 4> bits;
 };
 
 struct QovFeature{
@@ -35,26 +33,6 @@ struct QovFeature{
 // QOV will compare I(pt2) > I(pt1)
 struct QovCompPair{
     ptrdiff_t pt1, pt2;
-};
-
-// Store Qov feature data accosicated with a given frame
-class FrameData{
-public:
-    FrameData(size_t maxNumFeatures){
-        features.reserve(maxNumFeatures);
-    }
-
-    std::vector<QovFeature> features;
-    uint64_t id = 0;
-    double timestamp = 0.0;
-
-    FORCE_INLINE void addDes(const QovDescriptor &des, Eigen::Vector2i pt){
-        features.emplace_back(des, pt);
-    }
-
-    FORCE_INLINE void addDes(const QovFeature &feat){
-        features.emplace_back(feat);
-    }
 };
 
 // Generated set of ORB pairs to compare between 
@@ -73,12 +51,11 @@ private:
     void getRotatedOffset(double angle, ptrdiff_t stride){
         double normalizedAngle = std::fmod(angle, 360.0);
         auto idx = static_cast<size_t>(std::round(normalizedAngle / ANGLE_STEP_DEG));
+        Eigen::Rotation2Dd rotation(toRadians(normalizedAngle));
+        Eigen::Matrix2d R = rotation.toRotationMatrix();
         for(size_t i = 0; i < QOV_BITS; i++){
-            Eigen::Vector2d pt1 = {QOV_BASE_OFFSETS[i + 0], QOV_BASE_OFFSETS[i + 1]};
-            Eigen::Vector2d pt2 = {QOV_BASE_OFFSETS[i + 2], QOV_BASE_OFFSETS[i + 3]};
-
-            Eigen::Rotation2Dd rotation(toRadians(normalizedAngle));
-            Eigen::Matrix2d R = rotation.toRotationMatrix();
+            Eigen::Vector2d pt1 = {QOV_BASE_OFFSETS[i * 4 + 0], QOV_BASE_OFFSETS[i * 4 + 1]};
+            Eigen::Vector2d pt2 = {QOV_BASE_OFFSETS[i * 4 + 2], QOV_BASE_OFFSETS[i * 4 + 3]};
 
             pt1 = R * pt1;
             pt2 = R * pt2;
@@ -113,8 +90,10 @@ public:
 
 FORCE_INLINE QovDescriptor generateDescriptor(const uint8_t *pt, const std::array<QovCompPair, QOV_BITS> &offsets){
     QovDescriptor des;
-    for(size_t i = 0; i < QOV_BITS; i++){
-        des.bits[i] = *(pt + offsets[i].pt1) < *(pt + offsets[i].pt2);
+    for(size_t i = 0; i < 4; i++){
+        for(size_t j = 0; j < 64; j++){
+            des.bits[i] |= static_cast<uint64_t>(*(pt + offsets[i].pt1) < *(pt + offsets[i].pt2)) << j;
+        }
     }
     return des;
 }

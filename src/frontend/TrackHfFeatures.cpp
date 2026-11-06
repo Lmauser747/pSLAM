@@ -177,7 +177,6 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
     }
 
     if(pureRotations >= RANSAC_MIN_INLIERS && pureRotations >= static_cast<int>(numFeatures / 2)){
-
         size_t writeIdx = 0;
         for(size_t readIdx = 0; readIdx < numFeatures; readIdx++){
             auto i = static_cast<Eigen::Index>(readIdx);
@@ -243,7 +242,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             if(std::abs(d) < ransacTau){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = std::move(activeFeatures[readIdx]);
-                    //epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
+                    epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
                 }
                 writeIdx++;
             }
