@@ -5,14 +5,18 @@
 #include <vector>
 #include <string>
 #include <cstdint>
-#include <utility>
-#include <bitset>
+
 #include "descriptor/Qov.hpp"
-#include "simd/Utils.hpp"
+#ifndef FORCE_INLINE
+#if defined(__GNUC__) || defined(__clang__)
+  #define FORCE_INLINE inline __attribute__((always_inline))
+#else
+  #define FORCE_INLINE inline
+#endif
+#endif
 
 // Implement a Bag of Words tree using the binary features described in Qov.hpp
 namespace PoolSLAM{
-    
 namespace descriptor{
 
 class BowDatabase;
@@ -25,8 +29,8 @@ struct alignas(8) WordData{
 
 // 8-byte inverted index entry
 struct IndexEntry{
-    uint32_t keyframeId; // Keyframe index
-    float weight; // TF-IDF weight for this keyframe
+    uint32_t keyframeId = 0; // Keyframe index
+    float weight = 0.0f; // TF-IDF weight for this keyframe
 };
 
 constexpr size_t iPowCt(size_t base, int pwr){
@@ -36,9 +40,6 @@ constexpr size_t iPowCt(size_t base, int pwr){
     }
     return acc;
 }
-
-// Find the hamming distance between two descriptors
-FORCE_INLINE int fastHamming(const QovDescriptor &w1, const QovDescriptor &w2);
 
 class BinaryBowTree{
 public:
@@ -68,10 +69,10 @@ public:
     uint32_t matchWord(const QovDescriptor& des, float frequency, uint32_t keyframe, BowDatabase& db) const;
 
     // Gets the word metadata at the given index
-    FORCE_INLINE const WordData& getWord(size_t idx) const;
+    FORCE_INLINE const WordData& getWord(uint32_t idx) const;
 
     // Gets the parent node of the leaf
-    FORCE_INLINE size_t getParent(size_t leaf) const;
+    FORCE_INLINE uint32_t getParent(uint32_t leaf) const;
 };
 
 // Standalone inverted index database for place recognition
@@ -100,31 +101,24 @@ public:
     }
 
     void clear(){
-        for(auto &entries : invertedIndex){
-            entries.clear();
+        for(size_t i = 0; i < invertedIndex.size(); i++){
+            invertedIndex[i].clear();
         }
     }
 
-    FORCE_INLINE const std::vector<IndexEntry>& getEntries(size_t wordId) const{
+    FORCE_INLINE const std::vector<IndexEntry>& getEntries(uint32_t wordId) const{
         return invertedIndex[wordId];
     }
 };
 
-FORCE_INLINE int fastHamming(const QovDescriptor &w1, const QovDescriptor &w2){
-    return __builtin_popcountll(w1.bits[0] ^ w2.bits[0]) +
-           __builtin_popcountll(w1.bits[1] ^ w2.bits[1]) +
-           __builtin_popcountll(w1.bits[2] ^ w2.bits[2]) +
-           __builtin_popcountll(w1.bits[3] ^ w2.bits[3]);
-}
-
-FORCE_INLINE const WordData& BinaryBowTree::getWord(size_t idx) const{
+FORCE_INLINE const WordData& BinaryBowTree::getWord(uint32_t idx) const{
     return vocabulary[idx];
 }
 
-FORCE_INLINE size_t BinaryBowTree::getParent(size_t leaf) const{
+FORCE_INLINE uint32_t BinaryBowTree::getParent(uint32_t leaf) const{
     return vocabulary[leaf].parent;
 }
 
-} 
+}
 
 } 

@@ -1,9 +1,10 @@
 #include <string>
 #include <fstream>
 #include <cstddef>
+#include <cstdint>
 #include <ios>
+
 #include "BinaryBow.hpp"
-#include "CoreTypes.hpp"
 #include "descriptor/Qov.hpp"
 
 namespace PoolSLAM{
@@ -12,6 +13,7 @@ namespace descriptor{
 uint32_t BinaryBowTree::associatedWord(const QovDescriptor &des) const{
     size_t bestBranch = 0;
     int bestScore = fastHamming(tree[0], des);
+    // BEGIN VECTORIZE
     for(size_t branch = 1; branch < NUM_BRANCHES; branch++){
         auto score = fastHamming(tree[branch], des);
         if(score < bestScore){
@@ -19,7 +21,7 @@ uint32_t BinaryBowTree::associatedWord(const QovDescriptor &des) const{
             bestScore = score;
         }
     }
-    // Traverse down remaining branch levels and leaf nodes
+
     for(size_t level = 1; level < TREE_DEPTH; level++){
         auto firstBranch = NUM_BRANCHES * bestBranch + NUM_BRANCHES;
         bestBranch = firstBranch;
@@ -32,6 +34,7 @@ uint32_t BinaryBowTree::associatedWord(const QovDescriptor &des) const{
             }
         }
     }
+    // END VECTORIZE
     return static_cast<uint32_t>(bestBranch - TREE_SIZE);
 }
 
@@ -52,12 +55,12 @@ bool BinaryBowTree::readVocabFile(const std::string &vocabPath){
 
     // Read in internal branch nodes (levels 1 to TREE_DEPTH - 1)
     for(size_t i = 0; i < TREE_SIZE; i++){
-        stream.read(reinterpret_cast<char *>(&(tree[i].bits)), sizeof(tree[i].bits));
+        stream.read(reinterpret_cast<char *>(tree[i].bits.data()), sizeof(tree[i].bits));
     }
 
     // Read in vocabulary leaf words (level TREE_DEPTH)
     for(size_t wordId = 0; wordId < VOCAB_SIZE; wordId++){
-        stream.read(reinterpret_cast<char *>(&(tree[TREE_SIZE + wordId].bits)), sizeof(tree[TREE_SIZE + wordId].bits));
+        stream.read(reinterpret_cast<char *>(tree[TREE_SIZE + wordId].bits.data()), sizeof(tree[TREE_SIZE + wordId].bits));
         stream.read(reinterpret_cast<char *>(&(vocabulary[wordId].idf)), sizeof(vocabulary[wordId].idf));
         vocabulary[wordId].parent = static_cast<uint32_t>((wordId / NUM_BRANCHES) + (TREE_SIZE - NUM_PARENTS));
     }
@@ -65,5 +68,5 @@ bool BinaryBowTree::readVocabFile(const std::string &vocabPath){
     return stream.good();
 }
 
-} // namespace descriptor
-} // namespace PoolSLAM
+}
+}

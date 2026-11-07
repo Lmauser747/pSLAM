@@ -1,4 +1,4 @@
-# --- HAL Unit Tests ---
+# HAL Unit tests
 add_executable(unit_tests_hal
     TestDepthStream.cpp
     TestImuStream.cpp
@@ -13,7 +13,7 @@ target_link_libraries(unit_tests_hal PRIVATE
 
 
 
-# --- Frontend Unit Tests ---[cite: 8]
+# Frontend Unit Tests
 add_executable(unit_tests_frontend
     TestTrackHfFeatures.cpp
     TestReplenishHfFeatures.cpp
@@ -36,6 +36,17 @@ target_link_libraries(unit_tests_backend PRIVATE
 gtest_discover_tests(unit_tests_backend)
 ]]
 
+# Descriptor Unit Tests
+add_executable(unit_tests_descriptor
+    TestDescriptor.cpp
+)
+target_link_libraries(unit_tests_descriptor PRIVATE
+    poolslam_descriptor
+    GTest::gtest_main
+    Eigen3::Eigen
+)
+
 gtest_discover_tests(unit_tests_hal TEST_PREFIX "unit_tests_.")
 gtest_discover_tests(unit_tests_frontend TEST_PREFIX "unit_tests_.")
+gtest_discover_tests(unit_tests_descriptor TEST_PREFIX "unit_tests_.")
 # gtest_discover_tests(unit_tests_backend TEST_PREFIX "unit_tests_.")

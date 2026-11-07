@@ -4,21 +4,7 @@ enable_language(C)
 set(INTERNAL_INCLUDE_DIR $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
 set(PUBLIC_INCLUDE_DIR $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
 
-# --- 1. SIMD Target (Header-only / Interface) ---
-# add_library(poolslam_simd INTERFACE)
-# target_include_directories(poolslam_simd INTERFACE
-#     ${INTERNAL_INCLUDE_DIR}
-#     ${PUBLIC_INCLUDE_DIR}
-# )
-
-# if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|armv8)")
-#     target_compile_definitions(poolslam_simd INTERFACE POOLSLAM_USE_NEON)
-#     if(NOT MSVC)
-#         target_compile_options(poolslam_simd INTERFACE -march=armv8-a+simd)
-#     endif()
-# endif()
-
-# --- 2. HAL Target ---[cite: 1, 8]
+# HAL
 add_library(poolslam_hal STATIC
     hal/ImageStream.cpp
     hal/ImuStream.cpp
@@ -37,9 +23,7 @@ target_link_libraries(poolslam_hal
         Threads::Threads
 )
 
-
-
-# --- 3. Frontend Target (Tracking / Odometry) ---[cite: 8]
+# Frontend
 add_library(poolslam_frontend STATIC
     frontend/ReplenishHfFeatures.cpp
     frontend/TrackHfFeatures.cpp
@@ -78,3 +62,24 @@ target_link_libraries(poolslam_frontend
 #         Eigen3::Eigen
 #         # GTSAM::gtsam
 # )
+
+
+add_library(poolslam_descriptor STATIC
+    frontend/ReplenishHfFeatures.cpp
+    frontend/TrackHfFeatures.cpp
+)
+target_compile_definitions(poolslam_descriptor
+    PRIVATE
+        POOL_SLAM_SIMD
+)
+target_include_directories(poolslam_descriptor
+    PUBLIC
+        ${PUBLIC_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+target_link_libraries(poolslam_descriptor
+    PUBLIC
+        Eigen3::Eigen
+    PRIVATE
+        simde::simde
+)

@@ -1,103 +1,149 @@
 #pragma once
 
-#include <bitset>
 #include <cstdint>
-#include <vector>
 #include <cstddef>
 #include <array>
 #include <cmath>
 
-#include <eigen3/Eigen/Dense>
+#include <eigen3/Eigen/Core>
 
-#include "simd/Utils.hpp"
 #include "descriptor/QovBaseOffsets.hpp"
 
+#ifndef FORCE_INLINE
+#if defined(__GNUC__) || defined(__clang__)
+  #define FORCE_INLINE inline __attribute__((always_inline))
+#else
+  #define FORCE_INLINE inline
+#endif
+#endif
 
-// QOV(Quick ORB Variant) descriptor implementations
-
+// QOV (Quick ORB Variant) descriptor implementations
 namespace PoolSLAM{
-
 namespace descriptor{
 
 constexpr size_t QOV_BITS = 256;
 
-struct QovDescriptor{
-    std::array<uint64_t, 4> bits;
+// 32-byte 16-byte aligned binary descriptor (POD / Trivially Copyable)
+struct alignas(16) QovDescriptor{
+    std::array<uint64_t, 4> bits = {0, 0, 0, 0};
+
+    bool operator==(const QovDescriptor &other) const{
+        return bits == other.bits;
+    }
+
+    bool operator!=(const QovDescriptor &other) const{
+        return bits != other.bits;
+    }
 };
 
 struct QovFeature{
     QovDescriptor des;
-    Eigen::Vector2i pt;
+    Eigen::Vector2i pt; // Keypoint coordinate where descriptor was extracted
+    uint32_t wordId = UINT32_MAX; // Id of the word associated with this feature
+    uint32_t parent = UINT32_MAX; // Id of the parent associated with the feature
 };
 
-// QOV will compare I(pt2) > I(pt1)
 struct QovCompPair{
-    ptrdiff_t pt1, pt2;
+    ptrdiff_t pt1 = 0;
+    ptrdiff_t pt2 = 0;
 };
 
-// Generated set of ORB pairs to compare between 
-class RoatedQovPairs{
+// Computes Hamming distance between two 256-bit descriptors
+FORCE_INLINE int fastHamming(const QovDescriptor &w1, const QovDescriptor &w2){
+    return __builtin_popcountll(w1.bits[0] ^ w2.bits[0]) +
+           __builtin_popcountll(w1.bits[1] ^ w2.bits[1]) +
+           __builtin_popcountll(w1.bits[2] ^ w2.bits[2]) +
+           __builtin_popcountll(w1.bits[3] ^ w2.bits[3]);
+}
+
+
+class RotatedQovPairs{
 private:
-    static constexpr double PI = 3.1415926535;
-    static constexpr int ROTATIONS = 32; // Number of rotated offsets to store
+    static constexpr double PI = 3.14159265358979323846;
+    static constexpr size_t ROTATIONS = 32; // Number of rotated offsets to store
     static constexpr double ANGLE_STEP_DEG = 360.0 / ROTATIONS; // Step between each offset
     static constexpr double ANGLE_STEP_RAD = 2.0 * PI / ROTATIONS;
+
     std::array<std::array<QovCompPair, QOV_BITS>, ROTATIONS> offsets;
 
-    double toRadians(double degrees){
+    static double toRadians(double degrees){
         return (degrees / 180.0) * PI;
     }
 
-    void getRotatedOffset(double angle, ptrdiff_t stride){
-        double normalizedAngle = std::fmod(angle, 360.0);
-        auto idx = static_cast<size_t>(std::round(normalizedAngle / ANGLE_STEP_DEG));
-        Eigen::Rotation2Dd rotation(toRadians(normalizedAngle));
-        Eigen::Matrix2d R = rotation.toRotationMatrix();
+    void computeRotatedOffsets(size_t idx, double angleDeg, ptrdiff_t stride){
+        double rad = toRadians(angleDeg);
+        double cosA = std::cos(rad);
+        double sinA = std::sin(rad);
+
         for(size_t i = 0; i < QOV_BITS; i++){
-            Eigen::Vector2d pt1 = {QOV_BASE_OFFSETS[i * 4 + 0], QOV_BASE_OFFSETS[i * 4 + 1]};
-            Eigen::Vector2d pt2 = {QOV_BASE_OFFSETS[i * 4 + 2], QOV_BASE_OFFSETS[i * 4 + 3]};
+            double x1 = static_cast<double>(QOV_BASE_OFFSETS[i * 4 + 0]);
+            double y1 = static_cast<double>(QOV_BASE_OFFSETS[i * 4 + 1]);
+            double x2 = static_cast<double>(QOV_BASE_OFFSETS[i * 4 + 2]);
+            double y2 = static_cast<double>(QOV_BASE_OFFSETS[i * 4 + 3]);
 
-            pt1 = R * pt1;
-            pt2 = R * pt2;
+            double rx1 = x1 * cosA - y1 * sinA;
+            double ry1 = x1 * sinA + y1 * cosA;
+            double rx2 = x2 * cosA - y2 * sinA;
+            double ry2 = x2 * sinA + y2 * cosA;
 
-            offsets[idx][i].pt1 = static_cast<ptrdiff_t>(std::round(pt1.x())) + stride * static_cast<ptrdiff_t>(std::round(pt1.y()));
-            offsets[idx][i].pt2 = static_cast<ptrdiff_t>(std::round(pt2.x())) + stride * static_cast<ptrdiff_t>(std::round(pt2.y()));
+            ptrdiff_t ix1 = static_cast<ptrdiff_t>(std::lround(rx1));
+            ptrdiff_t iy1 = static_cast<ptrdiff_t>(std::lround(ry1));
+            ptrdiff_t ix2 = static_cast<ptrdiff_t>(std::lround(rx2));
+            ptrdiff_t iy2 = static_cast<ptrdiff_t>(std::lround(ry2));
+
+            offsets[idx][i].pt1 = ix1 + stride * iy1;
+            offsets[idx][i].pt2 = ix2 + stride * iy2;
         }
-
     }
 
 public:
-    RoatedQovPairs(size_t w){
-        for(int i = 0; i < ROTATIONS; i++){
-            getRotatedOffset(static_cast<float>(i) * ANGLE_STEP_DEG, static_cast<ptrdiff_t>(w));
+    explicit RotatedQovPairs(size_t w){
+        for(size_t i = 0; i < ROTATIONS; i++){
+            computeRotatedOffsets(i, static_cast<double>(i) * ANGLE_STEP_DEG, static_cast<ptrdiff_t>(w));
         }
     }
 
-
-    // Get the offset array at a given angle in degrees
-    FORCE_INLINE const std::array<QovCompPair, QOV_BITS> offsetAtAngleDeg(double angle) const{
-        constexpr double INV = 1 / ANGLE_STEP_DEG;
-        return offsets[static_cast<size_t>(std::round(angle * INV))];
+    // Get the offset array at a given angle in degrees (zero-copy reference)
+    FORCE_INLINE const std::array<QovCompPair, QOV_BITS>& offsetAtAngleDeg(double angle) const{
+        constexpr double INV = 1.0 / ANGLE_STEP_DEG;
+        double normAngle = std::fmod(angle, 360.0);
+        if(normAngle < 0.0){
+            normAngle += 360.0;
+        }
+        size_t bin = static_cast<size_t>(std::lround(normAngle * INV)) % ROTATIONS;
+        return offsets[bin];
     }
 
-    // Get the offset array at a given angle in radius
-    FORCE_INLINE const std::array<QovCompPair, QOV_BITS> offsetAtAngleRad(double angle) const{
-        constexpr double INV = 1 / ANGLE_STEP_RAD;
-        return offsets[static_cast<size_t>(std::round(angle * INV))];
+    // Get the offset array at a given angle in radians (zero-copy reference)
+    FORCE_INLINE const std::array<QovCompPair, QOV_BITS>& offsetAtAngleRad(double angle) const{
+        constexpr double TWO_PI = 2.0 * PI;
+        constexpr double INV = 1.0 / ANGLE_STEP_RAD;
+        double normAngle = std::fmod(angle, TWO_PI);
+        if(normAngle < 0.0){
+            normAngle += TWO_PI;
+        }
+        size_t bin = static_cast<size_t>(std::lround(normAngle * INV)) % ROTATIONS;
+        return offsets[bin];
     }
-
 };
 
 FORCE_INLINE QovDescriptor generateDescriptor(const uint8_t *pt, const std::array<QovCompPair, QOV_BITS> &offsets){
     QovDescriptor des;
-    for(size_t i = 0; i < 4; i++){
-        for(size_t j = 0; j < 64; j++){
-            des.bits[i] |= static_cast<uint64_t>(*(pt + offsets[i].pt1) < *(pt + offsets[i].pt2)) << j;
+    // BEGIN VECTORIZE
+    for(size_t w = 0; w < 4; w++){
+        uint64_t word = 0;
+        const size_t baseIdx = w * 64;
+        for(size_t b = 0; b < 64; b++){
+            const auto &pair = offsets[baseIdx + b];
+            if(*(pt + pair.pt1) < *(pt + pair.pt2)){
+                word |= (static_cast<uint64_t>(1) << b);
+            }
         }
+        des.bits[w] = word;
     }
+    // END VECTORIZE
     return des;
 }
 
-}
-
+} 
 }

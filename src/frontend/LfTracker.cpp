@@ -81,29 +81,50 @@ void LfTracker::processKeyframe(){
             // Find the QOV descriptors of the image
             calculateDescriptors();
 
-            // Iterate over descriptors and update respective words
+            // Iterate over descriptors and add to database
             auto &kf = keyframes.back();
+            float sumOfWeights = 0.0f;
             float freq = 1.0f / static_cast<float>(kf.features.size());
             for(auto &feat : kf.features){
-                auto &data = vocabTree.matchWord(feat.des, freq, kf.idx);
-                kf.words.emplace_back(data.id);
-                for(auto frame : data.images){
-                    keyframes[frame.first].score += std::min(data.images.back().second, frame.second);
+                auto wordId = vocabTree.matchWord(feat.des, freq, kf.idx, database);
+                sumOfWeights += database.getEntries(wordId).back().weight;
+                
+                feat.wordId = wordId;
+                feat.parent = vocabTree.getParent(wordId);
+            }
+
+            std::sort(kf.features.begin(), kf.features.end(), [](const auto &a, const auto& b){
+                return a.wordId < b.wordId;
+            });
+
+
+            // Update the score of each frame
+            uint32_t lastWordId = UINT32_MAX;
+            auto weightNormFactor = 1.0f / sumOfWeights;
+            for(auto &feat : kf.features){
+                if(lastWordId != feat.wordId){
+                    database.invertedIndex[feat.wordId].back().weight *= weightNormFactor;
+                }
+                auto &frames = database.getEntries(feat.wordId);
+                for(uint32_t kfIdx = 0; kfIdx < frames.size(); kfIdx++){
+                    keyframes[frames[kfIdx].keyframeId].score += std::min(frames[kfIdx].weight, frames.back().weight);
                 }
             }
 
             // Find the best frame
             Keyframe &bestFrame = keyframes.front();
             float bestScore = 0.0;
+            float lastScore = (keyframes.end() - 1)->score;
             for(auto &frame : keyframes){
-                if(frame.score > bestScore && frame.idx < (kf.idx - config.excludedFrames)){
+                if(frame.score > bestScore && (frame.idx + config.excludedFrames) < kf.idx){
                     bestFrame = frame;
                     bestScore = frame.score;
                 }
+                frame.score = 0;
             }
 
             // Find the ratio between the score of the best frame and the score of the previous frame
-            auto scoreRatio = bestScore / (keyframes.end() - 1)->score;
+            auto scoreRatio = bestScore / lastScore;
 
             if(bestScore >= config.minTfIdfScore && scoreRatio >= MIN_SCORE_RATIO){
                 matchFeatures(kf.idx, bestFrame.idx);
@@ -124,6 +145,7 @@ void LfTracker::calculateDescriptors(){
     for(auto &feat : kf.features){
         uint16_t m10 = 0;
         uint16_t m01 = 0;
+        // Find the orientation of the feature
         // BEGIN VECTORIZE
         for(int y = -QOV_RADIUS; y <= QOV_RADIUS; y++){
             auto rowPtr = localBuffer.get() + (feat.pt.y() + y) + feat.pt.x();
@@ -145,23 +167,73 @@ size_t LfTracker::matchFeatures(size_t curIdx, size_t matchIdx){
     auto &matchKf = keyframes[matchIdx];
 
     // Match features
-    for(size_t featIdx = 0; featIdx < curKf.features.size(); featIdx++){
-        auto word = curKf.words[featIdx];
-        auto parent = vocabTree.vocabulary[featIdx].parent;
-        auto &des = curKf.features[featIdx];
-
-        size_t match1, match2; // Best and second best match
-        int dist1 = 0;
-        int dist2 = 0;
-        // 
-        for(size_t i = 0; i < matchKf.features.size(); i++){
-            if(vocabTree.vocabulary[matchKf.words[i]].parent == parent){
-                
-                descriptor::fastHamming(matchKf.features[i].des, des.des);
+    Eigen::Index  matchingIdx = 0;
+    for(size_t curFeatIdx = 0; curFeatIdx < curKf.features.size(); curFeatIdx++){
+        int bestDist = INT32_MAX; // Distance of the best match
+        int secondDist = INT32_MAX; // Distance of the 
+        size_t bestIdx = 0;
+        auto &curFeat = curKf.features[curFeatIdx];
+        bool firstChild = false;
+        // Iterate through features of matched frame until the best two features remain
+        for(size_t matchFeatIdx = 0; matchFeatIdx < matchKf.features.size(); matchFeatIdx++){
+            auto &matchFeat = matchKf.features[matchFeatIdx];
+            // Only look at features whose associated words share a parent
+            if(matchFeat.parent != curFeat.parent){
+                // Break if we passed the region where the parents leaves reside
+                if(firstChild){
+                    break;
+                }else{
+                    continue;
+                }
+            }
+            auto hamDist = descriptor::fastHamming(curFeat.des, curFeat.des);
+            if(hamDist < bestDist){
+                secondDist = bestDist;
+                bestDist = hamDist;
+                bestIdx = matchFeatIdx;
+            }else if(hamDist < secondDist){
+                secondDist = hamDist;
             }
         }
+
+        // Reject features t0o similair to other features
+        if(!(static_cast<float>(bestDist) / static_cast<float>(secondDist) >= MAX_FEATURE_DIST_RATIO)){
+            continue;
+        }
+
+        auto &matchedFeat = matchKf.features[bestIdx];
+
+        // Check features in the current keyframe near the current feature to see if they are more similar to the matched feature
+        bool bidirectional = true;
+        for(size_t i = curFeatIdx; i >= std::max<size_t>(0, BIDIRECTIONAL_SEARCH_INTERVAL); i--){
+            auto hamDist = descriptor::fastHamming(matchedFeat.des, curKf.features[i].des);
+            if(hamDist < bestDist){
+                bidirectional = false;
+                break;
+            }
+        }
+
+        if(bidirectional){
+            for(size_t i = curFeatIdx; i < std::min<size_t>(curKf.features.size(), BIDIRECTIONAL_SEARCH_INTERVAL); i++){
+                auto hamDist = descriptor::fastHamming(matchedFeat.des, curKf.features[i].des);
+                if(hamDist < bestDist){
+                    bidirectional = false;
+                    break;
+                }
+            }
+        }else{
+            continue;
+        }
+
+        matching.curFeatures.col(matchingIdx) = curFeat.pt.homogeneous();
+        matching.matchFeatures.col(matchingIdx) = matchedFeat.pt.homogeneous();
+        matchingIdx++; 
     }
+
+    return static_cast<size_t>(matchingIdx);
 }
+
+
 
 void LfTracker::undistort(const std::vector<descriptor::QovFeature> &ptDist, Eigen::Matrix3Xf &ptUndist){    
     auto count = ptDist.size();

@@ -10,13 +10,15 @@
 #include <vector>
 #include <memory>
 #include <array>
+#include <random>
 
 #include <eigen3/Eigen/Dense>
+#include <gtsam/geometry/Pose3.h>
 
 #include "CoreTypes.hpp"
 #include "descriptor/Qov.hpp"
 #include "descriptor/BinaryBow.hpp"
-#include "simd/Utils.hpp"
+
 
 namespace PoolSLAM{
 
@@ -35,6 +37,7 @@ struct LfTrackerConfig{
     size_t excludedFrames; // Number of previous frames to exclude to ensure long-term matches
 
     uint32_t RansacInliearThreshold = 20; // Minimum number of RANSAC inliers
+    int RansacIters = 20;
     float minInliearRatio = 0.30f; // Minimum ratio of inlier to total landmarks
     float maxReprojectionError = 2.00f; // Maximum reprojection error from mathec frame to current frame
 
@@ -55,23 +58,55 @@ struct LfMatching{
 
 };
 
+// Data associated with each key frame
+class Keyframe{
+public: 
+    std::vector<descriptor::QovFeature> features; // Features in the frame
+    uint64_t id; // Frame id
+    double timestamp; // Timestamp of the frame
+    uint32_t idx; // Index of frame in keyframe array
+    float score = 0; // Score of the frame compared to the current frame 
+
+    Keyframe(size_t numFeatures, uint64_t frameId, double time, uint32_t frameIdx) : 
+    id(frameId), timestamp(time), idx(frameIdx){
+        features.reserve(numFeatures);
+    }
+
+    void addKp(const Eigen::Vector2i &kp){
+        features.emplace_back(kp);
+    }
+
+    // Resize the feature vector to final size once all keypoints have been added
+    size_t finalSize(){
+        features.shrink_to_fit();
+        return features.size();
+    }
+
+
+};
+
 class LfTracker{
 private:
     static constexpr int FEATURE_RADIUS = 5; // Radius of the feature patch from HfTracker
     static constexpr int QOV_RADIUS = 15; // Radius of the patched used by QOV
     static constexpr int UNDISTORT_ITERS = 5; // Number of iterations in undistortion
-    static constexpr float MIN_SCORE_RATIO = 0.3f; // Make sure the 
+    static constexpr float MIN_SCORE_RATIO = 0.3f; // Min ratio between score of matched keyframe and score of previous keyframe
+    static constexpr float MAX_FEATURE_DIST_RATIO = 0.80f; // Max ratio between best feature match and second best match
+    static constexpr size_t BIDIRECTIONAL_SEARCH_INTERVAL = 10; // Interval to searh in for better matches between matched feature and features in current keyframe
 
     const LfTrackerConfig config; // Class configuration
 
     std::unique_ptr<uint8_t[]> localBuffer; // Local buffer to store image frame
     BlurData blurData; // Data for blur functions
     std::vector<Keyframe> keyframes; // All keyframes
-    const descriptor::RoatedQovPairs qovPairs; // Pairs of points for QOV compairisons
+    const descriptor::RotatedQovPairs qovPairs; // Pairs of points for QOV compairisons
     descriptor::BinaryBowTree vocabTree; // Tree to store vocabulary and associated frames
+    descriptor::BowDatabase database; // Mantains lookup for features in the frame
     LfMatching matching; // Stores the data needed for Lf matching
 
-    size_t nextFrameIdx = 0; // Next 
+    uint32_t nextFrameIdx = 0; // Id for next frame
+
+    std::minstd_rand ransacRng; // Random number generator for RANSAC
 
     std::optional<BackendLfPacket> stagedMatch; // Match staged for sending to backend
 
@@ -98,6 +133,11 @@ private:
 
     // Undistort the features
     void undistort(const std::vector<descriptor::QovFeature> &ptDist, Eigen::Matrix3Xf &ptUndist);
+
+    // Use RANSAC algorihtm to prune outliers based on P3P
+    size_t ransac();
+
+
 
 public:
     LfTracker(LfTrackerConfig c, std::string &vocabPath) : config(c), qovPairs(config.wImage),
