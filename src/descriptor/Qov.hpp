@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <array>
 #include <cmath>
+#include <vector>
 
 #include <eigen3/Eigen/Core>
 
@@ -67,7 +68,7 @@ private:
     static constexpr double ANGLE_STEP_DEG = 360.0 / ROTATIONS; // Step between each offset
     static constexpr double ANGLE_STEP_RAD = 2.0 * PI / ROTATIONS;
 
-    std::array<std::array<QovCompPair, QOV_BITS>, ROTATIONS> offsets;
+    std::vector<std::array<QovCompPair, QOV_BITS>> offsets = std::vector<std::array<QovCompPair, QOV_BITS>>(ROTATIONS);
 
     static double toRadians(double degrees){
         return (degrees / 180.0) * PI;

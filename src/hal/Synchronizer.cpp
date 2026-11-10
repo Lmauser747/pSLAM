@@ -157,9 +157,7 @@ void Synchronizer::stop(){
     syncStatus.store(SyncStatus::STOPPED);
 }
 
-bool Synchronizer::getNextPacket(
-    SyncedPacket &target, std::chrono::milliseconds timeout
-){
+bool Synchronizer::getNextPacket(SyncedPacket &target, std::chrono::milliseconds timeout){
     std::unique_lock<std::mutex> lock(m_outputQueue);
 
     bool valid = c_outputQueue.wait_for(lock, timeout,

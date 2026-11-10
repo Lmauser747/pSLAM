@@ -189,10 +189,9 @@ void LfTracker::processKeyframe(){
             Keyframe *bestFrame = &keyframes.front();
             float bestScore = 0.0f;
             float lastScore = (keyframes.size() >= 2) ? keyframes[keyframes.size() - 2].score : 1.0f;
+            // If the keyframeId is less than config.excludedFrames, we just default to the first frame
             for(auto &frame : keyframes){
-                if(frame.score > bestScore &&
-                   (frame.keyframeId + config.excludedFrames) < kf.keyframeId &&
-                   !frame.landmarks.empty()){
+                if(frame.score > bestScore && (frame.keyframeId + config.excludedFrames) < kf.keyframeId && !frame.landmarks.empty()){
                     bestFrame = &frame;
                     bestScore = frame.score;
                 }
