@@ -85,7 +85,7 @@ struct BackendLfPacket{
 
 struct Landmark3d{
     uint32_t featureId;
-    Eigen::Vector3f pt3d;
+    Eigen::Vector3d pt3d;
 };
 
 struct BackendKeyframeUpdate{

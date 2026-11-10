@@ -11,6 +11,7 @@
 #include <memory>
 #include <array>
 #include <random>
+#include <utility>
 
 #include <eigen3/Eigen/Dense>
 #include <gtsam/geometry/Pose3.h>
@@ -53,8 +54,8 @@ struct BlurData{
 
 // Stores structs needed to caclulate the tranformation between frames
 struct LfMatching{
-    Eigen::Matrix3Xf curFeatures; // Homogenous points from the current frame
-    Eigen::Matrix3Xf matchLandmarks; // 3d positions of landmarks from previous frame
+    Eigen::Matrix3Xd curFeatures; // Homogenous points from the current frame
+    Eigen::Matrix3Xd matchLandmarks; // 3d positions of landmarks from previous frame
 
 };
 
@@ -86,6 +87,10 @@ public:
 
 
 };
+
+namespace geometry{
+std::optional<Eigen::Matrix<double, 3, 4>> solveP4PLambdaTwist(const std::array<Eigen::Vector3d, 4>& x, const std::array<Eigen::Vector3d, 4>& y);
+}
 
 class LfTracker{
 private:
@@ -134,11 +139,13 @@ private:
     size_t matchFeatures(size_t curId, size_t matchId);
 
     // Undistort the features
-    void undistort(Eigen::Matrix3Xf &pts);
+    void undistort(Eigen::Matrix3Xd &pts);
 
     // Use RANSAC algorihtm to prune outliers based on P3P
-    size_t ransac(size_t numMatches);
+    std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> ransac(size_t numMatches);
 
+    // Do LMA to find the optimal pose
+    bool refinePoseLM(size_t numInliers, const Eigen::Matrix3d& K_cam, Eigen::Matrix<double, 3, 4>& Tcand, Eigen::Matrix<double, 6, 6>& outCovariance);
 
 public:
     LfTracker(LfTrackerConfig c, std::string &vocabPath) : config(c), qovPairs(config.wImage),

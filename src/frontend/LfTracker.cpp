@@ -7,6 +7,15 @@
 #include <cmath>
 #include <array>
 #include <algorithm>
+#include <optional>
+
+#include <eigen3/Eigen/Dense>
+#include <gtsam/geometry/Rot3.h>
+#include <gtsam/geometry/Point3.h>
+#include <gtsam/geometry/Pose3.h>
+#include <gtsam/base/Vector.h>
+#include <gtsam/linear/NoiseModel.h>
+#include <gtsam/linear/LossFunctions.h>
 
 #include "frontend/LfTracker.hpp"
 #include "descriptor/Qov.hpp"
@@ -14,20 +23,6 @@
 #include "descriptor/BinaryBow.hpp"
 
 namespace PoolSLAM{
-
-namespace{
-    struct DiagonalDecomp{
-        double sigma1 = 0.0;
-        double sigma2 = 0.0;
-        Eigen::Vector3d e1 = Eigen::Vector3d::Zero();
-        Eigen::Vector3d e2 = Eigen::Vector3d::Zero();
-    };
-
-    constexpr double K_EPS = 1e-12;
-    constexpr double PI = 3.14159265358979323846;
-    FORCE_INLINE double cubicSolver(const std::array<double, 4> &c);
-    FORCE_INLINE DiagonalDecomp diagonalize(const Eigen::Matrix3d &D);
-}
 
 bool LfTracker::passKeyframe(uint32_t id, double timestamp, const uint8_t *curBuffer, const std::vector<TrackedFeature<FEATURE_RADIUS>> &features){
     // Check if tracker is busy
@@ -83,6 +78,8 @@ bool LfTracker::getMatch(BackendLfPacket &outPacket){
 
 void LfTracker::processKeyframe(){
     while(runTracker.load(std::memory_order_relaxed)){
+        size_t numMatches = 0;
+        BackendLfPacket packet;
         {
             std::unique_lock<std::mutex> lock(m_passKeyframe);
 
@@ -136,19 +133,61 @@ void LfTracker::processKeyframe(){
                 frame.score = 0;
             }
 
+            packet.currentFrameId = kf.id;
+            packet.matchedFrameId = bestFrame.id;
+            packet.timestamp = kf.timestamp;
+
             // Find the ratio between the score of the best frame and the score of the previous frame
             auto scoreRatio = bestScore / lastScore;
 
+            packet.matchScore = bestScore;
+
             if(bestScore >= config.minTfIdfScore && scoreRatio >= MIN_SCORE_RATIO){
-                matchFeatures(kf.keyframeId, bestFrame.keyframeId);
+                numMatches = matchFeatures(kf.keyframeId, bestFrame.keyframeId);
             }else{
-                // reject frame
+                busy.store(false, std::memory_order_release);
+                continue;
             }
-
-  
         }
-        
 
+        auto pair = ransac(numMatches);
+        if(!pair.has_value()){
+            busy.store(false, std::memory_order_release);
+            continue;
+        }
+
+        packet.inlierCount = static_cast<uint32_t>(pair->second);
+        packet.inlierRatio = static_cast<float>(pair->second) / static_cast<float>(numMatches);
+
+        auto T = pair->first;
+
+        // Find optimal pose and measurement covariance
+        Eigen::Matrix<double, 6, 6> outCovariance;
+        refinePoseLM(pair->second, config.K, T, outCovariance);
+
+        gtsam::Rot3 rot(T.block<3, 3>(0, 0));
+        gtsam::Point3 trans(T.block<3, 1>(0, 3));
+        
+        // Package noise model
+        gtsam::Vector6 sigmas;
+        sigmas << std::sqrt(outCovariance(3, 3)), // Rot X
+            std::sqrt(outCovariance(4, 4)), // Rot Y
+            std::sqrt(outCovariance(5, 5)), // Rot Z
+            std::sqrt(outCovariance(0, 0)), // Trans X
+            std::sqrt(outCovariance(1, 1)), // Trans Y
+            std::sqrt(outCovariance(2, 2)); // Trans Z
+
+        auto baseGaussian = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
+
+        {
+            std::unique_lock<std::mutex> lock(m_backendPacket);
+            stagedMatch = packet;
+            stagedMatch->noiseModel = gtsam::noiseModel::Robust::Create(
+                gtsam::noiseModel::mEstimator::Huber::Create(1.345), baseGaussian
+            );
+            stagedMatch->relativePose = gtsam::Pose3(rot, trans);
+        }
+        busy.store(false, std::memory_order_release);
     }
     
 }
@@ -249,31 +288,24 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
             }
         }
 
-        matching.curFeatures.col(matchingIdx) = curFeat.pt.homogeneous().cast<float>();
-        matching.matchLandmarks.col(matchingIdx) = matchKf.landmarks[static_cast<size_t>(matchingIdx)].pt3d;
+        matching.curFeatures.col(matchingIdx) = curFeat.pt.homogeneous().cast<double>();
+        matching.matchLandmarks.col(matchingIdx) = matchKf.landmarks[static_cast<size_t>(bestIdx)].pt3d;
         matchingIdx++; 
     }
 
     return static_cast<size_t>(matchingIdx);
 }
 
-size_t LfTracker::ransac(size_t numMatches){
+std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(size_t numMatches){
     // Undistort the features
     undistort(matching.curFeatures);
     
     // Do a number of ransac iterations using P3P
     std::array<Eigen::Index, 4> m; // Match indicies
-    std::array<Eigen::Vector3f, 4> x; // 3d points
-    std::array<Eigen::Vector3f, 4> y; // homogenous points
-    Eigen::Matrix3d M01 = Eigen::Matrix3d::Identity();
-    Eigen::Matrix3d M02 = Eigen::Matrix3d::Identity();
-    Eigen::Matrix3d M12 = Eigen::Matrix3d::Identity();
-    M01(2, 2) = 0;
-    M02(1, 1) = 0;
-    M12(0, 0) = 0;
-    Eigen::Matrix3d D0, D1, D2;
-    std::array<double, 4> c;
-    std::array<double, 4> tau;
+    std::array<Eigen::Vector3d, 4> x; // 3d points
+    std::array<Eigen::Vector3d, 4> y; // homogenous points
+    Eigen::Matrix<double, 3, 4> bestT; // Best transformation
+    size_t bestInliers; // Best number of inliers
     for(int iter = 0; iter < config.ransacIters; iter++){
         // Find 4 random matches
         m[0] = static_cast<Eigen::Index>((ransacRng() * numMatches) >> 31);
@@ -281,62 +313,72 @@ size_t LfTracker::ransac(size_t numMatches){
         m[2] = static_cast<Eigen::Index>((ransacRng() * numMatches) >> 31);
         m[3] = static_cast<Eigen::Index>((ransacRng() * numMatches) >> 31);
 
-        x[0] = matching.matchLandmarks.col(m[0]);
-        x[1] = matching.matchLandmarks.col(m[1]);
-        x[2] = matching.matchLandmarks.col(m[2]);
-        x[3] = matching.matchLandmarks.col(m[3]);
+        x[0] = matching.matchLandmarks.col(m[0]).cast<double>();
+        x[1] = matching.matchLandmarks.col(m[1]).cast<double>();
+        x[2] = matching.matchLandmarks.col(m[2]).cast<double>();
+        x[3] = matching.matchLandmarks.col(m[3]).cast<double>();
 
         y[0] = matching.curFeatures.col(m[0]);
         y[1] = matching.curFeatures.col(m[1]);
         y[2] = matching.curFeatures.col(m[2]);
         y[3] = matching.curFeatures.col(m[3]);
         
+        // Solve P3P for the transformation [R | t]
+        auto T = geometry::solveP4PLambdaTwist(x, y);
+        if(!T.has_value()){
+            continue;
+        }
 
-        // Solve P3P using Lambda twist
-        double a01 = (x[0] - x[1]).norm();
-        double a02 = (x[0] - x[2]).norm();
-        double a12 = (x[1] - x[2]).norm();
-
-        double b01 = y[0].dot(y[1]);
-        double b02 = y[0].dot(y[2]);
-        double b12 = y[1].dot(y[2]);
-
-        M01(0, 1) = -b01;
-        M01(1, 0) = -b01;
-        M02(0, 2) = -b02;
-        M02(0, 1) = -b02;
-        M12(1, 2) = -b12;
-        M12(2, 1) = -b12;
+        auto R = T->leftCols(3);
+        auto t = T->rightCols(1);
         
-        D1 = M01 * a12 - M12 * a01;
-        D2 = M02 * a12 - M12 * a02;
+        size_t inliers = 0;
+        for(int match; match < static_cast<int>(numMatches); match++){
+            Eigen::Vector3d P = matching.matchLandmarks.col(match);
+            Eigen::Vector2d p = matching.curFeatures.col(match).hnormalized();
 
-        c[3] = D1.determinant();
-        auto norm = 1 / c[0];
-        c[0] = norm * D2.determinant();
-        c[1] = norm * (
-            D2.col(0).dot(D1.col(1).cross(D1.col(2))) + 
-            D2.col(1).dot(D1.col(2).cross(D1.col(0))) +
-            D2.col(2).dot(D1.col(0).cross(D1.col(1)))
-        );
-        c[2] = norm * (
-            D1.col(0).dot(D2.col(1).cross(D2.col(2))) + 
-            D1.col(1).dot(D2.col(2).cross(D2.col(0))) +
-            D1.col(2).dot(D2.col(0).cross(D2.col(1)))
-        );
+            Eigen::Vector2d proj = (R * P + t).hnormalized();
+            
+            auto e = (proj - p).norm();
+            if(e <= config.maxReprojectionError){
+                inliers++;
+            }
+        }
 
-        // Solve the cubic
-        auto gamma = cubicSolver(c);
-        D0 = D1 + gamma * D2;
-
-        DiagonalDecomp decomp = diagonalize(D0);
-        auto s1 = std::sqrt(-decomp.sigma2 / decomp.sigma1);
-        auto s2 = -s1;
-        
+        if(inliers > bestInliers){
+            bestInliers = inliers;
+            bestT = *T;
+        }
     }
+
+    auto ratio = (static_cast<float>(bestInliers) / static_cast<float>(numMatches));
+    if(bestInliers < config.ransacInliearThreshold || ratio < config.minInliearRatio){
+        return std::nullopt;
+    }
+
+    // Repackage the inliers
+    auto R = bestT.leftCols(3);
+    auto t = bestT.rightCols(1);
+    int writeIdx = 0;
+    for(int readIdx = 0; static_cast<size_t>(readIdx) < numMatches; readIdx++){
+        Eigen::Vector3d P = matching.matchLandmarks.col(readIdx);
+        Eigen::Vector2d p = matching.curFeatures.col(readIdx).hnormalized();
+
+        Eigen::Vector2d proj = (R * P + t).hnormalized();
+        
+        auto e = (proj - p).norm();
+        if(e <= config.maxReprojectionError){
+            matching.curFeatures.col(writeIdx) = matching.curFeatures.col(readIdx);
+            matching.matchLandmarks.col(writeIdx) = matching.curFeatures.col(readIdx);
+        }
+    }
+
+    return std::pair{bestT, ratio};
+
+
 }
 
-void LfTracker::undistort(Eigen::Matrix3Xf &pts){    
+void LfTracker::undistort(Eigen::Matrix3Xd &pts){    
     auto count = pts.size();
     float cx = config.K(0, 2);
     float cy = config.K(1, 2);
@@ -477,105 +519,5 @@ void LfTracker::gaussianBlur(){
     ringRIdx %= 3;
     std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage - 1, penRowPtr -  2 * config.wImage);
 }
-
-namespace {
-    FORCE_INLINE double cubicSolver(const std::array<double, 4> &c){
-        auto c2 = c[2] * c[2];
-        auto p = c[1] - (c[2] * c[2]) * (1.0 / 3.0);
-        auto q = c[0] - (c[1] * c[2]) * (1.0 / 3.0) + (c2 * c[2]) * (2.0 / 27.0);
-        auto p327 = (p * p * p) * (1.0 / 27.0);
-        auto dis = (q * q) * (1.0 / 4.0) + p327;
-        auto gamma = 0.0;
-        auto offset = c[2] * (1.0f / 3.0f);
-        if(dis <= 0){
-            // Use the Viete method
-            auto w = (-q * 0.5) / std::sqrt(-p327);
-            w = std::clamp(w, -1.0, 1.0);
-            auto theta = std::acos(w) * (1.0 / 3.0);
-            auto coeff = 2.0 * (std::sqrt(-p * (1.0 / 3.0)));
-            constexpr double PHASE = -2.0 * PI / 3.0;
-            gamma = coeff * std::cos(theta - PHASE) - offset;
-        }else{
-            // Use Cardano Method
-            auto sqrtdis = std::sqrt(dis);
-            auto qd2 = -q * 0.5f;
-            auto u = std::cbrt(qd2 + sqrtdis);
-            auto v = std::cbrt(qd2 - sqrtdis);
-            gamma = u + v - offset;
-        }
-
-        // Polish the root using N-R
-        auto f = c[0] + gamma * (c[1] + gamma * (c[2] + gamma));
-        auto fPrime = c[1] + gamma * (2.0 * c[2] + 3.0 * gamma);
-        if (std::abs(fPrime) > K_EPS) {
-            gamma -= f / fPrime;
-        }
-
-        return gamma;
-    }
-
-    // Gemeni ftw
-    FORCE_INLINE DiagonalDecomp diagonalize(const Eigen::Matrix3d &D){
-        DiagonalDecomp out;
-
-        const double d00 = D(0, 0), d01 = D(0, 1), d02 = D(0, 2);
-        const double d11 = D(1, 1), d12 = D(1, 2);
-        const double d22 = D(2, 2);
-
-        const double d00pd11 = d00 + d11;
-        const double d00md11sd01sq = d00 * d11 - d01 * d01;
-
-        // Characteristic quadratic: lambda^2 + p1 * lambda + p0 = 0
-        const double p1 = -(d00pd11 + d22);
-        const double p0 = d00md11sd01sq + (d00 * d22 - d02 * d02) + (d11 * d22 - d12 * d12);
-
-        const double delta = std::max(0.0, p1 * p1 - 4.0 * p0);
-        const double sqrtDelta = std::sqrt(delta);
-
-        const double sigA = 0.5 * (-p1 + sqrtDelta);
-        const double sigB = 0.5 * (-p1 - sqrtDelta);
-
-        // Enforce |sigma1| >= |sigma2| for downstream numerical stability
-        if (std::abs(sigA) >= std::abs(sigB)) {
-            out.sigma1 = sigA;
-            out.sigma2 = sigB;
-        } else {
-            out.sigma1 = sigB;
-            out.sigma2 = sigA;
-        }
-
-        // Helper lambda to compute an eigenvector via 2x2 Cramer's rule
-        auto getEigenvector = [&](double r) -> Eigen::Vector3d {
-            const double c = r * (r - d00pd11) + d00md11sd01sq;
-            
-            // If the 2x2 minor is degenerate, fall back to cross product of rows
-            if (std::abs(c) < K_EPS) {
-                Eigen::Vector3d row0(d00 - r, d01, d02);
-                Eigen::Vector3d row1(d01, d11 - r, d12);
-                Eigen::Vector3d cross = row0.cross(row1);
-                double norm = cross.norm();
-                if (norm > K_EPS) {
-                    return cross / norm;
-                }
-                Eigen::Vector3d row2(d02, d12, d22 - r);
-                cross = row0.cross(row2);
-                return cross.normalized();
-            }
-
-            const double invC = 1.0 / c;
-            const double a1 = (r * d02 + d01 * d12 - d02 * d11) * invC;
-            const double a2 = (r * d12 + d01 * d02 - d00 * d12) * invC;
-
-            const double scale = 1.0 / std::sqrt(a1 * a1 + a2 * a2 + 1.0);
-            return Eigen::Vector3d(a1 * scale, a2 * scale, scale);
-        };
-
-        out.e1 = getEigenvector(out.sigma1);
-        out.e2 = getEigenvector(out.sigma2);
-
-        return out;
-    }
-}
-
 
 };
