@@ -8,6 +8,7 @@
 #include <array>
 #include <algorithm>
 #include <optional>
+#include <thread>
 
 #include <eigen3/Eigen/Dense>
 #include <gtsam/geometry/Rot3.h>
@@ -24,9 +25,32 @@
 
 namespace PoolSLAM{
 
+void LfTracker::start(){
+    if(runTracker.load(std::memory_order_relaxed)){
+        return;
+    }
+    runTracker.store(true, std::memory_order_release);
+    workerThread = std::thread(&LfTracker::processKeyframe, this);
+}
+
+void LfTracker::end(){
+    if(!runTracker.load(std::memory_order_relaxed)){
+        return;
+    }
+    runTracker.store(false, std::memory_order_release);
+    c_passKeyframe.notify_all();
+    if(workerThread.joinable()){
+        workerThread.join();
+    }
+}
+
+bool LfTracker::isRunning() const{
+    return runTracker.load(std::memory_order_relaxed);
+}
+
 bool LfTracker::passKeyframe(uint32_t id, double timestamp, const uint8_t *curBuffer, const std::vector<TrackedFeature<FEATURE_RADIUS>> &features){
-    // Check if tracker is busy
-    if(busy.load(std::memory_order_relaxed)){
+    // Check if tracker is busy or features are empty
+    if(busy.load(std::memory_order_acquire) || features.empty()){
         return false;
     }
 
@@ -36,17 +60,26 @@ bool LfTracker::passKeyframe(uint32_t id, double timestamp, const uint8_t *curBu
             localBuffer[i] = curBuffer[i];
         }
 
-        Keyframe newFrame(features.size(),  id, timestamp, nextFrameId);
+        Keyframe newFrame(features.size(), id, timestamp, nextFrameId);
 
         for(auto &feature : features){
-            newFrame.addKp(feature.ptCurr.cast<Eigen::Vector2i>(), feature.id);
+            Eigen::Vector2i kp = feature.ptCurr.cast<int>();
+            if(kp.x() >= QOV_RADIUS && kp.x() < static_cast<int>(config.wImage) - QOV_RADIUS &&
+               kp.y() >= QOV_RADIUS && kp.y() < static_cast<int>(config.hImage) - QOV_RADIUS){
+                newFrame.addKp(kp, feature.id);
+            }
+        }
+
+        if(newFrame.features.empty()){
+            return false;
         }
 
         // Resizes features buffer and allocates words buffer
         newFrame.finalSize();
 
-        keyframes.push_back(newFrame);
+        keyframes.push_back(std::move(newFrame));
         nextFrameId++;
+        busy.store(true, std::memory_order_release);
     }
 
     c_passKeyframe.notify_all();
@@ -76,6 +109,26 @@ bool LfTracker::getMatch(BackendLfPacket &outPacket){
     return true;
 }
 
+bool LfTracker::updateKeyframe(BackendKeyframeUpdate &update){
+    std::lock_guard<std::mutex> lock(m_passKeyframe);
+    for(auto &kf : keyframes){
+        if(kf.id == update.id){
+            kf.pose = update.pose;
+            kf.landmarks.assign(kf.features.size(), Landmark3d{});
+            for(const auto &lm : update.landmarks){
+                for(size_t i = 0; i < kf.features.size(); i++){
+                    if(kf.features[i].featureId == lm.featureId){
+                        kf.landmarks[i] = lm;
+                        break;
+                    }
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 void LfTracker::processKeyframe(){
     while(runTracker.load(std::memory_order_relaxed)){
         size_t numMatches = 0;
@@ -83,8 +136,13 @@ void LfTracker::processKeyframe(){
         {
             std::unique_lock<std::mutex> lock(m_passKeyframe);
 
-            c_passKeyframe.wait(lock);
-            busy.store(true, std::memory_order_acquire);
+            c_passKeyframe.wait(lock, [this]{
+                return busy.load(std::memory_order_acquire) || !runTracker.load(std::memory_order_relaxed);
+            });
+
+            if(!runTracker.load(std::memory_order_relaxed)){
+                break;
+            }
 
             // Blur the image
             gaussianBlur();
@@ -94,60 +152,73 @@ void LfTracker::processKeyframe(){
 
             // Iterate over descriptors and add to database
             auto &kf = keyframes.back();
-            float sumOfWeights = 0.0f;
             float freq = 1.0f / static_cast<float>(kf.features.size());
             for(auto &feat : kf.features){
-                auto wordId = vocabTree.matchWord(feat.des, freq, kf.keyframeId, database);
-                sumOfWeights += database.getEntries(wordId).back().weight;
-                
-                feat.wordId = wordId;
+                feat.wordId = vocabTree.matchWord(feat.des, freq, kf.keyframeId, database);
             }
 
-            std::sort(kf.features.begin(), kf.features.end(), [](const auto &a, const auto& b){
+            std::sort(kf.features.begin(), kf.features.end(), [](const auto &a, const auto &b){
                 return a.wordId < b.wordId;
             });
 
-
-            // Update the score of each frame
+            // Compute L1 norm across unique words in this keyframe
+            float sumOfWeights = 0.0f;
             uint32_t lastWordId = UINT32_MAX;
-            auto weightNormFactor = 1.0f / sumOfWeights;
             for(auto &feat : kf.features){
                 if(lastWordId != feat.wordId){
-                    database.invertedIndex[feat.wordId].back().weight *= weightNormFactor;
+                    lastWordId = feat.wordId;
+                    sumOfWeights += database.getEntries(feat.wordId).back().weight;
                 }
-                auto &frames = database.getEntries(feat.wordId);
-                for(uint32_t kfIdx = 0; kfIdx < frames.size(); kfIdx++){
-                    keyframes[frames[kfIdx].keyframeId].score += std::min(frames[kfIdx].weight, frames.back().weight);
+            }
+
+            // Normalize weights and update the score of each frame once per unique word
+            lastWordId = UINT32_MAX;
+            auto weightNormFactor = (sumOfWeights > 0.0f) ? (1.0f / sumOfWeights) : 0.0f;
+            for(auto &feat : kf.features){
+                if(lastWordId != feat.wordId){
+                    lastWordId = feat.wordId;
+                    database.invertedIndex[feat.wordId].back().weight *= weightNormFactor;
+                    auto &frames = database.getEntries(feat.wordId);
+                    for(uint32_t kfIdx = 0; kfIdx < frames.size(); kfIdx++){
+                        keyframes[frames[kfIdx].keyframeId].score += std::min(frames[kfIdx].weight, frames.back().weight);
+                    }
                 }
             }
 
             // Find the best frame
-            Keyframe &bestFrame = keyframes.front();
-            float bestScore = 0.0;
-            float lastScore = (keyframes.end() - 1)->score;
+            Keyframe *bestFrame = &keyframes.front();
+            float bestScore = 0.0f;
+            float lastScore = (keyframes.size() >= 2) ? keyframes[keyframes.size() - 2].score : 1.0f;
             for(auto &frame : keyframes){
-                if(frame.score > bestScore && (frame.keyframeId + config.excludedFrames) < kf.keyframeId){
-                    bestFrame = frame;
+                if(frame.score > bestScore &&
+                   (frame.keyframeId + config.excludedFrames) < kf.keyframeId &&
+                   !frame.landmarks.empty()){
+                    bestFrame = &frame;
                     bestScore = frame.score;
                 }
-                frame.score = 0;
+                frame.score = 0.0f;
             }
 
             packet.currentFrameId = kf.id;
-            packet.matchedFrameId = bestFrame.id;
+            packet.matchedFrameId = bestFrame->id;
             packet.timestamp = kf.timestamp;
 
             // Find the ratio between the score of the best frame and the score of the previous frame
-            auto scoreRatio = bestScore / lastScore;
+            auto scoreRatio = (lastScore > 1e-6f) ? (bestScore / lastScore) : 0.0f;
 
             packet.matchScore = bestScore;
 
             if(bestScore >= config.minTfIdfScore && scoreRatio >= MIN_SCORE_RATIO){
-                numMatches = matchFeatures(kf.keyframeId, bestFrame.keyframeId);
+                numMatches = matchFeatures(kf.keyframeId, bestFrame->keyframeId);
             }else{
                 busy.store(false, std::memory_order_release);
                 continue;
             }
+        }
+
+        if(numMatches < std::max<size_t>(4, config.ransacInliearThreshold)){
+            busy.store(false, std::memory_order_release);
+            continue;
         }
 
         auto pair = ransac(numMatches);
@@ -163,19 +234,22 @@ void LfTracker::processKeyframe(){
 
         // Find optimal pose and measurement covariance
         Eigen::Matrix<double, 6, 6> outCovariance;
-        refinePoseLM(pair->second, config.K, T, outCovariance);
+        if(!refinePoseLM(pair->second, config.K.cast<double>(), T, outCovariance)){
+            busy.store(false, std::memory_order_release);
+            continue;
+        }
 
         gtsam::Rot3 rot(T.block<3, 3>(0, 0));
         gtsam::Point3 trans(T.block<3, 1>(0, 3));
         
         // Package noise model
         gtsam::Vector6 sigmas;
-        sigmas << std::sqrt(outCovariance(3, 3)), // Rot X
-            std::sqrt(outCovariance(4, 4)), // Rot Y
-            std::sqrt(outCovariance(5, 5)), // Rot Z
-            std::sqrt(outCovariance(0, 0)), // Trans X
-            std::sqrt(outCovariance(1, 1)), // Trans Y
-            std::sqrt(outCovariance(2, 2)); // Trans Z
+        sigmas << std::sqrt(std::max(1e-12, outCovariance(3, 3))), // Rot X
+            std::sqrt(std::max(1e-12, outCovariance(4, 4))), // Rot Y
+            std::sqrt(std::max(1e-12, outCovariance(5, 5))), // Rot Z
+            std::sqrt(std::max(1e-12, outCovariance(0, 0))), // Trans X
+            std::sqrt(std::max(1e-12, outCovariance(1, 1))), // Trans Y
+            std::sqrt(std::max(1e-12, outCovariance(2, 2))); // Trans Z
 
         auto baseGaussian = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
 
@@ -186,6 +260,7 @@ void LfTracker::processKeyframe(){
                 gtsam::noiseModel::mEstimator::Huber::Create(1.345), baseGaussian
             );
             stagedMatch->relativePose = gtsam::Pose3(rot, trans);
+            dataReady.store(true, std::memory_order_release);
         }
         busy.store(false, std::memory_order_release);
     }
@@ -195,21 +270,21 @@ void LfTracker::processKeyframe(){
 void LfTracker::calculateDescriptors(){
     auto &kf = keyframes.back();
     for(auto &feat : kf.features){
-        uint16_t m10 = 0;
-        uint16_t m01 = 0;
+        int32_t m10 = 0;
+        int32_t m01 = 0;
         // Find the orientation of the feature
         // BEGIN VECTORIZE
         for(int y = -QOV_RADIUS; y <= QOV_RADIUS; y++){
-            auto rowPtr = localBuffer.get() + (feat.pt.y() + y) + feat.pt.x();
+            auto rowPtr = localBuffer.get() + static_cast<size_t>(feat.pt.y() + y) * config.wImage + feat.pt.x();
             for(int x = -QOV_RADIUS; x <= QOV_RADIUS; x++){
                 m10 += *(rowPtr + x) * x;
-                m01 += *(rowPtr + y) * y;
+                m01 += *(rowPtr + x) * y;
             }
         }
         // END VECTORIZE
-        auto angle = std::atan2(m01, m10);
+        auto angle = std::atan2(static_cast<double>(m01), static_cast<double>(m10));
         auto featPtr = localBuffer.get() + config.wImage * static_cast<size_t>(feat.pt.y()) + feat.pt.x();
-        auto offsets = qovPairs.offsetAtAngleRad(angle);
+        const auto &offsets = qovPairs.offsetAtAngleRad(angle);
         feat.des = descriptor::generateDescriptor(featPtr, offsets);
     }
 }
@@ -218,11 +293,15 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
     auto &curKf = keyframes[curId];
     auto &matchKf = keyframes[matchId];
 
+    if(matchKf.landmarks.size() < matchKf.features.size()){
+        return 0;
+    }
+
     // Match features
-    Eigen::Index  matchingIdx = 0;
+    Eigen::Index matchingIdx = 0;
     for(size_t curFeatIdx = 0; curFeatIdx < curKf.features.size(); curFeatIdx++){
         int bestDist = INT32_MAX; // Distance of the best match
-        int secondDist = INT32_MAX; // Distance of the 
+        int secondDist = INT32_MAX; // Distance of the second best match
         size_t bestIdx = 0;
         auto &curFeat = curKf.features[curFeatIdx];
         auto curParent = vocabTree.vocabulary[curFeat.wordId].parent;
@@ -231,6 +310,10 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
         // Iterate through features of matched frame until the best two features remain
         for(size_t matchFeatIdx = 0; matchFeatIdx < matchKf.features.size(); matchFeatIdx++){
             auto &matchFeat = matchKf.features[matchFeatIdx];
+            if(matchKf.landmarks[matchFeatIdx].featureId != matchFeat.featureId ||
+               matchKf.landmarks[matchFeatIdx].pt3d.z() <= 0.0){
+                continue;
+            }
             if(matchFeat.featureId == curFeat.featureId){
                 exactMatch = true;
                 bestIdx = matchFeatIdx;
@@ -247,7 +330,7 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
                 }
             }
             firstChild = true;
-            auto hamDist = descriptor::fastHamming(curFeat.des, curFeat.des);
+            auto hamDist = descriptor::fastHamming(curFeat.des, matchFeat.des);
             if(hamDist < bestDist){
                 secondDist = bestDist;
                 bestDist = hamDist;
@@ -258,8 +341,11 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
         }
 
         if(!exactMatch){
-            // Reject features too similair to other features
-            if(!(static_cast<float>(secondDist) / static_cast<float>(bestDist) >= MAX_FEATURE_DIST_RATIO)){
+            if(bestDist == INT32_MAX || secondDist == 0){
+                continue;
+            }
+            // Reject features too similar to other features
+            if(static_cast<float>(bestDist) / static_cast<float>(secondDist) > MAX_FEATURE_DIST_RATIO){
                 continue;
             }
 
@@ -267,7 +353,8 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
 
             // Check features in the current keyframe near the current feature to see if they are more similar to the matched feature
             bool bidirectional = true;
-            for(size_t i = curFeatIdx; i >= std::max<size_t>(0, BIDIRECTIONAL_SEARCH_INTERVAL); i--){
+            size_t minIdx = (curFeatIdx > BIDIRECTIONAL_SEARCH_INTERVAL) ? (curFeatIdx - BIDIRECTIONAL_SEARCH_INTERVAL) : 0;
+            for(size_t i = minIdx; i < curFeatIdx; i++){
                 auto hamDist = descriptor::fastHamming(matchedFeat.des, curKf.features[i].des);
                 if(hamDist < bestDist){
                     bidirectional = false;
@@ -276,14 +363,17 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
             }
 
             if(bidirectional){
-                for(size_t i = curFeatIdx; i < std::min<size_t>(curKf.features.size(), BIDIRECTIONAL_SEARCH_INTERVAL); i++){
+                size_t maxIdx = std::min<size_t>(curKf.features.size(), curFeatIdx + BIDIRECTIONAL_SEARCH_INTERVAL + 1);
+                for(size_t i = curFeatIdx + 1; i < maxIdx; i++){
                     auto hamDist = descriptor::fastHamming(matchedFeat.des, curKf.features[i].des);
                     if(hamDist < bestDist){
                         bidirectional = false;
                         break;
                     }
                 }
-            }else{
+            }
+
+            if(!bidirectional){
                 continue;
             }
         }
@@ -304,14 +394,14 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
     std::array<Eigen::Index, 4> m; // Match indicies
     std::array<Eigen::Vector3d, 4> x; // 3d points
     std::array<Eigen::Vector3d, 4> y; // homogenous points
-    Eigen::Matrix<double, 3, 4> bestT; // Best transformation
-    size_t bestInliers; // Best number of inliers
+    Eigen::Matrix<double, 3, 4> bestT = Eigen::Matrix<double, 3, 4>::Zero(); // Best transformation
+    size_t bestInliers = 0; // Best number of inliers
     for(int iter = 0; iter < config.ransacIters; iter++){
         // Find 4 random matches
-        m[0] = static_cast<Eigen::Index>((ransacRng() * numMatches) >> 31);
-        m[1] = static_cast<Eigen::Index>((ransacRng() * numMatches) >> 31);
-        m[2] = static_cast<Eigen::Index>((ransacRng() * numMatches) >> 31);
-        m[3] = static_cast<Eigen::Index>((ransacRng() * numMatches) >> 31);
+        m[0] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
+        m[1] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
+        m[2] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
+        m[3] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
 
         x[0] = matching.matchLandmarks.col(m[0]).cast<double>();
         x[1] = matching.matchLandmarks.col(m[1]).cast<double>();
@@ -333,11 +423,14 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
         auto t = T->rightCols(1);
         
         size_t inliers = 0;
-        for(int match; match < static_cast<int>(numMatches); match++){
+        for(int match = 0; static_cast<size_t>(match) < numMatches; match++){
             Eigen::Vector3d P = matching.matchLandmarks.col(match);
+            Eigen::Vector3d PCam = R * P + t;
+            if(PCam.z() <= 1e-6){
+                continue;
+            }
             Eigen::Vector2d p = matching.curFeatures.col(match).hnormalized();
-
-            Eigen::Vector2d proj = (R * P + t).hnormalized();
+            Eigen::Vector2d proj = PCam.hnormalized();
             
             auto e = (proj - p).norm();
             if(e <= config.maxReprojectionError){
@@ -359,33 +452,37 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
     // Repackage the inliers
     auto R = bestT.leftCols(3);
     auto t = bestT.rightCols(1);
-    int writeIdx = 0;
-    for(int readIdx = 0; static_cast<size_t>(readIdx) < numMatches; readIdx++){
+    Eigen::Index writeIdx = 0;
+    for(Eigen::Index readIdx = 0; static_cast<size_t>(readIdx) < numMatches; readIdx++){
         Eigen::Vector3d P = matching.matchLandmarks.col(readIdx);
+        Eigen::Vector3d PCam = R * P + t;
+        if(PCam.z() <= 1e-6){
+            continue;
+        }
         Eigen::Vector2d p = matching.curFeatures.col(readIdx).hnormalized();
-
-        Eigen::Vector2d proj = (R * P + t).hnormalized();
+        Eigen::Vector2d proj = PCam.hnormalized();
         
         auto e = (proj - p).norm();
         if(e <= config.maxReprojectionError){
             matching.curFeatures.col(writeIdx) = matching.curFeatures.col(readIdx);
-            matching.matchLandmarks.col(writeIdx) = matching.curFeatures.col(readIdx);
+            matching.matchLandmarks.col(writeIdx) = matching.matchLandmarks.col(readIdx);
+            writeIdx++;
         }
     }
 
-    return std::pair{bestT, ratio};
-
-
+    return std::pair{bestT, static_cast<size_t>(writeIdx)};
 }
 
+
+
 void LfTracker::undistort(Eigen::Matrix3Xd &pts){    
-    auto count = pts.size();
+    auto count = pts.cols();
     float cx = config.K(0, 2);
     float cy = config.K(1, 2);
     float fxInv = 1.0f / config.K(0, 0);
     float fyInv = 1.0f / config.K(1, 1);
     // START VECTORIZE
-    for(int i = 0; i < count; i++){
+    for(Eigen::Index i = 0; i < count; i++){
         auto pt = pts.col(i).cast<float>();
         float xd = (pt.x() - cx) * fxInv;
         float yd = (pt.y() - cy) * fyInv;
@@ -405,9 +502,9 @@ void LfTracker::undistort(Eigen::Matrix3Xd &pts){
             y -= (yEst - yd);
         }
 
-        pts(0, i) = x;
-        pts(1, i) = y;
-        pts(2, i) = 1.0f;
+        pts(0, i) = static_cast<double>(x);
+        pts(1, i) = static_cast<double>(y);
+        pts(2, i) = 1.0;
     }
     // END VECTORIZE
 }
@@ -417,36 +514,36 @@ void LfTracker::gaussianBlur(){
     // First pass using [1, 4, 6, 4, 1]
     for(size_t row = 0; row < config.hImage; row++){
         auto rowPtr = localBuffer.get() + row * config.wImage;
-        blurData.rowBuffer[0] = static_cast<uint8_t>(
+        blurData.rowBuffer[0] = static_cast<uint8_t>((
             *(rowPtr) * BlurData::KERNEL[0] + *(rowPtr) * BlurData::KERNEL[1] + 
             *(rowPtr) * BlurData::KERNEL[2] + *(rowPtr + 1) * BlurData::KERNEL[3] +
             *(rowPtr + 2) * BlurData::KERNEL[4]
-        );
-        blurData.rowBuffer[1] = static_cast<uint8_t>(
+        ) >> 4);
+        blurData.rowBuffer[1] = static_cast<uint8_t>((
             *(rowPtr) * BlurData::KERNEL[0] + *(rowPtr) * BlurData::KERNEL[1] + 
             *(rowPtr + 1) * BlurData::KERNEL[2] + *(rowPtr + 2) * BlurData::KERNEL[3] +
             *(rowPtr + 3) * BlurData::KERNEL[4]
-        );
+        ) >> 4);
         for(size_t col = 2; col < config.wImage - 2; col++){
-            blurData.rowBuffer[col] = static_cast<uint8_t>(
+            blurData.rowBuffer[col] = static_cast<uint8_t>((
                 *(rowPtr + col - 2) * BlurData::KERNEL[0] + *(rowPtr + col - 1) * BlurData::KERNEL[1] + 
                 *(rowPtr + col) * BlurData::KERNEL[2] + *(rowPtr + col + 1) * BlurData::KERNEL[3] +
                 *(rowPtr + col + 2) * BlurData::KERNEL[4]
-            );
+            ) >> 4);
         }
         const auto lastIndex = config.wImage - 1;
-        blurData.rowBuffer[config.wImage - 2] = static_cast<uint8_t>(
+        blurData.rowBuffer[config.wImage - 2] = static_cast<uint8_t>((
             *(rowPtr + lastIndex - 3) * BlurData::KERNEL[0] + *(rowPtr + lastIndex - 2) * BlurData::KERNEL[1] + 
             *(rowPtr + lastIndex - 1) * BlurData::KERNEL[2] + *(rowPtr + lastIndex) * BlurData::KERNEL[3] +
             *(rowPtr + lastIndex) * BlurData::KERNEL[4]
-        );
-        blurData.rowBuffer[config.wImage - 2] = static_cast<uint8_t>(
+        ) >> 4);
+        blurData.rowBuffer[lastIndex] = static_cast<uint8_t>((
             *(rowPtr + lastIndex - 2) * BlurData::KERNEL[0] + *(rowPtr + lastIndex - 1) * BlurData::KERNEL[1] + 
             *(rowPtr + lastIndex) * BlurData::KERNEL[2] + *(rowPtr + lastIndex) * BlurData::KERNEL[3] +
             *(rowPtr + lastIndex) * BlurData::KERNEL[4]
-        );
+        ) >> 4);
 
-        std::copy(blurData.rowBuffer.get(), blurData.rowBuffer.get() + lastIndex, rowPtr);
+        std::copy(blurData.rowBuffer.get(), blurData.rowBuffer.get() + config.wImage, rowPtr);
     }
 
     // Second pass using [1, 4, 6, 4, 1]T
@@ -455,16 +552,18 @@ void LfTracker::gaussianBlur(){
     auto firstRowPtr = localBuffer.get();
     auto secondRowPtr = firstRowPtr + config.wImage;
     for(size_t col = 0; col < config.wImage; col++){
-        blurData.ringBuffer[0][col] = static_cast<uint8_t>(
-            *(firstRowPtr) * BlurData::KERNEL[0] + *(firstRowPtr) * BlurData::KERNEL[1] + 
-            *(firstRowPtr) * BlurData::KERNEL[2] + *(firstRowPtr + config.wImage) * BlurData::KERNEL[3] +
-            *(firstRowPtr + 2 * config.wImage) * BlurData::KERNEL[4]
-        );
-        blurData.ringBuffer[1][col] = static_cast<uint8_t>(
-            *(firstRowPtr) * BlurData::KERNEL[0] + *(firstRowPtr) * BlurData::KERNEL[1] + 
-            *(secondRowPtr) * BlurData::KERNEL[2] + *(secondRowPtr + config.wImage) * BlurData::KERNEL[3] +
-            *(secondRowPtr + 2 * config.wImage) * BlurData::KERNEL[4]
-        );
+        auto fCol = firstRowPtr + col;
+        auto sCol = secondRowPtr + col;
+        blurData.ringBuffer[0][col] = static_cast<uint8_t>((
+            *(fCol) * BlurData::KERNEL[0] + *(fCol) * BlurData::KERNEL[1] + 
+            *(fCol) * BlurData::KERNEL[2] + *(fCol + config.wImage) * BlurData::KERNEL[3] +
+            *(fCol + 2 * config.wImage) * BlurData::KERNEL[4]
+        ) >> 4);
+        blurData.ringBuffer[1][col] = static_cast<uint8_t>((
+            *(fCol) * BlurData::KERNEL[0] + *(fCol) * BlurData::KERNEL[1] + 
+            *(sCol) * BlurData::KERNEL[2] + *(sCol + config.wImage) * BlurData::KERNEL[3] +
+            *(sCol + 2 * config.wImage) * BlurData::KERNEL[4]
+        ) >> 4);
     }
 
     // Main rows
@@ -473,31 +572,32 @@ void LfTracker::gaussianBlur(){
     for(size_t row = 2; row < config.hImage - 2; row++){
         auto rowPtr = localBuffer.get() + row * config.wImage;
         for(size_t col = 0; col < config.wImage; col++){
-            blurData.ringBuffer[ringWIdx][col] = static_cast<uint8_t>(
-                *(rowPtr - 2 * config.wImage) * BlurData::KERNEL[0] + *(rowPtr - config.wImage) * BlurData::KERNEL[1] + 
-                *(rowPtr) * BlurData::KERNEL[2] + *(rowPtr + config.wImage) * BlurData::KERNEL[3] +
-                *(rowPtr + 2 * config.wImage) * BlurData::KERNEL[4]
-            );
+            auto colPtr = rowPtr + col;
+            blurData.ringBuffer[ringWIdx][col] = static_cast<uint8_t>((
+                *(colPtr - 2 * config.wImage) * BlurData::KERNEL[0] + *(colPtr - config.wImage) * BlurData::KERNEL[1] + 
+                *(colPtr) * BlurData::KERNEL[2] + *(colPtr + config.wImage) * BlurData::KERNEL[3] +
+                *(colPtr + 2 * config.wImage) * BlurData::KERNEL[4]
+            ) >> 4);
         }
-        std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage - 1, rowPtr -  2 * config.wImage);
+        std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage, rowPtr - 2 * config.wImage);
         ringWIdx++;
         ringWIdx %= 3;
         ringRIdx++;
         ringRIdx %= 3;
     }
 
-
     // Last two rows because they are cut off
     auto penRowPtr = localBuffer.get() + config.wImage * (config.hImage - 2);
     for(size_t col = 0; col < config.wImage; col++){
-        blurData.ringBuffer[ringWIdx][col] = static_cast<uint8_t>(
-            *(penRowPtr - 2 * config.wImage) * BlurData::KERNEL[0] + *(penRowPtr - config.wImage) * BlurData::KERNEL[1] + 
-            *(penRowPtr) * BlurData::KERNEL[2] + *(penRowPtr + config.wImage) * BlurData::KERNEL[3] +
-            *(penRowPtr + config.wImage) * BlurData::KERNEL[4]
-        );
+        auto colPtr = penRowPtr + col;
+        blurData.ringBuffer[ringWIdx][col] = static_cast<uint8_t>((
+            *(colPtr - 2 * config.wImage) * BlurData::KERNEL[0] + *(colPtr - config.wImage) * BlurData::KERNEL[1] + 
+            *(colPtr) * BlurData::KERNEL[2] + *(colPtr + config.wImage) * BlurData::KERNEL[3] +
+            *(colPtr + config.wImage) * BlurData::KERNEL[4]
+        ) >> 4);
     }
 
-    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage - 1, penRowPtr -  2 * config.wImage);
+    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage, penRowPtr - 2 * config.wImage);
     ringWIdx++;
     ringWIdx %= 3;
     ringRIdx++;
@@ -505,19 +605,20 @@ void LfTracker::gaussianBlur(){
 
     auto lastRowPtr = penRowPtr + config.wImage;
     for(size_t col = 0; col < config.wImage; col++){
-        *(lastRowPtr) = static_cast<uint8_t>(
-            *(lastRowPtr - 2 * config.wImage) * BlurData::KERNEL[0] + *(lastRowPtr - config.wImage) * BlurData::KERNEL[1] + 
-            *(lastRowPtr) * BlurData::KERNEL[2] + *(lastRowPtr) * BlurData::KERNEL[3] +
-            *(lastRowPtr) * BlurData::KERNEL[4]
-        );
+        auto colPtr = lastRowPtr + col;
+        *(colPtr) = static_cast<uint8_t>((
+            *(colPtr - 2 * config.wImage) * BlurData::KERNEL[0] + *(colPtr - config.wImage) * BlurData::KERNEL[1] + 
+            *(colPtr) * BlurData::KERNEL[2] + *(colPtr) * BlurData::KERNEL[3] +
+            *(colPtr) * BlurData::KERNEL[4]
+        ) >> 4);
     }
 
-    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage - 1, penRowPtr -  2 * config.wImage);
+    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage, penRowPtr - config.wImage);
     ringWIdx++;
     ringWIdx %= 3;
     ringRIdx++;
     ringRIdx %= 3;
-    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage - 1, penRowPtr -  2 * config.wImage);
+    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage, penRowPtr);
 }
 
 };

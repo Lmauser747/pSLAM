@@ -84,15 +84,14 @@ struct BackendLfPacket{
 };
 
 struct Landmark3d{
-    uint32_t featureId;
-    Eigen::Vector3d pt3d;
+    Eigen::Vector3d pt3d = Eigen::Vector3d::Zero();
+    uint32_t featureId = UINT32_MAX;
 };
 
 struct BackendKeyframeUpdate{
-    uint32_t keyframeId; // Id of keyframe
-    double timestamp; // Timestamp of keyframe
+    uint32_t id = 0; // Id of keyframe
     gtsam::Pose3 pose; // Pose of keyframe
-    std::vector<Landmark3d> features; // Updates positions of landmarks in keyframe
+    std::vector<Landmark3d> landmarks; // Updates positions of landmarks in keyframe
 };
 
 

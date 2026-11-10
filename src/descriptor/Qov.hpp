@@ -38,9 +38,12 @@ struct alignas(16) QovDescriptor{
 
 struct QovFeature{
     QovDescriptor des;
-    Eigen::Vector2i pt; // Keypoint coordinate where descriptor was extracted
-    uint32_t wordId = UINT32_MAX; // Id of the word associated with this feature
-    uint32_t featureId; // Feature Id for backend tracking
+    Eigen::Vector2i pt = Eigen::Vector2i::Zero();
+    uint32_t wordId = 0;
+    uint32_t featureId = 0;
+
+    QovFeature() = default;
+    QovFeature(const Eigen::Vector2i &kp, uint32_t id) : pt(kp), featureId(id){}
 };
 
 struct QovCompPair{

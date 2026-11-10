@@ -12,6 +12,7 @@
 #include <array>
 #include <random>
 #include <utility>
+#include <thread>
 
 #include <eigen3/Eigen/Dense>
 #include <gtsam/geometry/Pose3.h>
@@ -125,6 +126,7 @@ private:
     std::mutex m_backendPacket; // Mutex to control output of backend packet
 
     std::condition_variable c_passKeyframe; // Condition varaiable to signal new keyframe
+    std::thread workerThread; // Worker thread for keyframe processing
 
     // Process keyframe. Runs in thread
     void processKeyframe();
@@ -148,13 +150,20 @@ private:
     bool refinePoseLM(size_t numInliers, const Eigen::Matrix3d& K_cam, Eigen::Matrix<double, 3, 4>& Tcand, Eigen::Matrix<double, 6, 6>& outCovariance);
 
 public:
-    LfTracker(LfTrackerConfig c, std::string &vocabPath) : config(c), qovPairs(config.wImage),
+    LfTracker(LfTrackerConfig c, const std::string &vocabPath) : config(c), qovPairs(config.wImage),
     vocabTree(vocabPath){
         localBuffer = std::make_unique<uint8_t[]>(config.wImage * config.hImage);
-        blurData.rowBuffer = std::make_unique<uint8_t[]>(config.wImage * config.hImage);
+        blurData.rowBuffer = std::make_unique<uint8_t[]>(config.wImage);
         for(auto &buf : blurData.ringBuffer){
-            buf = std::make_unique<uint8_t[]>(config.wImage * config.hImage);
+            buf = std::make_unique<uint8_t[]>(config.wImage);
         }
+
+        matching.curFeatures.resize(2 * static_cast<int>(config.numBuckets));
+        matching.matchLandmarks.resize(2 * static_cast<int>(config.numBuckets));
+    }
+
+    ~LfTracker(){
+        end();
     }
 
     // Function to pass keyframe from the frontend to the LfTracker
@@ -173,7 +182,7 @@ public:
     void end();
 
     // Is tracker running
-    void isRunning();
+    bool isRunning() const;
 
 };
 }
