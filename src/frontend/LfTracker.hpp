@@ -36,8 +36,8 @@ struct LfTrackerConfig{
     float minTfIdfScore; // Minimum score for TF-IDF
     size_t excludedFrames; // Number of previous frames to exclude to ensure long-term matches
 
-    uint32_t RansacInliearThreshold = 20; // Minimum number of RANSAC inliers
-    int RansacIters = 20;
+    uint32_t ransacInliearThreshold = 20; // Minimum number of RANSAC inliers
+    int ransacIters = 20;
     float minInliearRatio = 0.30f; // Minimum ratio of inlier to total landmarks
     float maxReprojectionError = 2.00f; // Maximum reprojection error from mathec frame to current frame
 
@@ -54,7 +54,7 @@ struct BlurData{
 // Stores structs needed to caclulate the tranformation between frames
 struct LfMatching{
     Eigen::Matrix3Xf curFeatures; // Homogenous points from the current frame
-    Eigen::Matrix3Xf matchFeatures; // Homogenous points from the previous frame
+    Eigen::Matrix3Xf matchLandmarks; // 3d positions of landmarks from previous frame
 
 };
 
@@ -62,18 +62,20 @@ struct LfMatching{
 class Keyframe{
 public: 
     std::vector<descriptor::QovFeature> features; // Features in the frame
-    uint64_t id; // Frame id
+    std::vector<Landmark3d> landmarks; // Position of each feature relative to the frame
+    gtsam::Pose3 pose; // Global pose of the frame
+    uint32_t id; // Frame id
     double timestamp; // Timestamp of the frame
-    uint32_t idx; // Index of frame in keyframe array
+    uint32_t keyframeId; // Keyframe id
     float score = 0; // Score of the frame compared to the current frame 
 
-    Keyframe(size_t numFeatures, uint64_t frameId, double time, uint32_t frameIdx) : 
-    id(frameId), timestamp(time), idx(frameIdx){
+    Keyframe(size_t numFeatures, uint32_t frameId, double time, uint32_t kfId) : 
+    id(frameId), timestamp(time), keyframeId(kfId){
         features.reserve(numFeatures);
     }
 
-    void addKp(const Eigen::Vector2i &kp){
-        features.emplace_back(kp);
+    void addKp(const Eigen::Vector2i &kp, uint32_t featureId){
+        features.emplace_back(kp, featureId);
     }
 
     // Resize the feature vector to final size once all keypoints have been added
@@ -104,7 +106,7 @@ private:
     descriptor::BowDatabase database; // Mantains lookup for features in the frame
     LfMatching matching; // Stores the data needed for Lf matching
 
-    uint32_t nextFrameIdx = 0; // Id for next frame
+    uint32_t nextFrameId = 0; // Id for next frame
 
     std::minstd_rand ransacRng; // Random number generator for RANSAC
 
@@ -129,14 +131,13 @@ private:
     void calculateDescriptors();
 
     // Match features
-    size_t matchFeatures(size_t curIdx, size_t matchIdx);
+    size_t matchFeatures(size_t curId, size_t matchId);
 
     // Undistort the features
-    void undistort(const std::vector<descriptor::QovFeature> &ptDist, Eigen::Matrix3Xf &ptUndist);
+    void undistort(Eigen::Matrix3Xf &pts);
 
     // Use RANSAC algorihtm to prune outliers based on P3P
-    size_t ransac();
-
+    size_t ransac(size_t numMatches);
 
 
 public:
@@ -150,10 +151,13 @@ public:
     }
 
     // Function to pass keyframe from the frontend to the LfTracker
-    bool passKeyframe(uint64_t id, double timestamp, const uint8_t *curBuffer, const std::vector<TrackedFeature<FEATURE_RADIUS>> &features);
+    bool passKeyframe(uint32_t id, double timestamp, const uint8_t *curBuffer, const std::vector<TrackedFeature<FEATURE_RADIUS>> &features);
     
     // Function to get the packet from the LfTracker to the backend through outPacket
     bool getMatch(BackendLfPacket &outPacket);
+
+    // Add 3d landmarks to the keyframe
+    bool updateKeyframe(BackendKeyframeUpdate &update);
 
     // Start tracker
     void start();

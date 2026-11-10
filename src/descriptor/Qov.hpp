@@ -40,7 +40,7 @@ struct QovFeature{
     QovDescriptor des;
     Eigen::Vector2i pt; // Keypoint coordinate where descriptor was extracted
     uint32_t wordId = UINT32_MAX; // Id of the word associated with this feature
-    uint32_t parent = UINT32_MAX; // Id of the parent associated with the feature
+    uint32_t featureId; // Feature Id for backend tracking
 };
 
 struct QovCompPair{

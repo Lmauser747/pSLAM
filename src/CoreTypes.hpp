@@ -48,7 +48,7 @@ struct VisualMeasurement{
 
 // Data passed from the Hf frontend to the backend
 struct BackendHfPacket{
-    uint64_t frameIdx = 0;
+    uint32_t frameId = 0;
     double timestamp = 0.0;
     bool isKeyframe = false;
 
@@ -65,8 +65,8 @@ struct BackendHfPacket{
 // Data passed from the Lf frontend to the backend
 struct BackendLfPacket{
     // Stores the frame index of the current and matched keyframe
-    uint64_t currentFrameIdx = 0;
-    uint64_t matchedFrameIdx = 0;
+    uint32_t currentFrameId = 0;
+    uint32_t matchedFrameId = 0;
 
     double timestamp = 0.0;
 
@@ -81,6 +81,18 @@ struct BackendLfPacket{
     uint32_t inlierCount = 0; // Number of inlier landmarks
     float inlierRatio = 0.0f; // Ratio of inlier landmarks to total landmarks
     float matchScore = 0.0f; // Similarlity score between frames
+};
+
+struct Landmark3d{
+    uint32_t featureId;
+    Eigen::Vector3f pt3d;
+};
+
+struct BackendKeyframeUpdate{
+    uint32_t keyframeId; // Id of keyframe
+    double timestamp; // Timestamp of keyframe
+    gtsam::Pose3 pose; // Pose of keyframe
+    std::vector<Landmark3d> features; // Updates positions of landmarks in keyframe
 };
 
 
