@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <utility>
 
 #include <eigen3/Eigen/Dense>
 #include <gtest/gtest.h>
@@ -866,7 +867,7 @@ TEST_F(HfTrackerTest, trackExistingPureRotationGuidedByPrior) {
     ASSERT_EQ(survived, kTotal);
 
     for (size_t i = 0; i < survived; i++) {
-        const auto &feat = tracker->getActiveFeatures()[i];
+        const auto feat = tracker->getActiveFeatures()[i];
         EXPECT_EQ(feat.age, 1u);
         EXPECT_NEAR(feat.ptCurr.x(), expectedPts[i].x(), kSubPixelAlignmentTol);
         EXPECT_NEAR(feat.ptCurr.y(), expectedPts[i].y(), kSubPixelAlignmentTol);
@@ -891,7 +892,7 @@ TEST_F(HfTrackerTest, trackExistingPureTranslationLateralAndLooming) {
     ASSERT_EQ(survived, kTotal);
 
     for (size_t i = 0; i < survived; i++) {
-        const auto &feat = tracker->getActiveFeatures()[i];
+        const auto feat = tracker->getActiveFeatures()[i];
         EXPECT_EQ(feat.age, 1u);
         EXPECT_NEAR(feat.ptCurr.x(), expectedPts[i].x(), kSubPixelAlignmentTol);
         EXPECT_NEAR(feat.ptCurr.y(), expectedPts[i].y(), kSubPixelAlignmentTol);

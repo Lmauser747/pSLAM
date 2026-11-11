@@ -149,6 +149,7 @@ private:
     // Do LMA to find the optimal pose
     bool refinePoseLM(size_t numInliers, const Eigen::Matrix3d& K_cam, Eigen::Matrix<double, 3, 4>& Tcand, Eigen::Matrix<double, 6, 6>& outCovariance);
 
+    friend class LfTrackerTest;
 public:
     LfTracker(LfTrackerConfig c, const std::string &vocabPath) : config(c), qovPairs(config.wImage),
     vocabTree(vocabPath){
@@ -158,8 +159,8 @@ public:
             buf = std::make_unique<uint8_t[]>(config.wImage);
         }
 
-        matching.curFeatures.resize(2 * static_cast<int>(config.numBuckets));
-        matching.matchLandmarks.resize(2 * static_cast<int>(config.numBuckets));
+        matching.curFeatures.resize(3, 2 * static_cast<int>(config.numBuckets));
+        matching.matchLandmarks.resize(3, 2 * static_cast<int>(config.numBuckets));
     }
 
     ~LfTracker(){

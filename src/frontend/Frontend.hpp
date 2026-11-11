@@ -34,6 +34,11 @@ class Frontend{
 public:
     Frontend(FrontendConfig configuration, Synchronizer &syncronizer, const std::string &vocabPath) : config(configuration), sync(syncronizer), hf(config.h, config.w, config.K, config.dist), lf(config.lfConfig, vocabPath){}
 
+    // Start running the threads
+    void start();
+
+    // Stop running the threads
+    void end();
 
 };
 

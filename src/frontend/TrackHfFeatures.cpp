@@ -148,6 +148,11 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
     if(numFeatures < 2){
         return 0;
     }
+    epi.xCurr.resize(numFeatures);
+    epi.yCurr.resize(numFeatures);
+    epi.xPrev.resize(numFeatures);
+    epi.yPrev.resize(numFeatures);
+
     // Unpack AoS to SoA
     // START VECTORIZE
     for(size_t i = 0; i < numFeatures; i++){

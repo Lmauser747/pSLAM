@@ -27,6 +27,9 @@ target_link_libraries(poolslam_hal
 add_library(poolslam_frontend STATIC
     frontend/ReplenishHfFeatures.cpp
     frontend/TrackHfFeatures.cpp
+    frontend/LfTracker.cpp
+    frontend/P3p.cpp
+    frontend/Lma.cpp
 )
 target_compile_definitions(poolslam_frontend
     PRIVATE
@@ -65,9 +68,9 @@ target_link_libraries(poolslam_frontend
 
 
 add_library(poolslam_descriptor STATIC
-    frontend/ReplenishHfFeatures.cpp
-    frontend/TrackHfFeatures.cpp
+    descriptor/BinaryBow.cpp
 )
+
 target_compile_definitions(poolslam_descriptor
     PRIVATE
         POOL_SLAM_SIMD

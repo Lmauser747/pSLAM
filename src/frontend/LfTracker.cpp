@@ -386,9 +386,16 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
 }
 
 std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(size_t numMatches){
+    if(numMatches < 4){
+        return std::nullopt;
+    }
+
     // Undistort the features
     undistort(matching.curFeatures);
     
+    const double fx = static_cast<double>(config.K(0, 0));
+    const double fy = static_cast<double>(config.K(1, 1));
+
     // Do a number of ransac iterations using P3P
     std::array<Eigen::Index, 4> m; // Match indicies
     std::array<Eigen::Vector3d, 4> x; // 3d points
@@ -396,11 +403,16 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
     Eigen::Matrix<double, 3, 4> bestT = Eigen::Matrix<double, 3, 4>::Zero(); // Best transformation
     size_t bestInliers = 0; // Best number of inliers
     for(int iter = 0; iter < config.ransacIters; iter++){
-        // Find 4 random matches
-        m[0] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
-        m[1] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
-        m[2] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
-        m[3] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
+        // Find 4 distinct random matches
+        for(size_t k = 0; k < 4; k++){
+            m[k] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
+            for(size_t prev = 0; prev < k; prev++){
+                if(m[k] == m[prev]){
+                    m[k] = static_cast<Eigen::Index>((static_cast<size_t>(m[k]) + 1) % numMatches);
+                    prev = static_cast<size_t>(-1);
+                }
+            }
+        }
 
         x[0] = matching.matchLandmarks.col(m[0]).cast<double>();
         x[1] = matching.matchLandmarks.col(m[1]).cast<double>();
@@ -422,16 +434,17 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
         auto t = T->rightCols(1);
         
         size_t inliers = 0;
-        for(int match = 0; static_cast<size_t>(match) < numMatches; match++){
-            Eigen::Vector3d P = matching.matchLandmarks.col(match);
+        for(size_t match = 0; match < numMatches; match++){
+            Eigen::Vector3d P = matching.matchLandmarks.col(static_cast<int>(match));
             Eigen::Vector3d PCam = R * P + t;
             if(PCam.z() <= 1e-6){
                 continue;
             }
-            Eigen::Vector2d p = matching.curFeatures.col(match).hnormalized();
+            Eigen::Vector2d p = matching.curFeatures.col(static_cast<int>(match)).hnormalized();
             Eigen::Vector2d proj = PCam.hnormalized();
+            Eigen::Vector2d diff(fx * (proj.x() - p.x()), fy * (proj.y() - p.y()));
             
-            auto e = (proj - p).norm();
+            auto e = diff.norm();
             if(e <= config.maxReprojectionError){
                 inliers++;
             }
@@ -460,8 +473,9 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
         }
         Eigen::Vector2d p = matching.curFeatures.col(readIdx).hnormalized();
         Eigen::Vector2d proj = PCam.hnormalized();
+        Eigen::Vector2d diff(fx * (proj.x() - p.x()), fy * (proj.y() - p.y()));
         
-        auto e = (proj - p).norm();
+        auto e = diff.norm();
         if(e <= config.maxReprojectionError){
             matching.curFeatures.col(writeIdx) = matching.curFeatures.col(readIdx);
             matching.matchLandmarks.col(writeIdx) = matching.matchLandmarks.col(readIdx);

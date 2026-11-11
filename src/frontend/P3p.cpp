@@ -22,6 +22,77 @@ struct DiagonalDecomp{
     Eigen::Vector3d e2 = Eigen::Vector3d::Zero();
 };
 
+inline double computeEigenProductP0(const Eigen::Matrix3d &D){
+    return (D(0, 0) * D(1, 1) - D(0, 1) * D(0, 1)) +
+           (D(0, 0) * D(2, 2) - D(0, 2) * D(0, 2)) +
+           (D(1, 1) * D(2, 2) - D(1, 2) * D(1, 2));
+}
+
+inline Eigen::Matrix3d findSingularD0(const Eigen::Matrix3d &D1, const Eigen::Matrix3d &D2){
+    const double c3 = D2.determinant();
+    if(std::abs(c3) <= K_EPS){
+        return D2;
+    }
+
+    const double invC3 = 1.0 / c3;
+    // Coefficient of gamma^2 (one column from D1, two from D2)
+    const double a2 = invC3 * (
+        D1.col(0).dot(D2.col(1).cross(D2.col(2))) +
+        D1.col(1).dot(D2.col(2).cross(D2.col(0))) +
+        D1.col(2).dot(D2.col(0).cross(D2.col(1)))
+    );
+    // Coefficient of gamma^1 (two columns from D1, one from D2)
+    const double a1 = invC3 * (
+        D2.col(0).dot(D1.col(1).cross(D1.col(2))) +
+        D2.col(1).dot(D1.col(2).cross(D1.col(0))) +
+        D2.col(2).dot(D1.col(0).cross(D1.col(1)))
+    );
+    // Coefficient of gamma^0
+    const double a0 = invC3 * D1.determinant();
+
+    const double a2_3 = a2 / 3.0;
+    const double p = a1 - (a2 * a2) / 3.0;
+    const double q = a0 - (a1 * a2) / 3.0 + (2.0 * a2 * a2 * a2) / 27.0;
+    const double delta = (q * q) * 0.25 + (p * p * p) / 27.0;
+
+    auto polishRoot = [&](double g) -> double{
+        for(int i = 0; i < 2; i++){
+            const double f = a0 + g * (a1 + g * (a2 + g));
+            const double fPrime = a1 + g * (2.0 * a2 + 3.0 * g);
+            if(std::abs(fPrime) > K_EPS){
+                g -= f / fPrime;
+            }
+        }
+        return g;
+    };
+
+    double bestGamma = 0.0;
+    if(delta <= 0.0){
+        const double sqrtNegP3 = std::sqrt(std::max(0.0, -p / 3.0));
+        const double denom = 2.0 * sqrtNegP3 * (-p / 3.0);
+        double w = (std::abs(denom) > K_EPS) ? (-q / denom) : 0.0;
+        w = std::clamp(w, -1.0, 1.0);
+        const double theta = std::acos(w);
+
+        double minP0 = std::numeric_limits<double>::max();
+        for(int k = 0; k < 3; k++){
+            double g = polishRoot((2.0 * sqrtNegP3) * std::cos((theta + 2.0 * PI * k) / 3.0) - a2_3);
+            const double p0 = computeEigenProductP0(D1 + g * D2);
+            if(p0 < minP0){
+                minP0 = p0;
+                bestGamma = g;
+            }
+        }
+    }else{
+        const double sqrtDelta = std::sqrt(delta);
+        const double u = std::cbrt(-0.5 * q + sqrtDelta);
+        const double v = std::cbrt(-0.5 * q - sqrtDelta);
+        bestGamma = polishRoot((u + v) - a2_3);
+    }
+
+    return D1 + bestGamma * D2;
+}
+
 inline double solveLambdaTwistCubic(double a, double b, double c, double d){
     const double invA = 1.0 / a;
     const double a2 = b * invA;
@@ -59,9 +130,7 @@ inline double solveLambdaTwistCubic(double a, double b, double c, double d){
 inline DiagonalDecomp diagonalizeD0(const Eigen::Matrix3d &D){
     DiagonalDecomp out;
     const double p1 = -(D(0, 0) + D(1, 1) + D(2, 2));
-    const double p0 = (D(0, 0) * D(1, 1) - D(0, 1) * D(0, 1)) +
-                      (D(0, 0) * D(2, 2) - D(0, 2) * D(0, 2)) +
-                      (D(1, 1) * D(2, 2) - D(1, 2) * D(1, 2));
+    const double p0 = computeEigenProductP0(D);
 
     const double delta = std::max(0.0, p1 * p1 - 4.0 * p0);
     const double sqrtDelta = std::sqrt(delta);
@@ -78,19 +147,37 @@ inline DiagonalDecomp diagonalizeD0(const Eigen::Matrix3d &D){
     }
 
     auto getEigenvector = [&](double r) -> Eigen::Vector3d{
-        const double c = r * (r - (D(0, 0) + D(1, 1))) + (D(0, 0) * D(1, 1) - D(0, 1) * D(0, 1));
-        if(std::abs(c) < K_EPS){
-            Eigen::Vector3d cross = Eigen::Vector3d(D(0, 0) - r, D(0, 1), D(0, 2)).cross(Eigen::Vector3d(D(0, 1), D(1, 1) - r, D(1, 2)));
-            if(cross.norm() > K_EPS){
-                return cross.normalized();
+        const Eigen::Vector3d r0(D(0, 0) - r, D(0, 1), D(0, 2));
+        const Eigen::Vector3d r1(D(0, 1), D(1, 1) - r, D(1, 2));
+        const Eigen::Vector3d r2(D(0, 2), D(1, 2), D(2, 2) - r);
+
+        const Eigen::Vector3d c01 = r0.cross(r1);
+        const Eigen::Vector3d c02 = r0.cross(r2);
+        const Eigen::Vector3d c12 = r1.cross(r2);
+
+        const double n01 = c01.squaredNorm();
+        const double n02 = c02.squaredNorm();
+        const double n12 = c12.squaredNorm();
+
+        if(n01 >= n02 && n01 >= n12){
+            if(n01 > K_EPS * K_EPS){
+                return (c01 / std::sqrt(n01));
+            }else{
+                return Eigen::Vector3d::UnitX();
             }
-            return Eigen::Vector3d(D(0, 0) - r, D(0, 1), D(0, 2)).cross(Eigen::Vector3d(D(0, 2), D(1, 2), D(2, 2) - r)).normalized();
+        }else if(n02 >= n12){
+            if(n02 > K_EPS * K_EPS){
+                return (c02 / std::sqrt(n02));
+            }else{
+                return Eigen::Vector3d::UnitX();
+            }
+        }else{
+            if(n12 > K_EPS * K_EPS){
+                return (c12 / std::sqrt(n12));
+            }else{
+                return Eigen::Vector3d::UnitX();
+            }
         }
-        const double invC = 1.0 / c;
-        const double a1 = (r * D(0, 2) + D(0, 1) * D(1, 2) - D(0, 2) * D(1, 1)) * invC;
-        const double a2 = (r * D(1, 2) + D(0, 1) * D(0, 2) - D(0, 0) * D(1, 2)) * invC;
-        const double scale = 1.0 / std::sqrt(a1 * a1 + a2 * a2 + 1.0);
-        return Eigen::Vector3d(a1 * scale, a2 * scale, scale);
     };
 
     out.e1 = getEigenvector(out.sigma1);
@@ -98,10 +185,7 @@ inline DiagonalDecomp diagonalizeD0(const Eigen::Matrix3d &D){
     return out;
 }
 
-std::optional<Eigen::Matrix<double, 3, 4>> solveP4PLambdaTwist(
-    const std::array<Eigen::Vector3d, 4>& x,
-    const std::array<Eigen::Vector3d, 4>& y
-){
+std::optional<Eigen::Matrix<double, 3, 4>> solveP4PLambdaTwist(const std::array<Eigen::Vector3d, 4>& x, const std::array<Eigen::Vector3d, 4>& y){
     const std::array<Eigen::Vector3d, 3> u = {
         y[0].normalized(),
         y[1].normalized(),
@@ -137,23 +221,23 @@ std::optional<Eigen::Matrix<double, 3, 4>> solveP4PLambdaTwist(
     const Eigen::Matrix3d D1 = M01 * a12Sq - M12 * a01Sq;
     const Eigen::Matrix3d D2 = M02 * a12Sq - M12 * a02Sq;
 
-    const double aCoeff = D2.determinant();
-    const double norm = (std::abs(aCoeff) > K_EPS) ? 1.0 / aCoeff : 1.0;
-    const double aNorm = (std::abs(aCoeff) > K_EPS) ? 1.0 : aCoeff;
-
-    const double bCoeff = norm * (
-        D2.col(0).dot(D1.col(1).cross(D1.col(2))) +
-        D2.col(1).dot(D1.col(2).cross(D1.col(0))) +
-        D2.col(2).dot(D1.col(0).cross(D1.col(1)))
-    );
-    const double cCoeff = norm * (
+    const double c3 = D2.determinant();
+    if(std::abs(c3) <= K_EPS){
+        return std::nullopt;
+    }
+    const double c2 = (
         D1.col(0).dot(D2.col(1).cross(D2.col(2))) +
         D1.col(1).dot(D2.col(2).cross(D2.col(0))) +
         D1.col(2).dot(D2.col(0).cross(D2.col(1)))
     );
-    const double dNorm = norm * D1.determinant();
+    const double c1 = (
+        D2.col(0).dot(D1.col(1).cross(D1.col(2))) +
+        D2.col(1).dot(D1.col(2).cross(D1.col(0))) +
+        D2.col(2).dot(D1.col(0).cross(D1.col(1)))
+    );
+    const double c0 = D1.determinant();
 
-    const double gamma = solveLambdaTwistCubic(aNorm, bCoeff, cCoeff, dNorm);
+    const double gamma = solveLambdaTwistCubic(c3, c2, c1, c0);
     const Eigen::Matrix3d D0 = D1 + gamma * D2;
     DiagonalDecomp decomp = diagonalizeD0(D0);
 
@@ -245,7 +329,7 @@ std::optional<Eigen::Matrix<double, 3, 4>> solveP4PLambdaTwist(
             const double invDet = 1.0 / detJ;
             const double dL0 = invDet * ( dJac * eJac * r0 + bJac * fJac * r1 - bJac * dJac * r2);
             const double dL1 = invDet * ( cJac * fJac * r0 - aJac * fJac * r1 + aJac * dJac * r2);
-            const double dL2 = invDet * (-cJac * eJac * r0 + aJac * eJac * r1 + aJac * bJac * r2);
+            const double dL2 = invDet * (-cJac * eJac * r0 + aJac * eJac * r1 + bJac * cJac * r2);
 
             lambda(0) += dL0;
             lambda(1) += dL1;

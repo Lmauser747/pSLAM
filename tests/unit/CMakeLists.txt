@@ -17,9 +17,11 @@ target_link_libraries(unit_tests_hal PRIVATE
 add_executable(unit_tests_frontend
     TestTrackHfFeatures.cpp
     TestReplenishHfFeatures.cpp
+    TestLfTracker.cpp
 )
 target_link_libraries(unit_tests_frontend PRIVATE
     poolslam_frontend
+    poolslam_descriptor
     GTest::gtest_main
     Eigen3::Eigen
     gtsam
