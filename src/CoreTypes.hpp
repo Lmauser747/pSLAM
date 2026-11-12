@@ -28,6 +28,7 @@ struct TrackedFeature{
     // Using homogenous coordinates
     Eigen::Vector2f ptCurr; // Sub-pixel position of feature
     Eigen::Vector2f ptPrev; // Sub-pixel position of feature in previous frame
+    Eigen::Vector2f ptUndis; // Sub-pixel undistorted position of the points
 
 
     static constexpr int PATCH_SIZE = 2 * Radius + 1;
@@ -42,7 +43,7 @@ struct TrackedFeature{
 };
 
 struct VisualMeasurement{
-    uint32_t landmarkId;
+    uint32_t featureId;
     gtsam::Point2 pt;  
 };
 

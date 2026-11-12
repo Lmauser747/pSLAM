@@ -70,6 +70,10 @@ public:
         SyncedPacket &target, std::chrono::milliseconds timeout = DEFAULT_PACKET_TIMEOUT
     ); 
 
+    void recycleFrame(PixelArray *frame){
+        imageStream.recycleFrame(frame);
+    }
+
     ~Synchronizer(){
         stop();
 
@@ -83,6 +87,7 @@ public:
             outputQueue.pop();
         }
     }
+
 };
 
 }

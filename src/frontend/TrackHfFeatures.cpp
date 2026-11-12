@@ -247,6 +247,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             if(std::abs(d) < ransacTau){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = std::move(activeFeatures[readIdx]);
+                    activeFeatures[writeIdx].ptUndis = epi.currRays.col(static_cast<Eigen::Index>(readIdx)).hnormalized();
                     epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
                 }
                 writeIdx++;
