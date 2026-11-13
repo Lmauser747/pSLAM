@@ -75,4 +75,4 @@ Testing/
 .venv
 
 # test outputs
-unit.txt
+test.*

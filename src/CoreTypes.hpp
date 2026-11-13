@@ -44,7 +44,8 @@ struct TrackedFeature{
 
 struct VisualMeasurement{
     uint32_t featureId;
-    gtsam::Point2 pt;  
+    gtsam::Point2 pt; 
+    VisualMeasurement(uint32_t featureId_, const gtsam::Point2 &pt_) : featureId(featureId_), pt(pt_){} 
 };
 
 // Data passed from the Hf frontend to the backend

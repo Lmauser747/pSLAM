@@ -130,7 +130,9 @@ inline double solveLambdaTwistCubic(double a, double b, double c, double d){
 inline DiagonalDecomp diagonalizeD0(const Eigen::Matrix3d &D){
     DiagonalDecomp out;
     const double p1 = -(D(0, 0) + D(1, 1) + D(2, 2));
-    const double p0 = computeEigenProductP0(D);
+    const double p0 = (D(0, 0) * D(1, 1) - D(0, 1) * D(0, 1)) +
+                      (D(0, 0) * D(2, 2) - D(0, 2) * D(0, 2)) +
+                      (D(1, 1) * D(2, 2) - D(1, 2) * D(1, 2));
 
     const double delta = std::max(0.0, p1 * p1 - 4.0 * p0);
     const double sqrtDelta = std::sqrt(delta);
@@ -147,37 +149,32 @@ inline DiagonalDecomp diagonalizeD0(const Eigen::Matrix3d &D){
     }
 
     auto getEigenvector = [&](double r) -> Eigen::Vector3d{
-        const Eigen::Vector3d r0(D(0, 0) - r, D(0, 1), D(0, 2));
-        const Eigen::Vector3d r1(D(0, 1), D(1, 1) - r, D(1, 2));
-        const Eigen::Vector3d r2(D(0, 2), D(1, 2), D(2, 2) - r);
+        const double c = r * (r - (D(0, 0) + D(1, 1))) + (D(0, 0) * D(1, 1) - D(0, 1) * D(0, 1));
+        if(std::abs(c) < K_EPS){
+            const Eigen::Vector3d r0(D(0, 0) - r, D(0, 1), D(0, 2));
+            const Eigen::Vector3d r1(D(0, 1), D(1, 1) - r, D(1, 2));
+            const Eigen::Vector3d r2(D(0, 2), D(1, 2), D(2, 2) - r);
 
-        const Eigen::Vector3d c01 = r0.cross(r1);
-        const Eigen::Vector3d c02 = r0.cross(r2);
-        const Eigen::Vector3d c12 = r1.cross(r2);
+            const Eigen::Vector3d c01 = r0.cross(r1);
+            const Eigen::Vector3d c02 = r0.cross(r2);
+            const Eigen::Vector3d c12 = r1.cross(r2);
 
-        const double n01 = c01.squaredNorm();
-        const double n02 = c02.squaredNorm();
-        const double n12 = c12.squaredNorm();
+            const double n01 = c01.squaredNorm();
+            const double n02 = c02.squaredNorm();
+            const double n12 = c12.squaredNorm();
 
-        if(n01 >= n02 && n01 >= n12){
-            if(n01 > K_EPS * K_EPS){
-                return (c01 / std::sqrt(n01));
-            }else{
-                return Eigen::Vector3d::UnitX();
+            if(n01 >= n02 && n01 >= n12){
+                return (n01 > K_EPS * K_EPS) ? c01.normalized() : Eigen::Vector3d::UnitX();
+            }else if(n02 >= n12){
+                return (n02 > K_EPS * K_EPS) ? c02.normalized() : Eigen::Vector3d::UnitY();
             }
-        }else if(n02 >= n12){
-            if(n02 > K_EPS * K_EPS){
-                return (c02 / std::sqrt(n02));
-            }else{
-                return Eigen::Vector3d::UnitX();
-            }
-        }else{
-            if(n12 > K_EPS * K_EPS){
-                return (c12 / std::sqrt(n12));
-            }else{
-                return Eigen::Vector3d::UnitX();
-            }
+            return (n12 > K_EPS * K_EPS) ? c12.normalized() : Eigen::Vector3d::UnitZ();
         }
+        const double invC = 1.0 / c;
+        const double a1 = (r * D(0, 2) + D(0, 1) * D(1, 2) - D(0, 2) * D(1, 1)) * invC;
+        const double a2 = (r * D(1, 2) + D(0, 1) * D(0, 2) - D(0, 0) * D(1, 2)) * invC;
+        const double scale = 1.0 / std::sqrt(a1 * a1 + a2 * a2 + 1.0);
+        return Eigen::Vector3d(a1 * scale, a2 * scale, scale);
     };
 
     out.e1 = getEigenvector(out.sigma1);

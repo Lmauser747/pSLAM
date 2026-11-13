@@ -1,9 +1,7 @@
 #pragma once
 
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <gtsam/navigation/ImuBias.h>
 #include <string>
 #include <thread>
 #include <queue>
@@ -11,9 +9,9 @@
 #include <condition_variable>
 #include <memory>
 #include <atomic>
-#include <optional>
 
 #include <eigen3/Eigen/Dense>
+#include <gtsam/navigation/ImuBias.h>
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/navigation/PreintegrationParams.h>
 
@@ -49,9 +47,8 @@ class Frontend{
 
     uint32_t frameId = 0;
 
-    std::optional<SyncedPacket> syncPacket;
-
     std::mutex m_hfQueue; // Mutex for hfQueue access
+    std::mutex m_imuBias;  // Mutex for IMU bias access
     std::condition_variable c_hfQueue; // Condition variable to notify backend of new data
 
     std::atomic<bool> runFrontend{false};
@@ -60,8 +57,10 @@ class Frontend{
 
     // Function to run in frontendThread
     void processPacket(); 
+
+    friend class FrontendTest;
 public:
-    Frontend(FrontendConfig configuration, Synchronizer &syncronizer, const std::string &vocabPath) : config(configuration), sync(syncronizer), hf(config.h, config.w, config.K, config.dist), lf(config.lfConfig, vocabPath){}
+    Frontend(FrontendConfig configuration, Synchronizer &syncronizer, const std::string &vocabPath) : config(configuration), sync(syncronizer), hf(config.w, config.h, config.K, config.dist), lf(config.lfConfig, vocabPath){}
 
     // Pop the Hf feature from the queue
     std::unique_ptr<BackendHfPacket> getHfPacket();
@@ -71,6 +70,11 @@ public:
 
     // Stop running the threads
     void end();
+
+    // Get a reference to the LfTracker
+    LfTracker &getLfTracker();
+
+    bool setBias(const gtsam::imuBias::ConstantBias &bias);
 
     ~Frontend(){
         if(runFrontend.load(std::memory_order_relaxed)){

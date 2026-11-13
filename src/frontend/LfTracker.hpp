@@ -28,7 +28,7 @@ struct LfTrackerConfig{
     size_t wImage, hImage; // Width and height of image
     size_t numBuckets; // Number of buckets for features to go in
 
-    const Eigen::Matrix3f K; // Camera matrix
+    Eigen::Matrix3f K; // Camera matrix
     Distortion dist; // Distortion parameters
     
     // Disabled right now because we aren't generating new features in LfTracker right now

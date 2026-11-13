@@ -30,6 +30,7 @@ add_library(poolslam_frontend STATIC
     frontend/LfTracker.cpp
     frontend/P3p.cpp
     frontend/Lma.cpp
+    frontend/Frontend.cpp
 )
 target_compile_definitions(poolslam_frontend
     PRIVATE

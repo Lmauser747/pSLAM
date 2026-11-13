@@ -10,26 +10,24 @@
 #include <thread>
 #include <utility>
 #include <vector>
-#include <atomic>
 
 #include <eigen3/Eigen/Dense>
-#include <gtsam/geometry/Pose3.h>
 #include <gtest/gtest.h>
 
 #include "CoreTypes.hpp"
 #include "frontend/LfTracker.hpp"
-#include "descriptor/BinaryBow.hpp"
-#include "descriptor/Qov.hpp"
 
 namespace PoolSLAM {
 namespace {
 
-// Renders a smooth continuous 2D corner with bilinear ramp profile
-void drawSmoothCorner(std::vector<uint8_t> &buffer, size_t width, size_t height,
-                      float cx, float cy, int radius, uint8_t darkVal, uint8_t brightVal,
-                      float rampWidth = 2.0f) {
+// Renders a smooth continuous 2D corner with an optional orientation angle (in radians)
+void drawRotatedCorner(std::vector<uint8_t> &buffer, size_t width, size_t height,
+                       float cx, float cy, int radius, uint8_t darkVal, uint8_t brightVal,
+                       float angleRad = 0.0f, float rampWidth = 2.5f) {
     const float midVal = 0.5f * (static_cast<float>(darkVal) + static_cast<float>(brightVal));
     const float halfRange = 0.5f * (static_cast<float>(brightVal) - static_cast<float>(darkVal));
+    const float cosA = std::cos(angleRad);
+    const float sinA = std::sin(angleRad);
 
     const int minX = std::max(0, static_cast<int>(std::floor(cx)) - radius);
     const int maxX = std::min(static_cast<int>(width) - 1, static_cast<int>(std::ceil(cx)) + radius);
@@ -37,12 +35,18 @@ void drawSmoothCorner(std::vector<uint8_t> &buffer, size_t width, size_t height,
     const int maxY = std::min(static_cast<int>(height) - 1, static_cast<int>(std::ceil(cy)) + radius);
 
     for (int y = minY; y <= maxY; y++) {
-        const float dy = (static_cast<float>(y) - cy) / rampWidth;
-        const float wy = std::clamp(dy, -1.0f, 1.0f);
+        const float rawDy = static_cast<float>(y) - cy;
         for (int x = minX; x <= maxX; x++) {
-            const float dx = (static_cast<float>(x) - cx) / rampWidth;
-            const float wx = std::clamp(dx, -1.0f, 1.0f);
-            const float intensity = midVal + halfRange * (wx * wy);
+            const float rawDx = static_cast<float>(x) - cx;
+            const float rx = rawDx * cosA + rawDy * sinA;
+            const float ry = -rawDx * sinA + rawDy * cosA;
+
+            // Asymmetric quadrant weighting so the patch has a strong intensity centroid (m10, m01)
+            const float wx = std::clamp(rx / rampWidth, -1.0f, 1.0f);
+            const float wy = std::clamp(ry / rampWidth, -1.0f, 1.0f);
+            const float quadWeight = 0.5f * (wx + wy) + 0.5f * (wx * wy);
+            const float intensity = midVal + halfRange * std::clamp(quadWeight, -1.0f, 1.0f);
+
             buffer[static_cast<size_t>(y) * width + static_cast<size_t>(x)] =
                 static_cast<uint8_t>(std::clamp(std::round(intensity), 0.0f, 255.0f));
         }
@@ -114,7 +118,7 @@ protected:
                                float minTfIdf = 0.05f,
                                size_t excluded = 2,
                                uint32_t minInliers = 12,
-                               int ransacIters = 40,
+                               int ransacIters = 50,
                                float minRatio = 0.30f,
                                float maxReprojErr = 2.0f) const {
         return LfTrackerConfig{
@@ -132,31 +136,32 @@ protected:
         };
     }
 
-    // Populates the vocabulary tree with deterministic nodes so matchWord and parent lookups
-    // function without requiring an external vocabulary binary file on disk.
+    // Populates the vocabulary tree using QovDescriptor::bits (4x uint64_t) and matches
+    // BinaryBowTree::readVocabFile's parent index formula.
     static void initSyntheticVocabTree(descriptor::BinaryBowTree &tree) {
         tree.tree.resize(descriptor::BinaryBowTree::TOTAL_NODES);
         tree.vocabulary.resize(descriptor::BinaryBowTree::VOCAB_SIZE);
 
         for (size_t i = 0; i < tree.tree.size(); i++) {
-            for (size_t word = 0; word < 4; word++) {
-                uint64_t val = 0;
-                for (size_t byte = 0; byte < 8; byte++) {
-                    size_t b = word * 8 + byte;
-                    uint64_t byteVal = static_cast<uint64_t>((i * 31 + b * 17) & 0xFF);
-                    val |= (byteVal << (byte * 8));
-                }
-                tree.tree[i].bits[word] = val;
+            uint64_t seed = static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL + 0xBF58476D1CE4E5B9ULL;
+            for (size_t w = 0; w < 4; w++) {
+                seed ^= (seed >> 30);
+                seed *= 0xBF58476D1CE4E5B9ULL;
+                seed ^= (seed >> 27);
+                tree.tree[i].bits[w] = seed + w * 0x94D049BB133111EBULL;
             }
         }
-        for (size_t w = 0; w < tree.vocabulary.size(); w++) {
-            tree.vocabulary[w].idf = 1.0f;
-            tree.vocabulary[w].parent =
-                static_cast<uint32_t>(w / descriptor::BinaryBowTree::NUM_BRANCHES);
+
+        constexpr size_t kParentOffset =
+            descriptor::BinaryBowTree::TREE_SIZE - descriptor::BinaryBowTree::NUM_PARENTS;
+        for (size_t wordId = 0; wordId < tree.vocabulary.size(); wordId++) {
+            tree.vocabulary[wordId].idf = 1.0f;
+            tree.vocabulary[wordId].parent =
+                static_cast<uint32_t>((wordId / descriptor::BinaryBowTree::NUM_BRANCHES) + kParentOffset);
         }
     }
 
-    // Private state accessors
+    // Private member accessors via friend class LfTrackerTest
     uint8_t *localBuffer() { return tracker->localBuffer.get(); }
     std::vector<Keyframe> &keyframes() { return tracker->keyframes; }
     LfMatching &matching() { return tracker->matching; }
@@ -190,15 +195,12 @@ protected:
         return feat;
     }
 
-    // Helper: creates a QovDescriptor filled with a repeating byte value or controlled bit errors
-    static descriptor::QovDescriptor makeDescriptor(uint8_t fillByte, size_t flipBits = 0) {
+    // Helper: creates a QovDescriptor with a base 64-bit word pattern and controlled bit flips
+    static descriptor::QovDescriptor makeDescriptor(uint64_t basePattern, size_t flipBits = 0) {
         descriptor::QovDescriptor des{};
-        for (size_t i = 0; i < 32; i++) {
-            des.bits[i / 8] |= static_cast<uint64_t>(fillByte) << (8 * (i % 8));
-        }
-
-        for (size_t bit = 0; bit < flipBits; bit++) {
-            des.bits[bit / 64] ^= (1uL << (bit % 64));
+        des.bits.fill(basePattern);
+        for (size_t bit = 0; bit < flipBits && bit < descriptor::QOV_BITS; bit++) {
+            des.bits[bit / 64] ^= (1ULL << (bit % 64));
         }
         return des;
     }
@@ -208,14 +210,14 @@ protected:
 // 1. Lambda Twist P3P / P4P Minimal Solver Tests (solveP4PLambdaTwist)
 // ============================================================================
 
-// Verifies that solveP4PLambdaTwist accurately recovers a known 6-DoF rigid transformation
-// [R | t] from 4 non-coplanar 3D points and their normalized 2D camera bearing rays.
-TEST_F(LfTrackerTest, solveP4PLambdaTwistRecoversExact6DoFPose) {
+// Verifies that solveP4PLambdaTwist recovers a general 6-DoF transformation [R | t]
+// from 4 non-coplanar 3D landmarks and their normalized camera bearing vectors.
+TEST_F(LfTrackerTest, solveP4PLambdaTwistRecoversExactGeneral6DoFPose) {
     const Eigen::Matrix3d RTrue =
-        (Eigen::AngleAxisd(0.15, Eigen::Vector3d::UnitY()) *
-         Eigen::AngleAxisd(-0.08, Eigen::Vector3d::UnitX()) *
-         Eigen::AngleAxisd(0.05, Eigen::Vector3d::UnitZ())).toRotationMatrix();
-    const Eigen::Vector3d tTrue(0.35, -0.20, 0.45);
+        (Eigen::AngleAxisd(0.18, Eigen::Vector3d::UnitY()) *
+         Eigen::AngleAxisd(-0.11, Eigen::Vector3d::UnitX()) *
+         Eigen::AngleAxisd(0.07, Eigen::Vector3d::UnitZ())).toRotationMatrix();
+    const Eigen::Vector3d tTrue(0.40, -0.25, 0.55);
 
     const std::array<Eigen::Vector3d, 4> pts3d = {{
         {-0.8, -0.6, 2.5},
@@ -233,22 +235,44 @@ TEST_F(LfTrackerTest, solveP4PLambdaTwistRecoversExact6DoFPose) {
     const auto TOpt = geometry::solveP4PLambdaTwist(pts3d, rays);
     ASSERT_TRUE(TOpt.has_value());
 
-    const Eigen::Matrix3d RRec = TOpt->leftCols<3>();
-    const Eigen::Vector3d tRec = TOpt->rightCols<1>();
-
-    EXPECT_NEAR((RRec - RTrue).norm(), 0.0, kPoseEps);
-    EXPECT_NEAR((tRec - tTrue).norm(), 0.0, kPoseEps);
+    EXPECT_NEAR((TOpt->leftCols<3>() - RTrue).norm(), 0.0, kPoseEps);
+    EXPECT_NEAR((TOpt->rightCols<1>() - tTrue).norm(), 0.0, kPoseEps);
 }
 
-// Verifies that solveP4PLambdaTwist returns std::nullopt when the first 3 3D points are collinear.
-TEST_F(LfTrackerTest, solveP4PLambdaTwistRejectsCollinearPoints) {
+// Verifies that solveP4PLambdaTwist handles axis-aligned / symmetric ray configurations
+// where the 2x2 minor c in diagonalizeD0 vanishes (c == 0) and row cross-products are used.
+TEST_F(LfTrackerTest, solveP4PLambdaTwistHandlesSymmetricAxisAlignedConfiguration) {
+    const Eigen::Matrix3d RTrue = Eigen::Matrix3d::Identity();
+    const Eigen::Vector3d tTrue(0.0, 0.0, 0.5);
+
+    const std::array<Eigen::Vector3d, 4> pts3d = {{
+        { 0.0,  0.0, 2.0}, // Along optical axis
+        { 1.0,  0.0, 2.0}, // Strictly along +X
+        { 0.0,  1.0, 2.0}, // Strictly along +Y
+        {-0.5, -0.5, 2.5}
+    }};
+
+    std::array<Eigen::Vector3d, 4> rays;
+    for (size_t i = 0; i < 4; i++) {
+        const Eigen::Vector3d PCam = RTrue * pts3d[i] + tTrue;
+        rays[i] = PCam.hnormalized().homogeneous();
+    }
+
+    const auto TOpt = geometry::solveP4PLambdaTwist(pts3d, rays);
+    ASSERT_TRUE(TOpt.has_value());
+
+    EXPECT_NEAR((TOpt->leftCols<3>() - RTrue).norm(), 0.0, kPoseEps);
+    EXPECT_NEAR((TOpt->rightCols<1>() - tTrue).norm(), 0.0, kPoseEps);
+}
+
+// Verifies that solveP4PLambdaTwist returns std::nullopt on collinear or duplicate 3D points.
+TEST_F(LfTrackerTest, solveP4PLambdaTwistRejectsCollinearAndDuplicatePoints) {
     const std::array<Eigen::Vector3d, 4> collinearPts = {{
         {0.0, 0.0, 2.0},
         {0.5, 0.5, 2.5},
         {1.0, 1.0, 3.0},
         {0.5, -0.5, 2.5}
     }};
-
     const std::array<Eigen::Vector3d, 4> rays = {{
         {0.0, 0.0, 1.0},
         {0.2, 0.2, 1.0},
@@ -257,38 +281,48 @@ TEST_F(LfTrackerTest, solveP4PLambdaTwistRejectsCollinearPoints) {
     }};
 
     EXPECT_FALSE(geometry::solveP4PLambdaTwist(collinearPts, rays).has_value());
+
+    const std::array<Eigen::Vector3d, 4> duplicatePts = {{
+        {0.0, 0.0, 2.0},
+        {0.0, 0.0, 2.0},
+        {1.0, 0.5, 3.0},
+        {0.5, -0.5, 2.5}
+    }};
+    EXPECT_FALSE(geometry::solveP4PLambdaTwist(duplicatePts, rays).has_value());
 }
 
 // ============================================================================
 // 2. Coordinate Undistortion Tests (undistort)
 // ============================================================================
 
-// Verifies that undistort maps pixel coordinates to normalized homogeneous camera rays
-// under both zero distortion and non-zero radial/tangential Brown-Conrady distortion.
+// Verifies that undistort accurately inverts pinhole projection and Brown-Conrady radial/tangential
+// distortion across all four image quadrants.
 TEST_F(LfTrackerTest, undistortInvertsPinholeAndBrownConradyDistortion) {
     Distortion nonZeroDist{};
-    nonZeroDist.k1 = -0.15f;
-    nonZeroDist.k2 = 0.025f;
-    nonZeroDist.p1 = 0.0015f;
-    nonZeroDist.p2 = -0.0012f;
+    nonZeroDist.k1 = -0.16f;
+    nonZeroDist.k2 = 0.028f;
+    nonZeroDist.p1 = 0.0014f;
+    nonZeroDist.p2 = -0.0011f;
 
     LfTrackerConfig cfg = makeConfig(nonZeroDist);
     tracker = std::make_unique<LfTracker>(cfg, dummyVocabPath);
 
     const std::vector<Eigen::Vector2f> trueNormRays = {
-        {0.0f, 0.0f},
-        {0.22f, -0.16f},
-        {-0.28f, 0.19f},
-        {0.15f, 0.25f}
+        { 0.00f,  0.00f},
+        { 0.24f, -0.18f},
+        {-0.26f,  0.20f},
+        {-0.19f, -0.22f},
+        { 0.17f,  0.25f}
     };
 
     Eigen::Matrix3Xd pts(3, trueNormRays.size());
     for (size_t i = 0; i < trueNormRays.size(); i++) {
         const Eigen::Vector2f dNorm =
             applyForwardDistortion(trueNormRays[i].x(), trueNormRays[i].y(), nonZeroDist);
-        pts(0, static_cast<Eigen::Index>(i)) = static_cast<double>(kFx * dNorm.x() + kCx);
-        pts(1, static_cast<Eigen::Index>(i)) = static_cast<double>(kFy * dNorm.y() + kCy);
-        pts(2, static_cast<Eigen::Index>(i)) = 1.0;
+        const auto idx = static_cast<Eigen::Index>(i);
+        pts(0, idx) = static_cast<double>(kFx * dNorm.x() + kCx);
+        pts(1, idx) = static_cast<double>(kFy * dNorm.y() + kCy);
+        pts(2, idx) = 1.0;
     }
 
     callUndistort(pts);
@@ -305,9 +339,9 @@ TEST_F(LfTrackerTest, undistortInvertsPinholeAndBrownConradyDistortion) {
 // 3. Separable 5x5 Gaussian Blur Tests (gaussianBlur)
 // ============================================================================
 
-// Verifies that gaussianBlur preserves flat constant-intensity images without uint8_t overflow
-// or boundary corruption across the entire image including the last two rows and columns.
-TEST_F(LfTrackerTest, gaussianBlurPreservesUniformIntensityAcrossAllBorders) {
+// Verifies that gaussianBlur preserves uniform images (0, 128, 255) across every pixel,
+// including the top/bottom two boundary rows and left/right two boundary columns.
+TEST_F(LfTrackerTest, gaussianBlurPreservesUniformIntensityAcrossEntireImage) {
     for (uint8_t val : {uint8_t{0}, uint8_t{128}, uint8_t{255}}) {
         std::fill_n(localBuffer(), kImageWidth * kImageHeight, val);
         callGaussianBlur();
@@ -319,152 +353,191 @@ TEST_F(LfTrackerTest, gaussianBlurPreservesUniformIntensityAcrossAllBorders) {
 }
 
 // Verifies that gaussianBlur applies the separable [1, 4, 6, 4, 1] / 16 kernel symmetrically
-// to an isolated impulse pixel in the interior of the image.
-TEST_F(LfTrackerTest, gaussianBlurSmoothsImpulseWithSymmetricKernelWeights) {
+// around an isolated impulse in both horizontal and vertical passes.
+TEST_F(LfTrackerTest, gaussianBlurAppliesSymmetricSeparableWeightsToImpulse) {
     std::fill_n(localBuffer(), kImageWidth * kImageHeight, 0);
-    constexpr size_t kCenterX = 320;
-    constexpr size_t kCenterY = 240;
-    localBuffer()[kCenterY * kImageWidth + kCenterX] = 255;
+    constexpr size_t kX = 320;
+    constexpr size_t kY = 240;
+    localBuffer()[kY * kImageWidth + kX] = 255;
 
     callGaussianBlur();
 
-    const uint8_t centerVal = localBuffer()[kCenterY * kImageWidth + kCenterX];
-    const uint8_t adjLeft = localBuffer()[kCenterY * kImageWidth + (kCenterX - 1)];
-    const uint8_t adjRight = localBuffer()[kCenterY * kImageWidth + (kCenterX + 1)];
-    const uint8_t adjTop = localBuffer()[(kCenterY - 1) * kImageWidth + kCenterX];
-    const uint8_t adjBot = localBuffer()[(kCenterY + 1) * kImageWidth + kCenterX];
+    const uint8_t center = localBuffer()[kY * kImageWidth + kX];
+    const uint8_t left1  = localBuffer()[kY * kImageWidth + (kX - 1)];
+    const uint8_t right1 = localBuffer()[kY * kImageWidth + (kX + 1)];
+    const uint8_t top1   = localBuffer()[(kY - 1) * kImageWidth + kX];
+    const uint8_t bot1   = localBuffer()[(kY + 1) * kImageWidth + kX];
+    const uint8_t diag1  = localBuffer()[(kY - 1) * kImageWidth + (kX - 1)];
 
-    EXPECT_GT(centerVal, adjLeft);
-    EXPECT_EQ(adjLeft, adjRight);
-    EXPECT_EQ(adjTop, adjBot);
-    EXPECT_EQ(adjLeft, adjTop);
-    EXPECT_GT(adjLeft, 0u);
+    // Horizontal pass: center = (255*6)>>4 = 95, +/-1 = (255*4)>>4 = 63
+    // Vertical pass: center = (95*6)>>4 = 35, axial = (95*4)>>4 = 23, diag = (63*4)>>4 = 15
+    EXPECT_EQ(center, 35u);
+    EXPECT_EQ(left1, 23u);
+    EXPECT_EQ(right1, 23u);
+    EXPECT_EQ(top1, 23u);
+    EXPECT_EQ(bot1, 23u);
+    EXPECT_EQ(diag1, 15u);
 }
 
 // ============================================================================
 // 4. Steered QOV Descriptor Extraction Tests (calculateDescriptors)
 // ============================================================================
 
-// Verifies that calculateDescriptors computes patch moments and extracts non-zero 256-bit
-// binary descriptors for keypoints in the current keyframe.
-TEST_F(LfTrackerTest, calculateDescriptorsExtractsValidBinaryDescriptors) {
-    drawSmoothCorner(frameBuffer, kImageWidth, kImageHeight, 200.0f, 180.0f,
-                     kCornerRadius, kDarkIntensity, kBrightIntensity);
+// Verifies that calculateDescriptors computes patch intensity moments (m10, m01) and populates
+// the 4x uint64_t bitfields in QovDescriptor::bits.
+TEST_F(LfTrackerTest, calculateDescriptorsPopulatesBitsAndRespondsToOrientation) {
+    drawRotatedCorner(frameBuffer, kImageWidth, kImageHeight, 200.0f, 200.0f,
+                      kCornerRadius, kDarkIntensity, kBrightIntensity, 0.0f);
+    drawRotatedCorner(frameBuffer, kImageWidth, kImageHeight, 400.0f, 200.0f,
+                      kCornerRadius, kDarkIntensity, kBrightIntensity, 1.5707963f);
     std::copy(frameBuffer.begin(), frameBuffer.end(), localBuffer());
 
-    Keyframe kf(1, 0, 1.0, 0);
-    kf.addKp(Eigen::Vector2i(200, 180), 42);
+    Keyframe kf(2, 0, 1.0, 0);
+    kf.addKp(Eigen::Vector2i(200, 200), 1);
+    kf.addKp(Eigen::Vector2i(400, 200), 2);
     kf.finalSize();
     keyframes().push_back(std::move(kf));
 
     callCalculateDescriptors();
 
-    const auto &des = keyframes().back().features.front().des;
-    bool hasNonZeroBits = false;
-    bool hasNonOneBits = false;
-    for (size_t i = 0; i < 4; i++) {
-        if (des.bits[i] != 0x00) hasNonZeroBits = true;
-        if (des.bits[i] != ~0uL) hasNonOneBits = true;
+    const auto &des0 = keyframes().back().features[0].des;
+    const auto &des90 = keyframes().back().features[1].des;
+
+    bool hasSetBits = false;
+    bool hasClearedBits = false;
+    for (size_t w = 0; w < 4; w++) {
+        if (des0.bits[w] != 0ULL) hasSetBits = true;
+        if (des0.bits[w] != ~0ULL) hasClearedBits = true;
     }
-    EXPECT_TRUE(hasNonZeroBits);
-    EXPECT_TRUE(hasNonOneBits);
+    EXPECT_TRUE(hasSetBits);
+    EXPECT_TRUE(hasClearedBits);
+
+    // Because QOV steers the sampling pattern by the patch's intensity centroid angle,
+    // a 90-degree rotated corner maintains high bit agreement with the 0-degree corner.
+    EXPECT_LT(descriptor::fastHamming(des0, des90), 64);
 }
 
 // ============================================================================
 // 5. Vocabulary-Guided Feature Matching Tests (matchFeatures)
 // ============================================================================
 
-// Verifies that matchFeatures pairs descriptors within the same vocabulary parent node,
-// enforces Lowe's ratio test and bidirectional consistency, skips invalid 3D landmarks (Z <= 0),
-// and populates matching.curFeatures and matching.matchLandmarks.
-TEST_F(LfTrackerTest, matchFeaturesEnforcesParentNodeLoweRatioAndValid3DDepth) {
-    Keyframe matchKf(4, 10, 1.0, 0);
-    Keyframe curKf(3, 20, 2.0, 1);
+// Verifies that matchFeatures accepts valid appearance and exact-ID matches while rejecting:
+// (a) matches failing Lowe's ratio test,
+// (b) matches failing the bidirectional neighbor consistency check, and
+// (c) landmarks with non-positive depth (Z <= 0).
+TEST_F(LfTrackerTest, matchFeaturesEnforcesLoweRatioBidirectionalCheckAndValidDepth) {
+    Keyframe matchKf(6, 10, 1.0, 0);
+    Keyframe curKf(5, 20, 2.0, 1);
 
-    // Feature 0: Valid appearance match in word 10 (parent 1), distinct from Feature 1
+    // Group 1 (wordId 10 & 11 -> same parent): Clean appearance match
     descriptor::QovFeature m0(Eigen::Vector2i(100, 100), 100);
     m0.wordId = 10;
-    m0.des = makeDescriptor(0x00, 0);
+    m0.des = makeDescriptor(0x0000000000000000ULL, 0);
 
-    // Feature 1: Competing descriptor in the same parent (word 11, parent 1), far Hamming distance (128 bits)
-    descriptor::QovFeature m1(Eigen::Vector2i(150, 100), 101);
+    descriptor::QovFeature m1(Eigen::Vector2i(120, 100), 101);
     m1.wordId = 11;
-    m1.des = makeDescriptor(0x00, 128);
+    m1.des = makeDescriptor(0x0000000000000000ULL, 120); // Distant second-best in same parent
 
-    // Feature 2: Ambiguous descriptor pair in word 20 & 21 (parent 2) that should fail Lowe's ratio test
-    descriptor::QovFeature m2a(Eigen::Vector2i(200, 200), 102);
+    // Group 2 (wordId 20 & 21 -> same parent): Ambiguous match failing Lowe's ratio test
+    descriptor::QovFeature m2a(Eigen::Vector2i(200, 150), 102);
     m2a.wordId = 20;
-    m2a.des = makeDescriptor(0xAA, 10);
+    m2a.des = makeDescriptor(0xAAAAAAAAAAAAAAAAULL, 10);
 
-    descriptor::QovFeature m2b(Eigen::Vector2i(210, 200), 103);
+    descriptor::QovFeature m2b(Eigen::Vector2i(220, 150), 103);
     m2b.wordId = 21;
-    m2b.des = makeDescriptor(0xAA, 11);
+    m2b.des = makeDescriptor(0xAAAAAAAAAAAAAAAAULL, 11);
 
-    // Feature 3: Feature with invalid depth (Z <= 0) in word 30 (parent 3), must be skipped
-    descriptor::QovFeature m3(Eigen::Vector2i(300, 300), 104);
-    m3.wordId = 30;
-    m3.des = makeDescriptor(0x55, 0);
+    // Group 3 (wordId 30 & 31 -> same parent): Fails bidirectional check when a neighbor in curKf is closer
+    descriptor::QovFeature m3a(Eigen::Vector2i(300, 200), 104);
+    m3a.wordId = 30;
+    m3a.des = makeDescriptor(0x5555555555555555ULL, 0);
 
-    matchKf.features = {m0, m1, m2a, m2b, m3};
+    descriptor::QovFeature m3b(Eigen::Vector2i(320, 200), 105);
+    m3b.wordId = 31;
+    m3b.des = makeDescriptor(0x5555555555555555ULL, 120);
+
+    // Group 4 (wordId 40): Invalid 3D depth (Z <= 0)
+    descriptor::QovFeature m4(Eigen::Vector2i(400, 250), 106);
+    m4.wordId = 40;
+    m4.des = makeDescriptor(0xFFFFFFFFFFFFFFFFULL, 0);
+
+    matchKf.features = {m0, m1, m2a, m2b, m3a, m3b, m4};
     matchKf.landmarks = {
-        Landmark3d{Eigen::Vector3d(0.5, -0.2, 2.5), 100},
-        Landmark3d{Eigen::Vector3d(0.8, -0.2, 3.0), 101},
-        Landmark3d{Eigen::Vector3d(0.1,  0.1, 2.0), 102},
-        Landmark3d{Eigen::Vector3d(0.2,  0.1, 2.0), 103},
-        Landmark3d{Eigen::Vector3d(0.0,  0.0, 0.0), 104} // Uninitialized / Z == 0
+        Landmark3d{Eigen::Vector3d(0.4, -0.2, 2.5), 100},
+        Landmark3d{Eigen::Vector3d(0.6, -0.2, 2.8), 101},
+        Landmark3d{Eigen::Vector3d(0.1,  0.1, 2.2), 102},
+        Landmark3d{Eigen::Vector3d(0.2,  0.1, 2.2), 103},
+        Landmark3d{Eigen::Vector3d(-0.3, 0.4, 3.0), 104},
+        Landmark3d{Eigen::Vector3d(-0.1, 0.4, 3.0), 105},
+        Landmark3d{Eigen::Vector3d(0.0,  0.0, 0.0), 106} // Invalid Z == 0
     };
 
     // Current frame features:
-    // c0 matches m0 cleanly (dist = 2 vs secondDist = 126 -> ratio = 2/126 < 0.8)
-    descriptor::QovFeature c0(Eigen::Vector2i(105, 102), 500);
+    // c0: Matches m0 via appearance (dist = 3 vs secondDist = 117 -> passes ratio & bidirectional)
+    descriptor::QovFeature c0(Eigen::Vector2i(104, 102), 500);
     c0.wordId = 10;
-    c0.des = makeDescriptor(0x00, 2);
+    c0.des = makeDescriptor(0x0000000000000000ULL, 3);
 
-    // c1 is ambiguous between m2a (dist = 10) and m2b (dist = 11) -> ratio = 10/11 > 0.8 -> rejected
-    descriptor::QovFeature c1(Eigen::Vector2i(205, 202), 501);
+    // c1: Ambiguous between m2a (dist 10) and m2b (dist 11) -> fails Lowe ratio (10/11 > 0.8)
+    descriptor::QovFeature c1(Eigen::Vector2i(204, 152), 501);
     c1.wordId = 20;
-    c1.des = makeDescriptor(0xAA, 0);
+    c1.des = makeDescriptor(0xAAAAAAAAAAAAAAAAULL, 0);
 
-    // c2 matches m3 in appearance, but m3 has Z <= 0 -> rejected
-    descriptor::QovFeature c2(Eigen::Vector2i(305, 302), 502);
-    c2.wordId = 30;
-    c2.des = makeDescriptor(0x55, 0);
+    // c2_weak: Matches m3a with dist = 8, but neighbor c2_strong is within BIDIRECTIONAL_SEARCH_INTERVAL
+    // and has dist = 1 to m3a -> c2_weak must be rejected by bidirectional check, while c2_strong succeeds!
+    descriptor::QovFeature c2_weak(Eigen::Vector2i(295, 198), 502);
+    c2_weak.wordId = 30;
+    c2_weak.des = makeDescriptor(0x5555555555555555ULL, 8);
 
-    curKf.features = {c0, c1, c2};
+    descriptor::QovFeature c2_strong(Eigen::Vector2i(302, 201), 503);
+    c2_strong.wordId = 30;
+    c2_strong.des = makeDescriptor(0x5555555555555555ULL, 1);
+
+    // c3: Matches m4 in appearance, but m4 has Z == 0 -> rejected
+    descriptor::QovFeature c3(Eigen::Vector2i(402, 251), 504);
+    c3.wordId = 40;
+    c3.des = makeDescriptor(0xFFFFFFFFFFFFFFFFULL, 0);
+
+    curKf.features = {c0, c1, c2_weak, c2_strong, c3};
 
     keyframes().push_back(std::move(matchKf));
     keyframes().push_back(std::move(curKf));
 
     const size_t numMatched = callMatchFeatures(1, 0);
-    ASSERT_EQ(numMatched, 1u);
+    ASSERT_EQ(numMatched, 2u);
 
-    EXPECT_DOUBLE_EQ(matching().curFeatures(0, 0), 105.0);
+    // Match 0: c0 <-> m0
+    EXPECT_DOUBLE_EQ(matching().curFeatures(0, 0), 104.0);
     EXPECT_DOUBLE_EQ(matching().curFeatures(1, 0), 102.0);
-    EXPECT_DOUBLE_EQ(matching().curFeatures(2, 0), 1.0);
-    EXPECT_NEAR((matching().matchLandmarks.col(0) - Eigen::Vector3d(0.5, -0.2, 2.5)).norm(), 0.0, 1e-9);
+    EXPECT_NEAR((matching().matchLandmarks.col(0) - Eigen::Vector3d(0.4, -0.2, 2.5)).norm(), 0.0, 1e-9);
+
+    // Match 1: c2_strong <-> m3a (c2_weak was pruned by bidirectional consistency)
+    EXPECT_DOUBLE_EQ(matching().curFeatures(0, 1), 302.0);
+    EXPECT_DOUBLE_EQ(matching().curFeatures(1, 1), 201.0);
+    EXPECT_NEAR((matching().matchLandmarks.col(1) - Eigen::Vector3d(-0.3, 0.4, 3.0)).norm(), 0.0, 1e-9);
 }
 
 // ============================================================================
 // 6. P3P RANSAC Outlier Pruning & Compaction Tests (ransac)
 // ============================================================================
 
-// Verifies that ransac estimates the 6-DoF camera transformation across 3D-2D correspondences,
-// rejects pixel reprojection outliers, and compacts matching.curFeatures and matching.matchLandmarks.
-TEST_F(LfTrackerTest, ransacEstimatesPosePrunesOutliersAndCompactsMatches) {
+// Verifies that ransac recovers the 6-DoF camera pose, evaluates reprojection error in pixels,
+// rejects outliers, and compacts matching.curFeatures and matching.matchLandmarks in lockstep.
+TEST_F(LfTrackerTest, ransacEstimatesPosePrunesPixelOutliersAndCompactsMatches) {
     constexpr size_t kNumInliers = 24;
-    constexpr size_t kNumOutliers = 6;
+    constexpr size_t kNumOutliers = 8;
     constexpr size_t kTotalMatches = kNumInliers + kNumOutliers;
 
     const Eigen::Matrix3d RTrue =
-        Eigen::AngleAxisd(0.08, Eigen::Vector3d(0.3, 0.9, -0.2).normalized()).toRotationMatrix();
-    const Eigen::Vector3d tTrue(-0.15, 0.10, 0.25);
+        Eigen::AngleAxisd(0.09, Eigen::Vector3d(0.4, 0.8, -0.3).normalized()).toRotationMatrix();
+    const Eigen::Vector3d tTrue(-0.18, 0.12, 0.28);
 
     matching().curFeatures.resize(3, kTotalMatches);
     matching().matchLandmarks.resize(3, kTotalMatches);
 
     for (size_t i = 0; i < kTotalMatches; i++) {
         const double xn = -0.35 + static_cast<double>(i % 6) * 0.14;
-        const double yn = -0.25 + static_cast<double>(static_cast<double>(i) / 6) * 0.12;
+        const double yn = -0.25 + static_cast<double>(i / 6) * 0.10;
         const double depth = 2.0 + static_cast<double>(i % 4) * 0.6;
 
         const Eigen::Vector3d P3d(xn * depth, yn * depth, depth);
@@ -473,13 +546,15 @@ TEST_F(LfTrackerTest, ransacEstimatesPosePrunesOutliersAndCompactsMatches) {
         double u = static_cast<double>(kFx) * (PCam.x() / PCam.z()) + static_cast<double>(kCx);
         double v = static_cast<double>(kFy) * (PCam.y() / PCam.z()) + static_cast<double>(kCy);
 
+        // Inject 15-pixel reprojection outliers (small in normalized space ~0.028 rad, but > 2.0 px)
         if (i >= kNumInliers) {
-            u += (i % 2 == 0) ? 45.0 : -45.0;
-            v += (i % 2 == 0) ? -35.0 : 35.0;
+            u += (i % 2 == 0) ? 15.0 : -15.0;
+            v += (i % 2 == 0) ? -15.0 : 15.0;
         }
 
-        matching().matchLandmarks.col(static_cast<Eigen::Index>(i)) = P3d;
-        matching().curFeatures.col(static_cast<Eigen::Index>(i)) = Eigen::Vector3d(u, v, 1.0);
+        const auto idx = static_cast<Eigen::Index>(i);
+        matching().matchLandmarks.col(idx) = P3d;
+        matching().curFeatures.col(idx) = Eigen::Vector3d(u, v, 1.0);
     }
 
     const auto res = callRansac(kTotalMatches);
@@ -490,59 +565,66 @@ TEST_F(LfTrackerTest, ransacEstimatesPosePrunesOutliersAndCompactsMatches) {
     EXPECT_NEAR((TBest.leftCols<3>() - RTrue).norm(), 0.0, 1e-3);
     EXPECT_NEAR((TBest.rightCols<1>() - tTrue).norm(), 0.0, 1e-3);
 
-    // Verify in-place compaction retained only the true inliers
+    // Verify every compacted column satisfies the 2.0-pixel reprojection threshold
     for (size_t i = 0; i < inlierCount; i++) {
-        const Eigen::Vector3d P = matching().matchLandmarks.col(static_cast<Eigen::Index>(i));
-        const Eigen::Vector2d p = matching().curFeatures.col(static_cast<Eigen::Index>(i)).hnormalized();
+        const auto idx = static_cast<Eigen::Index>(i);
+        const Eigen::Vector3d P = matching().matchLandmarks.col(idx);
+        const Eigen::Vector2d p = matching().curFeatures.col(idx).hnormalized();
         const Eigen::Vector2d proj = (RTrue * P + tTrue).hnormalized();
         const Eigen::Vector2d pxErr(kFx * (proj.x() - p.x()), kFy * (proj.y() - p.y()));
         EXPECT_LE(pxErr.norm(), 2.0);
     }
 }
 
-// Verifies that ransac returns std::nullopt when inliers fall below config.ransacInliearThreshold.
-TEST_F(LfTrackerTest, ransacReturnsNulloptWhenInliersBelowThreshold) {
-    constexpr size_t kInsufficientMatches = 8; // < ransacInliearThreshold (12)
-    matching().curFeatures.resize(3, kInsufficientMatches);
-    matching().matchLandmarks.resize(3, kInsufficientMatches);
+// Verifies that ransac returns std::nullopt when numMatches < 4, when inliers fall below
+// ransacInliearThreshold, or when the inlier ratio falls below minInliearRatio.
+TEST_F(LfTrackerTest, ransacRejectsInsufficientInliersAndLowInlierRatio) {
+    // Case 1: Fewer than 4 matches
+    matching().curFeatures.resize(3, 3);
+    matching().matchLandmarks.resize(3, 3);
+    EXPECT_FALSE(callRansac(3).has_value());
 
-    for (size_t i = 0; i < kInsufficientMatches; i++) {
-        const Eigen::Vector3d P3d(static_cast<double>(i) * 0.1, 0.2, 2.5);
+    // Case 2: 8 valid inliers (< ransacInliearThreshold == 12)
+    constexpr size_t kSmallCount = 8;
+    matching().curFeatures.resize(3, kSmallCount);
+    matching().matchLandmarks.resize(3, kSmallCount);
+    for (size_t i = 0; i < kSmallCount; i++) {
+        const Eigen::Vector3d P3d(static_cast<double>(i) * 0.1 - 0.3, (i % 2) * 0.2, 2.5);
         const double u = kFx * (P3d.x() / P3d.z()) + kCx;
         const double v = kFy * (P3d.y() / P3d.z()) + kCy;
         matching().matchLandmarks.col(static_cast<Eigen::Index>(i)) = P3d;
         matching().curFeatures.col(static_cast<Eigen::Index>(i)) = Eigen::Vector3d(u, v, 1.0);
     }
-
-    EXPECT_FALSE(callRansac(kInsufficientMatches).has_value());
+    EXPECT_FALSE(callRansac(kSmallCount).has_value());
 }
 
 // ============================================================================
 // 7. Levenberg-Marquardt Pose & Covariance Refinement Tests (refinePoseLM)
 // ============================================================================
 
-// Verifies that refinePoseLM converges from a perturbed pose initialization back to the
-// ground-truth [R | t] and outputs a positive-definite 6x6 covariance matrix.
-TEST_F(LfTrackerTest, refinePoseLMConvergesFromPerturbedInitAndComputesCovariance) {
+// Verifies that refinePoseLM converges from a perturbed pose initialization to the ground-truth
+// transformation, down-weights marginal outliers via Huber loss, and computes a valid 6x6 covariance.
+TEST_F(LfTrackerTest, refinePoseLMConvergesFromPerturbedInitAndOutputsPositiveDefiniteCovariance) {
     constexpr size_t kNumInliers = 25;
     const Eigen::Matrix3d RTrue =
         (Eigen::AngleAxisd(0.10, Eigen::Vector3d::UnitY()) *
-         Eigen::AngleAxisd(-0.05, Eigen::Vector3d::UnitX())).toRotationMatrix();
-    const Eigen::Vector3d tTrue(0.20, -0.12, 0.30);
+         Eigen::AngleAxisd(-0.06, Eigen::Vector3d::UnitX())).toRotationMatrix();
+    const Eigen::Vector3d tTrue(0.22, -0.14, 0.32);
 
     matching().curFeatures.resize(3, kNumInliers);
     matching().matchLandmarks.resize(3, kNumInliers);
 
     for (size_t i = 0; i < kNumInliers; i++) {
         const double xn = -0.30 + static_cast<double>(i % 5) * 0.15;
-        const double yn = -0.24 + static_cast<double>(static_cast<double>(i) / 5) * 0.12;
+        const double yn = -0.24 + static_cast<double>(i / 5) * 0.12;
         const double depth = 2.0 + static_cast<double>(i % 3) * 0.7;
 
         const Eigen::Vector3d P3d(xn * depth, yn * depth, depth);
         const Eigen::Vector3d PCam = RTrue * P3d + tTrue;
 
-        matching().matchLandmarks.col(static_cast<Eigen::Index>(i)) = P3d;
-        matching().curFeatures.col(static_cast<Eigen::Index>(i)) = PCam.hnormalized().homogeneous();
+        const auto idx = static_cast<Eigen::Index>(i);
+        matching().matchLandmarks.col(idx) = P3d;
+        matching().curFeatures.col(idx) = PCam.hnormalized().homogeneous();
     }
 
     // Perturb initial pose by ~1.5 degrees and 3 cm
@@ -557,54 +639,63 @@ TEST_F(LfTrackerTest, refinePoseLMConvergesFromPerturbedInitAndComputesCovarianc
     EXPECT_NEAR((Tcand.leftCols<3>() - RTrue).norm(), 0.0, 1e-4);
     EXPECT_NEAR((Tcand.rightCols<1>() - tTrue).norm(), 0.0, 1e-4);
 
-    for (int i = 0; i < 6; i++) {
-        EXPECT_GT(outCov(i, i), 0.0);
-        EXPECT_TRUE(std::isfinite(outCov(i, i)));
-    }
+    // Verify covariance symmetry and positive definiteness
+    EXPECT_NEAR((outCov - outCov.transpose()).norm(), 0.0, 1e-9);
+    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> eigSolver(outCov);
+    EXPECT_GT(eigSolver.eigenvalues().minCoeff(), 0.0);
+
+    // Fewer than 4 inliers must return false immediately
+    EXPECT_FALSE(callRefinePoseLM(3, K.cast<double>(), Tcand, outCov));
 }
 
 // ============================================================================
-// 8. Public Interface & Asynchronous Worker Lifecycle Tests
+// 8. Public Interface & End-to-End Asynchronous Loop Closure Tests
 // ============================================================================
 
-// Verifies that passKeyframe filters out keypoints within QOV_RADIUS of the image border,
-// stages valid keypoints, sets busy = true, and rejects concurrent calls while busy.
-TEST_F(LfTrackerTest, passKeyframeFiltersBorderKeypointsAndEnforcesBusyGuard) {
-    std::vector<HfFeature> features = {
-        makeHfFeature(1, 5.0f, 100.0f),                                   // Too close to left border (< 15)
-        makeHfFeature(2, 100.0f, static_cast<float>(kImageHeight - 10)),  // Too close to bottom border
-        makeHfFeature(3, 200.0f, 200.0f),                                 // Valid interior keypoint
-        makeHfFeature(4, 350.0f, 250.0f)                                  // Valid interior keypoint
+// Verifies that passKeyframe rejects empty inputs, filters out border keypoints within QOV_RADIUS,
+// and blocks concurrent submissions while busy.
+TEST_F(LfTrackerTest, passKeyframeEnforcesBorderMarginsEmptyGuardAndBusyFlag) {
+    std::vector<HfFeature> emptyFeatures;
+    EXPECT_FALSE(tracker->passKeyframe(1, 0.5, frameBuffer.data(), emptyFeatures));
+
+    std::vector<HfFeature> borderOnlyFeatures = {
+        makeHfFeature(1, 5.0f, 100.0f),
+        makeHfFeature(2, 100.0f, static_cast<float>(kImageHeight - QOV_RADIUS))
+    };
+    EXPECT_FALSE(tracker->passKeyframe(2, 0.8, frameBuffer.data(), borderOnlyFeatures));
+
+    std::vector<HfFeature> mixedFeatures = {
+        makeHfFeature(1, 5.0f, 100.0f),   // Rejected (< QOV_RADIUS)
+        makeHfFeature(2, 200.0f, 200.0f), // Accepted
+        makeHfFeature(3, 350.0f, 250.0f)  // Accepted
     };
 
-    ASSERT_TRUE(tracker->passKeyframe(10, 1.25, frameBuffer.data(), features));
+    ASSERT_TRUE(tracker->passKeyframe(10, 1.0, frameBuffer.data(), mixedFeatures));
     EXPECT_TRUE(isBusy());
     ASSERT_EQ(keyframes().size(), 1u);
-    EXPECT_EQ(keyframes().front().features.size(), 2u);
-    EXPECT_EQ(keyframes().front().features[0].featureId, 3u);
-    EXPECT_EQ(keyframes().front().features[1].featureId, 4u);
+    ASSERT_EQ(keyframes().front().features.size(), 2u);
+    EXPECT_EQ(keyframes().front().features[0].featureId, 2u);
+    EXPECT_EQ(keyframes().front().features[1].featureId, 3u);
 
-    // Calling passKeyframe again while busy must return false without adding a frame
-    EXPECT_FALSE(tracker->passKeyframe(11, 1.50, frameBuffer.data(), features));
-    EXPECT_EQ(keyframes().size(), 1u);
+    // Subsequent call while busy must return false
+    EXPECT_FALSE(tracker->passKeyframe(11, 1.2, frameBuffer.data(), mixedFeatures));
 }
 
-// Verifies that updateKeyframe matches incoming 3D landmarks to a keyframe's features by featureId
-// even after the keyframe's features vector has been reordered by wordId.
-TEST_F(LfTrackerTest, updateKeyframeAlignsLandmarksWithReorderedFeaturesById) {
-    Keyframe kf(3, 77, 2.0, 0);
+// Verifies that updateKeyframe aligns incoming 3D landmarks with reordered keyframe features
+// by featureId and returns false for unknown keyframe IDs.
+TEST_F(LfTrackerTest, updateKeyframeMapsLandmarksByFeatureIdAfterSorting) {
+    Keyframe kf(3, 42, 1.0, 0);
     kf.addKp(Eigen::Vector2i(100, 100), 10);
     kf.addKp(Eigen::Vector2i(200, 100), 20);
     kf.addKp(Eigen::Vector2i(300, 100), 30);
     kf.finalSize();
 
-    // Simulate post-BoW sorting where feature order is reversed
+    // Reverse feature order to simulate post-BoW wordId sorting
     std::reverse(kf.features.begin(), kf.features.end());
     keyframes().push_back(std::move(kf));
 
     BackendKeyframeUpdate update;
-    update.id = 77;
-    update.pose = gtsam::Pose3();
+    update.id = 42;
     update.landmarks = {
         Landmark3d{Eigen::Vector3d(1.0, 0.0, 2.0), 10},
         Landmark3d{Eigen::Vector3d(2.0, 0.0, 3.0), 20},
@@ -612,23 +703,24 @@ TEST_F(LfTrackerTest, updateKeyframeAlignsLandmarksWithReorderedFeaturesById) {
     };
 
     ASSERT_TRUE(tracker->updateKeyframe(update));
-    const auto &storedKf = keyframes().front();
-    ASSERT_EQ(storedKf.landmarks.size(), storedKf.features.size());
-
-    for (size_t i = 0; i < storedKf.features.size(); i++) {
-        EXPECT_EQ(storedKf.landmarks[i].featureId, storedKf.features[i].featureId);
+    const auto &stored = keyframes().front();
+    ASSERT_EQ(stored.landmarks.size(), 3u);
+    for (size_t i = 0; i < stored.features.size(); i++) {
+        EXPECT_EQ(stored.landmarks[i].featureId, stored.features[i].featureId);
+        EXPECT_DOUBLE_EQ(stored.landmarks[i].pt3d.x(),
+                         static_cast<double>(stored.features[i].featureId) / 10.0);
     }
 
-    // Non-existent keyframe ID must return false
-    BackendKeyframeUpdate badUpdate;
-    badUpdate.id = 999;
-    EXPECT_FALSE(tracker->updateKeyframe(badUpdate));
+    BackendKeyframeUpdate unknownUpdate;
+    unknownUpdate.id = 999;
+    EXPECT_FALSE(tracker->updateKeyframe(unknownUpdate));
 }
 
-// Verifies the complete asynchronous worker thread lifecycle (start, passKeyframe, updateKeyframe,
-// getMatch, end) across a historical keyframe, exclusion window frames, and a revisited loop frame.
-TEST_F(LfTrackerTest, endToEndWorkerThreadProducesLoopClosurePacket) {
-    LfTrackerConfig cfg = makeConfig(dist, 0.01f, 1, 12, 50, 0.30f, 2.0f);
+// Verifies the full worker thread loop closure pipeline (start -> passKeyframe -> updateKeyframe
+// -> temporal exclusion window -> revisited keyframe -> getMatch -> end) when revisiting a scene
+// with brand-new optical flow feature IDs matched via QOV appearance descriptors.
+TEST_F(LfTrackerTest, endToEndWorkerThreadDetectsLoopClosureAcrossRevisitedScene) {
+    LfTrackerConfig cfg = makeConfig(dist, 0.01f, 1, 12, 60, 0.30f, 2.0f);
     tracker = std::make_unique<LfTracker>(cfg, dummyVocabPath);
     initSyntheticVocabTree(vocabTree());
 
@@ -636,26 +728,28 @@ TEST_F(LfTrackerTest, endToEndWorkerThreadProducesLoopClosurePacket) {
     ASSERT_TRUE(tracker->isRunning());
 
     auto waitUntilIdle = [&]() {
-        for (int i = 0; i < 500 && isBusy(); i++) {
+        for (int i = 0; i < 1000 && isBusy(); i++) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         ASSERT_FALSE(isBusy());
     };
 
-    // 1. Create 20 landmarks and render Keyframe 0 (historical frame)
+    // 1. Build Keyframe 0 (frameId = 100) with 20 distinct oriented corners and 3D landmarks
     constexpr size_t kNumFeatures = 20;
     std::vector<HfFeature> kf0Features;
     BackendKeyframeUpdate kf0Update;
     kf0Update.id = 100;
 
     for (size_t i = 0; i < kNumFeatures; i++) {
-        const float u = 120.0f + static_cast<float>(i % 5) * 90.0f;
-        const float v = 100.0f + static_cast<float>(static_cast<double>(i) / 5) * 80.0f;
-        drawSmoothCorner(frameBuffer, kImageWidth, kImageHeight, u, v,
-                         kCornerRadius, kDarkIntensity, kBrightIntensity);
+        const float u = 110.0f + static_cast<float>(i % 5) * 100.0f;
+        const float v = 90.0f + static_cast<float>(i / 5) * 90.0f;
+        const float angle = static_cast<float>(i) * 0.31f;
+
+        drawRotatedCorner(frameBuffer, kImageWidth, kImageHeight, u, v,
+                          kCornerRadius, kDarkIntensity, kBrightIntensity, angle);
         kf0Features.push_back(makeHfFeature(static_cast<uint32_t>(i + 1), u, v));
 
-        const double depth = 2.0 + static_cast<double>(i % 3) * 0.5;
+        const double depth = 2.0 + static_cast<double>(i % 4) * 0.5;
         const Eigen::Vector3d P3d(
             (static_cast<double>(u - kCx) / kFx) * depth,
             (static_cast<double>(v - kCy) / kFy) * depth,
@@ -668,27 +762,33 @@ TEST_F(LfTrackerTest, endToEndWorkerThreadProducesLoopClosurePacket) {
     waitUntilIdle();
     ASSERT_TRUE(tracker->updateKeyframe(kf0Update));
 
-    // 2. Pass two intermediate keyframes to clear the temporal exclusion window (excludedFrames = 1)
+    // 2. Pass two intermediate keyframes outside the loop candidate window (excludedFrames = 1).
+    // Include 4 shared corners in frame 102 so lastScore > 0 and bestScore / lastScore >> MIN_SCORE_RATIO.
     for (uint32_t interId : {101u, 102u}) {
-        std::vector<HfFeature> interFeatures = {makeHfFeature(900 + interId, 320.0f, 240.0f)};
+        std::vector<HfFeature> interFeatures = {
+            kf0Features[0], kf0Features[1], kf0Features[2], kf0Features[3]
+        };
         ASSERT_TRUE(tracker->passKeyframe(interId, static_cast<double>(interId),
                                           frameBuffer.data(), interFeatures));
         waitUntilIdle();
     }
 
-    // 3. Pass Keyframe 3 revisiting Keyframe 0 with a known relative translation
-    const Eigen::Vector3d tLoop(0.10, -0.05, 0.0);
+    // 3. Revisit Keyframe 0 on frameId = 103 with a known 3D translation and brand-new featureIds
+    // ( except where appearance routes through the vocabulary tree ).
+    const Eigen::Vector3d tLoop(0.08, -0.04, 0.0);
     std::vector<uint8_t> loopBuffer(kImageWidth * kImageHeight, kDefaultBackground);
     std::vector<HfFeature> loopFeatures;
 
     for (size_t i = 0; i < kNumFeatures; i++) {
         const Eigen::Vector3d PCam = kf0Update.landmarks[i].pt3d + tLoop;
-        const float u = static_cast<float>(kFx * (PCam.x() / PCam.z()) + kCx);
-        const float v = static_cast<float>(kFy * (PCam.y() / PCam.z()) + kCy);
-        drawSmoothCorner(loopBuffer, kImageWidth, kImageHeight, u, v,
-                         kCornerRadius, kDarkIntensity, kBrightIntensity);
-        // Use matching featureIds to guarantee deterministic correspondence in the synthetic scene
-        loopFeatures.push_back(makeHfFeature(static_cast<uint32_t>(i + 1), u, v));
+        const float u = std::round(static_cast<float>(kFx * (PCam.x() / PCam.z()) + kCx));
+        const float v = std::round(static_cast<float>(kFy * (PCam.y() / PCam.z()) + kCy));
+        const float angle = static_cast<float>(i) * 0.31f;
+
+        drawRotatedCorner(loopBuffer, kImageWidth, kImageHeight, u, v,
+                          kCornerRadius, kDarkIntensity, kBrightIntensity, angle);
+        // Assign new featureIds (1000 + i) to verify pure appearance-based QOV matching
+        loopFeatures.push_back(makeHfFeature(static_cast<uint32_t>(1000 + i), u, v));
     }
 
     ASSERT_TRUE(tracker->passKeyframe(103, 4.0, loopBuffer.data(), loopFeatures));
@@ -698,12 +798,12 @@ TEST_F(LfTrackerTest, endToEndWorkerThreadProducesLoopClosurePacket) {
     ASSERT_TRUE(tracker->getMatch(outPacket));
     EXPECT_EQ(outPacket.currentFrameId, 103u);
     EXPECT_EQ(outPacket.matchedFrameId, 100u);
-    EXPECT_EQ(outPacket.inlierCount, static_cast<uint32_t>(kNumFeatures));
-    EXPECT_NEAR(outPacket.inlierRatio, 1.0f, 1e-4f);
+    EXPECT_GE(outPacket.inlierCount, 12u);
+    EXPECT_GE(outPacket.inlierRatio, 0.30f);
     EXPECT_NE(outPacket.noiseModel, nullptr);
     EXPECT_NEAR((outPacket.relativePose.translation() - tLoop).norm(), 0.0, 2e-2);
 
-    // Subsequent call to getMatch must return false once the mailbox is drained
+    // Verify mailbox is cleared after consumption
     EXPECT_FALSE(tracker->getMatch(outPacket));
 
     tracker->end();

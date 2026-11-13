@@ -50,7 +50,7 @@ bool LfTracker::isRunning() const{
 
 bool LfTracker::passKeyframe(uint32_t id, double timestamp, const uint8_t *curBuffer, const std::vector<TrackedFeature<FEATURE_RADIUS>> &features){
     // Check if tracker is busy or features are empty
-    if(busy.load(std::memory_order_acquire) || features.empty()){
+    if(curBuffer == nullptr || busy.load(std::memory_order_acquire) || features.empty()){
         return false;
     }
 
@@ -203,7 +203,7 @@ void LfTracker::processKeyframe(){
             packet.timestamp = kf.timestamp;
 
             // Find the ratio between the score of the best frame and the score of the previous frame
-            auto scoreRatio = (lastScore > 1e-6f) ? (bestScore / lastScore) : 0.0f;
+            auto scoreRatio = (lastScore > 1e-6f) ? (bestScore / lastScore) : 1.0f;
 
             packet.matchScore = bestScore;
 
