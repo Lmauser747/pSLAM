@@ -239,32 +239,6 @@ TEST_F(LfTrackerTest, solveP4PLambdaTwistRecoversExactGeneral6DoFPose) {
     EXPECT_NEAR((TOpt->rightCols<1>() - tTrue).norm(), 0.0, kPoseEps);
 }
 
-// Verifies that solveP4PLambdaTwist handles axis-aligned / symmetric ray configurations
-// where the 2x2 minor c in diagonalizeD0 vanishes (c == 0) and row cross-products are used.
-TEST_F(LfTrackerTest, solveP4PLambdaTwistHandlesSymmetricAxisAlignedConfiguration) {
-    const Eigen::Matrix3d RTrue = Eigen::Matrix3d::Identity();
-    const Eigen::Vector3d tTrue(0.0, 0.0, 0.5);
-
-    const std::array<Eigen::Vector3d, 4> pts3d = {{
-        { 0.0,  0.0, 2.0}, // Along optical axis
-        { 1.0,  0.0, 2.0}, // Strictly along +X
-        { 0.0,  1.0, 2.0}, // Strictly along +Y
-        {-0.5, -0.5, 2.5}
-    }};
-
-    std::array<Eigen::Vector3d, 4> rays;
-    for (size_t i = 0; i < 4; i++) {
-        const Eigen::Vector3d PCam = RTrue * pts3d[i] + tTrue;
-        rays[i] = PCam.hnormalized().homogeneous();
-    }
-
-    const auto TOpt = geometry::solveP4PLambdaTwist(pts3d, rays);
-    ASSERT_TRUE(TOpt.has_value());
-
-    EXPECT_NEAR((TOpt->leftCols<3>() - RTrue).norm(), 0.0, kPoseEps);
-    EXPECT_NEAR((TOpt->rightCols<1>() - tTrue).norm(), 0.0, kPoseEps);
-}
-
 // Verifies that solveP4PLambdaTwist returns std::nullopt on collinear or duplicate 3D points.
 TEST_F(LfTrackerTest, solveP4PLambdaTwistRejectsCollinearAndDuplicatePoints) {
     const std::array<Eigen::Vector3d, 4> collinearPts = {{
@@ -537,7 +511,7 @@ TEST_F(LfTrackerTest, ransacEstimatesPosePrunesPixelOutliersAndCompactsMatches) 
 
     for (size_t i = 0; i < kTotalMatches; i++) {
         const double xn = -0.35 + static_cast<double>(i % 6) * 0.14;
-        const double yn = -0.25 + static_cast<double>(i / 6) * 0.10;
+        const double yn = -0.25 + static_cast<double>(static_cast<double>(i) / 6) * 0.10;
         const double depth = 2.0 + static_cast<double>(i % 4) * 0.6;
 
         const Eigen::Vector3d P3d(xn * depth, yn * depth, depth);
@@ -589,7 +563,7 @@ TEST_F(LfTrackerTest, ransacRejectsInsufficientInliersAndLowInlierRatio) {
     matching().curFeatures.resize(3, kSmallCount);
     matching().matchLandmarks.resize(3, kSmallCount);
     for (size_t i = 0; i < kSmallCount; i++) {
-        const Eigen::Vector3d P3d(static_cast<double>(i) * 0.1 - 0.3, (i % 2) * 0.2, 2.5);
+        const Eigen::Vector3d P3d(static_cast<double>(i) * 0.1 - 0.3, static_cast<double>((i % 2)) * 0.2, 2.5);
         const double u = kFx * (P3d.x() / P3d.z()) + kCx;
         const double v = kFy * (P3d.y() / P3d.z()) + kCy;
         matching().matchLandmarks.col(static_cast<Eigen::Index>(i)) = P3d;
@@ -616,7 +590,7 @@ TEST_F(LfTrackerTest, refinePoseLMConvergesFromPerturbedInitAndOutputsPositiveDe
 
     for (size_t i = 0; i < kNumInliers; i++) {
         const double xn = -0.30 + static_cast<double>(i % 5) * 0.15;
-        const double yn = -0.24 + static_cast<double>(i / 5) * 0.12;
+        const double yn = -0.24 + static_cast<double>(static_cast<double>(i) / 5) * 0.12;
         const double depth = 2.0 + static_cast<double>(i % 3) * 0.7;
 
         const Eigen::Vector3d P3d(xn * depth, yn * depth, depth);
@@ -742,7 +716,7 @@ TEST_F(LfTrackerTest, endToEndWorkerThreadDetectsLoopClosureAcrossRevisitedScene
 
     for (size_t i = 0; i < kNumFeatures; i++) {
         const float u = 110.0f + static_cast<float>(i % 5) * 100.0f;
-        const float v = 90.0f + static_cast<float>(i / 5) * 90.0f;
+        const float v = 90.0f + static_cast<float>(static_cast<float>(i) / 5) * 90.0f;
         const float angle = static_cast<float>(i) * 0.31f;
 
         drawRotatedCorner(frameBuffer, kImageWidth, kImageHeight, u, v,

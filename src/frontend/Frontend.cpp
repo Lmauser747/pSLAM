@@ -1,6 +1,6 @@
 #include <atomic>
+#include <cassert>
 #include <cstddef>
-#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <memory>
@@ -14,80 +14,64 @@
 #include "CoreTypes.hpp"
 #include "frontend/LfTracker.hpp"
 #include "hal/Synchronizer.hpp"
+#include "pool_slam/SystemTypes.hpp"
 
 namespace PoolSLAM{
 
 void Frontend::processPacket(){
-    size_t lastKfFeatures = UINT64_MAX;
+    size_t lastKfFeatures = 0;
     double lastKfTime = -1.0;
+
     while(runFrontend.load(std::memory_order_relaxed)){
         // Get packet from sync
         SyncedPacket packet;
         if(!sync.getNextPacket(packet)){
+            if(sync.getStatus() != SyncStatus::RUNNING){
+                {
+                    std::lock_guard<std::mutex> lock(m_hfQueue);
+                    runFrontend.store(false, std::memory_order_release);
+                }
+                c_hfQueue.notify_all();
+                break;
+            }
             continue;
         }
 
         std::unique_ptr<gtsam::PreintegratedImuMeasurements> integrator;
 
-        {
-            std::lock_guard<std::mutex> lock(m_imuBias);
-            integrator = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, imuBias);
-        }
-            
-        // Handle first frame
+        // Track existing features and integrate IMU on frames after T0
         if(!packet.imu.empty()){
-            // Integrate IMU measurements
-            auto lastImu = packet.imu.front();
+            {
+                std::lock_guard<std::mutex> lock(m_imuBias);
+                integrator = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, imuBias);
+            }
+
+            auto lastImu = packet.imu[0];
             for(size_t i = 1; i < packet.imu.size(); i++){
                 auto &curImu = packet.imu[i];
+                if(curImu.timestamp <= lastImu.timestamp){
+                    continue;
+                }
                 integrator->integrateMeasurement(lastImu.a, lastImu.w, curImu.timestamp - lastImu.timestamp);
                 lastImu = curImu;
             }
 
             auto R = integrator->deltaRij();
-
             hf.trackExistingFeatures(packet.image->arr.data(), R.matrix().cast<float>());
         }
 
         auto &features = hf.getActiveFeatures();
-        
-        std::unique_ptr<BackendHfPacket> hfPacket = std::make_unique<BackendHfPacket>();
 
-        hfPacket->timestamp = packet.timestamp;
-        hfPacket->frameId = frameId;
-
-        hfPacket->imuDelta = std::move(integrator);
-        
-        if(packet.depth.has_value()){
-            hfPacket->depth = packet.depth->z;
-        }else{
-            hfPacket->depth = std::nullopt;
-        }
-        
-        hfPacket->visualMeasurements.reserve(features.size());
-
-        for(auto &feat : features){
-            hfPacket->visualMeasurements.emplace_back(feat.id, feat.ptUndis.cast<double>());
-        }
-
+        // Evaluate keyframe criteria on surviving tracks BEFORE bucket replenishment
         bool isKeyframe = false;
-        if((packet.timestamp - lastKfTime) > config.maxTimeBetweenKf || static_cast<float>(features.size()) < config.droppedFeatureThreshold * static_cast<float>(lastKfFeatures)){
+        if(frameId == 0 ||
+           (packet.timestamp - lastKfTime) > config.maxTimeBetweenKf ||
+           static_cast<float>(features.size()) < config.droppedFeatureThreshold * static_cast<float>(lastKfFeatures)){
             isKeyframe = true;
             lastKfTime = packet.timestamp;
         }
 
-        hfPacket->isKeyframe = isKeyframe;
-
-        // Push the packet onto the queue
-        {
-            std::lock_guard<std::mutex> lock(m_hfQueue);
-            if(hfQueue.size() >= config.hfQueueSize){
-                hfQueue.pop();
-            }
-            hfQueue.push(std::move(hfPacket));
-        }
-        c_hfQueue.notify_all();
-
+        // Replenish buckets BEFORE building hfPacket so T0 and keyframes include initial observations
         hf.replenishBuckets(packet.image->arr.data());
 
         if(isKeyframe){
@@ -95,7 +79,36 @@ void Frontend::processPacket(){
             lf.passKeyframe(frameId, packet.timestamp, packet.image->arr.data(), features);
         }
 
+        // Recycle the raw image buffer now that HfTracker and LfTracker are done with it
         sync.recycleFrame(packet.image);
+
+        // Assemble BackendHfPacket
+        std::unique_ptr<BackendHfPacket> hfPacket = std::make_unique<BackendHfPacket>();
+        hfPacket->timestamp = packet.timestamp;
+        hfPacket->frameId = frameId;
+        hfPacket->isKeyframe = isKeyframe;
+        hfPacket->imuDelta = std::move(integrator);
+
+        if(packet.depth.has_value()){
+            hfPacket->depth = packet.depth->z;
+        }else{
+            hfPacket->depth = std::nullopt;
+        }
+
+        hfPacket->visualMeasurements.reserve(features.size());
+        for(auto &feat : features){
+            hfPacket->visualMeasurements.emplace_back(feat.id, feat.ptUndis.cast<double>());
+        }
+
+        // Push the packet onto the queue
+        {
+            std::lock_guard<std::mutex> lock(m_hfQueue);
+            if(config.hfQueueSize > 0 && hfQueue.size() >= config.hfQueueSize){
+                hfQueue.pop();
+            }
+            hfQueue.push(std::move(hfPacket));
+        }
+        c_hfQueue.notify_all();
 
         frameId++;
     }
@@ -124,11 +137,20 @@ LfTracker &Frontend::getLfTracker(){
 }
 
 void Frontend::start(){
-    if(runFrontend.load(std::memory_order_relaxed)){
+    if(runFrontend.load(std::memory_order_acquire)){
         return;
     }
-    frameId = 0;
-    runFrontend.store(true, std::memory_order_release);
+    if(frontendThread.joinable()){
+        frontendThread.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_hfQueue);
+        while(!hfQueue.empty()){
+            hfQueue.pop();
+        }
+        frameId = 0;
+        runFrontend.store(true, std::memory_order_release);
+    }
     lf.start();
     frontendThread = std::thread(&Frontend::processPacket, this);
 }
@@ -142,14 +164,15 @@ bool Frontend::setBias(const gtsam::imuBias::ConstantBias &bias){
 }
 
 void Frontend::end(){
-    if(!runFrontend.load(std::memory_order_relaxed)){
-        return;
+    {
+        std::lock_guard<std::mutex> lock(m_hfQueue);
+        runFrontend.store(false, std::memory_order_release);
     }
-    runFrontend.store(false, std::memory_order_release);
     c_hfQueue.notify_all();
     if(frontendThread.joinable()){
         frontendThread.join();
     }
     lf.end();
 }
+
 }

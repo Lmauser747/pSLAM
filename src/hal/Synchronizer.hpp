@@ -74,6 +74,10 @@ public:
         imageStream.recycleFrame(frame);
     }
 
+    SyncStatus getStatus(){
+        return syncStatus.load(std::memory_order_relaxed);
+    }
+
     ~Synchronizer(){
         stop();
 

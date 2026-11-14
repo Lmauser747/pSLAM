@@ -190,7 +190,7 @@ public:
     // Replenishs drained buckets with new keypoints obtained via FAST + Shi-Thomasi
     size_t replenishBuckets(const uint8_t *curBuffer);
 
-    FORCE_INLINE const std::vector<TrackedFeature<RADIUS>> getActiveFeatures() const{return activeFeatures;}
+    FORCE_INLINE const std::vector<TrackedFeature<RADIUS>> &getActiveFeatures() const{return activeFeatures;}
 
     FORCE_INLINE size_t getNumBuckets() const{return totalBuckets;}
 };

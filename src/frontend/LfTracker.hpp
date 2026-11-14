@@ -25,7 +25,7 @@
 namespace PoolSLAM{
 
 struct LfTrackerConfig{
-    size_t wImage, hImage; // Width and height of image
+    size_t w, h; // Width and height of image
     size_t numBuckets; // Number of buckets for features to go in
 
     Eigen::Matrix3f K; // Camera matrix
@@ -151,12 +151,12 @@ private:
 
     friend class LfTrackerTest;
 public:
-    LfTracker(LfTrackerConfig c, const std::string &vocabPath) : config(c), qovPairs(config.wImage),
+    LfTracker(LfTrackerConfig c, const std::string &vocabPath) : config(c), qovPairs(config.w),
     vocabTree(vocabPath){
-        localBuffer = std::make_unique<uint8_t[]>(config.wImage * config.hImage);
-        blurData.rowBuffer = std::make_unique<uint8_t[]>(config.wImage);
+        localBuffer = std::make_unique<uint8_t[]>(config.w * config.h);
+        blurData.rowBuffer = std::make_unique<uint8_t[]>(config.w);
         for(auto &buf : blurData.ringBuffer){
-            buf = std::make_unique<uint8_t[]>(config.wImage);
+            buf = std::make_unique<uint8_t[]>(config.w);
         }
 
         matching.curFeatures.resize(3, 2 * static_cast<int>(config.numBuckets));

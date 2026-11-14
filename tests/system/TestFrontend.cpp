@@ -4,579 +4,558 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <future>
 #include <memory>
-#include <optional>
+#include <random>
 #include <string>
 #include <thread>
-#include <unordered_set>
 #include <vector>
+#include <mutex>
+#include <utility>
 
-#include <eigen3/Eigen/Dense>
-#include <gtsam/geometry/Point2.h>
-#include <gtsam/navigation/ImuBias.h>
-#include <gtsam/navigation/ImuFactor.h>
-#include <gtsam/navigation/PreintegrationParams.h>
 #include <gtest/gtest.h>
 
+#include <eigen3/Eigen/Dense>
+#include <gtsam/navigation/ImuBias.h>
+#include <gtsam/navigation/ImuFactor.h>
+
 #include "CoreTypes.hpp"
-#include "TestFrontendHelpers.hpp"
 #include "frontend/Frontend.hpp"
-#include "frontend/HfTracker.hpp"
-#include "frontend/LfTracker.hpp"
 #include "hal/Synchronizer.hpp"
 #include "pool_slam/Hal.hpp"
+
+#include "TestFrontendHelpers.hpp"
 
 namespace PoolSLAM {
 
 class FrontendTest : public ::testing::Test {
 protected:
-    static constexpr size_t kImageWidth = 640;
-    static constexpr size_t kImageHeight = 480;
-    static constexpr size_t kReadyQueueCap = 8;
-    static constexpr size_t kImagePoolCap = 16;
-
-    static constexpr float kFx = 525.0f;
-    static constexpr float kFy = 525.0f;
-    static constexpr float kCx = 320.0f;
-    static constexpr float kCy = 240.0f;
-    static constexpr double kGravity = 9.81;
-
-    std::string vocabFilePath = "test_frontend_vocab.bin";
+    static constexpr size_t kImageWidth = test_helpers::kDefaultWidth;
+    static constexpr size_t kImageHeight = test_helpers::kDefaultHeight;
+    static constexpr size_t kQueueCapacity = 5;
+    static constexpr size_t kPoolCapacity = 12;
 
     ImuStream imuStream;
     DepthStream depthStream;
-    ImageStream imageStream{kImageWidth, kImageHeight, kReadyQueueCap, kImagePoolCap};
-    std::unique_ptr<Synchronizer> sync;
-
-    FrontendConfig config{};
+    ImageStream imageStream{kImageWidth, kImageHeight, kQueueCapacity, kPoolCapacity};
+    std::unique_ptr<Synchronizer> synchronizer;
     std::unique_ptr<Frontend> frontend;
 
-    std::vector<uint8_t> cornerGridImage;
-    std::vector<uint8_t> blankImage;
+    std::string vocabPath;
+    FrontendConfig config;
+    std::vector<uint8_t> baseSceneBuffer;
+    std::vector<uint8_t> blankSceneBuffer;
 
     void SetUp() override {
-        ASSERT_TRUE(test_helpers::writeSyntheticVocabFile(vocabFilePath));
+        vocabPath = test_helpers::writeTempVocabFile();
+        config = test_helpers::makeFrontendConfig(kImageWidth, kImageHeight);
 
-        Eigen::Matrix3f K = Eigen::Matrix3f::Identity();
-        K(0, 0) = kFx;
-        K(1, 1) = kFy;
-        K(0, 2) = kCx;
-        K(1, 2) = kCy;
+        baseSceneBuffer = test_helpers::renderProjectedGridScene(
+            kImageWidth, kImageHeight, config.K
+        );
+        blankSceneBuffer.assign(kImageWidth * kImageHeight, test_helpers::kDefaultBg);
 
-        Distortion dist{};
-
-        config.w = kImageWidth;
-        config.h = kImageHeight;
-        config.K = K;
-        config.dist = dist;
-
-        auto preintParams = gtsam::PreintegrationParams::MakeSharedU(kGravity);
-        preintParams->accelerometerCovariance = Eigen::Matrix3d::Identity() * 1e-3;
-        preintParams->gyroscopeCovariance = Eigen::Matrix3d::Identity() * 1e-4;
-        preintParams->integrationCovariance = Eigen::Matrix3d::Identity() * 1e-4;
-        config.preintParams = preintParams;
-
-        config.droppedFeatureThreshold = 0.5f;
-        config.maxTimeBetweenKf = 1.0;
-        config.hfQueueSize = 5;
-
-        config.lfConfig.wImage = kImageWidth;
-        config.lfConfig.hImage = kImageHeight;
-        config.lfConfig.K = K;
-        config.lfConfig.dist = dist;
-
-        cornerGridImage = test_helpers::createCornerGridImage(kImageWidth, kImageHeight, 6, 5);
-        blankImage = test_helpers::createBlankImage(kImageWidth, kImageHeight);
-
-        sync = std::make_unique<Synchronizer>(imuStream, depthStream, imageStream, 10);
-        frontend = std::make_unique<Frontend>(config, *sync, vocabFilePath);
+        synchronizer = std::make_unique<Synchronizer>(imuStream, depthStream, imageStream);
+        frontend = std::make_unique<Frontend>(config, *synchronizer, vocabPath);
     }
 
     void TearDown() override {
         if (frontend) {
             frontend->end();
         }
-        if (sync) {
-            sync->stop();
+        if (synchronizer) {
+            synchronizer->stop();
         }
-        std::remove(vocabFilePath.c_str());
+        if (!vocabPath.empty()) {
+            std::remove(vocabPath.c_str());
+        }
     }
 
-    // Accessor helpers for private Frontend state via friend class FrontendTest
-    bool isFrontendRunning() const {
-        return frontend->runFrontend.load(std::memory_order_acquire);
+    // Helper to pop a BackendHfPacket with a timeout guard so tests never hang on failure
+    std::unique_ptr<BackendHfPacket> popHfPacketWithTimeout(
+        Frontend &fe,
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(400)) {
+        auto fut = std::async(std::launch::async, [&fe]() {
+            return fe.getHfPacket();
+        });
+        if (fut.wait_for(timeout) != std::future_status::ready) {
+            return nullptr;
+        }
+        return fut.get();
     }
 
-    uint32_t getInternalFrameId() const {
-        return frontend->frameId;
+    // Accessors for private Frontend state via friend class FrontendTest
+    size_t getHfQueueSize(Frontend &fe) {
+        std::lock_guard<std::mutex> lock(fe.m_hfQueue);
+        return fe.hfQueue.size();
     }
 
-    size_t getQueuedPacketCount() {
-        std::lock_guard<std::mutex> lock(frontend->m_hfQueue);
-        return frontend->hfQueue.size();
+    gtsam::imuBias::ConstantBias getImuBias(Frontend &fe) {
+        std::lock_guard<std::mutex> lock(fe.m_imuBias);
+        return fe.imuBias;
     }
 
-    gtsam::imuBias::ConstantBias getInternalBias() {
-        std::lock_guard<std::mutex> lock(frontend->m_imuBias);
-        return frontend->imuBias;
-    }
-
-    HfTracker &getInternalHfTracker() {
-        return frontend->hf;
+    uint32_t getCurrentFrameId(const Frontend &fe) const {
+        return fe.frameId;
     }
 };
 
 // ============================================================================
-// 1. Thread Lifecycle & Consumer Unblocking
+// 1. First Frame (T0) Anchor & Feature Replenishment Test
 // ============================================================================
 
-// Verifies that start() and end() transition the worker thread state cleanly and behave
-// idempotently when invoked multiple times in a row.
-TEST_F(FrontendTest, startAndEndManageLifecycleIdempotently) {
-    EXPECT_FALSE(isFrontendRunning());
-
-    sync->start();
+// Verifies that T0 initializes frameId=0, is flagged as a keyframe, populates replenished
+// visual measurements with undistorted coordinates, interpolates depth, and has no IMU factor.
+TEST_F(FrontendTest, FirstFrameAnchorT0ReplenishesFeaturesWithoutImuDelta) {
+    synchronizer->start();
     frontend->start();
-    EXPECT_TRUE(isFrontendRunning());
-    EXPECT_EQ(getInternalFrameId(), 0u);
 
-    // Calling start() while already running must be a no-op
-    frontend->start();
-    EXPECT_TRUE(isFrontendRunning());
+    // Provide depth bracketing T0 = 1.020s (with strictly newer sample at 1.050s)
+    depthStream.pushDepth({1.000, 10.0});
+    depthStream.pushDepth({1.050, 15.0});
 
-    frontend->end();
-    EXPECT_FALSE(isFrontendRunning());
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.020));
 
-    // Calling end() while already stopped must be a no-op
-    frontend->end();
-    EXPECT_FALSE(isFrontendRunning());
+    auto pkt0 = popHfPacketWithTimeout(*frontend);
+    ASSERT_NE(pkt0, nullptr);
+
+    EXPECT_EQ(pkt0->frameId, 0u);
+    EXPECT_DOUBLE_EQ(pkt0->timestamp, 1.020);
+    EXPECT_TRUE(pkt0->isKeyframe);
+
+    // T0 has no preceding frame; imuDelta must be nullptr
+    EXPECT_EQ(pkt0->imuDelta, nullptr);
+
+    // Depth interpolated at t = 1.020 between (1.000, 10.0) and (1.050, 15.0) -> 12.0m
+    ASSERT_TRUE(pkt0->depth.has_value());
+    EXPECT_NEAR(*pkt0->depth, 12.0, 1e-4);
+
+    // ReplenishBuckets must have populated initial landmarks on T0
+    EXPECT_GT(pkt0->visualMeasurements.size(), 0u);
+    for (size_t i = 0; i < pkt0->visualMeasurements.size(); i++) {
+        EXPECT_TRUE(std::isfinite(pkt0->visualMeasurements[i].pt.x()));
+        EXPECT_TRUE(std::isfinite(pkt0->visualMeasurements[i].pt.y()));
+    }
 }
 
-// Verifies that calling end() immediately wakes a backend consumer thread blocked on getHfPacket()
-// and returns nullptr when hfQueue is empty.
-TEST_F(FrontendTest, endUnblocksWaitingConsumerWithNullptr) {
-    sync->start();
+// ============================================================================
+// 2. Multi-Rate Nominal Streaming Test
+// ============================================================================
+
+// Verifies end-to-end streaming across Camera (30 Hz), IMU (200 Hz), and Depth (20 Hz)
+// with continuous feature tracking, IMU preintegration, and image buffer recycling.
+TEST_F(FrontendTest, NominalMultiRateStreamingAndPreintegration) {
+    synchronizer->start();
     frontend->start();
 
-    std::atomic<bool> consumerEntered{false};
-    std::atomic<bool> consumerFinished{false};
-    std::unique_ptr<BackendHfPacket> poppedPacket;
+    std::atomic<bool> runProducers{true};
 
-    std::thread consumerThread([&]() {
-        consumerEntered.store(true, std::memory_order_release);
-        poppedPacket = frontend->getHfPacket();
-        consumerFinished.store(true, std::memory_order_release);
+    // Producer 1: IMU @ 200 Hz (dt = 5 ms)
+    std::thread imuThread([&]() {
+        double t = 1.000;
+        while (runProducers.load(std::memory_order_relaxed)) {
+            imuStream.pushImu(test_helpers::createImuSample(
+                t, Eigen::Vector3d(std::sin(t), 0.0, -9.81), Eigen::Vector3d::Zero()));
+            t += 0.005;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
     });
 
-    while (!consumerEntered.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    EXPECT_FALSE(consumerFinished.load(std::memory_order_acquire));
-
-    const auto tStart = std::chrono::steady_clock::now();
-    frontend->end();
-    consumerThread.join();
-    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - tStart).count();
-
-    EXPECT_TRUE(consumerFinished.load(std::memory_order_acquire));
-    EXPECT_EQ(poppedPacket, nullptr);
-    EXPECT_LT(elapsedMs, 100);
-}
-
-// Verifies that stopping and restarting Frontend resets frameId back to 0 and reinitializes
-// the keyframe tracking state for a new session.
-TEST_F(FrontendTest, restartResetsFrameIdAndKeyframeState) {
-    sync->start();
-    frontend->start();
-
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, -1.0, 1.000, cornerGridImage, 4.0));
-    auto pkt0 = frontend->getHfPacket();
-    ASSERT_NE(pkt0, nullptr);
-    EXPECT_EQ(pkt0->frameId, 0u);
-    EXPECT_TRUE(pkt0->isKeyframe);
-
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, 1.000, 1.050, cornerGridImage, 4.0));
-    auto pkt1 = frontend->getHfPacket();
-    ASSERT_NE(pkt1, nullptr);
-    EXPECT_EQ(pkt1->frameId, 1u);
-
-    frontend->end();
-    sync->stop();
-
-    // Restart Synchronizer and Frontend on a new timeline
-    sync->start();
-    frontend->start();
-
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, -1.0, 10.000, cornerGridImage, 6.0));
-    auto pktRestart = frontend->getHfPacket();
-    ASSERT_NE(pktRestart, nullptr);
-    EXPECT_EQ(pktRestart->frameId, 0u);
-    EXPECT_DOUBLE_EQ(pktRestart->timestamp, 10.000);
-    EXPECT_TRUE(pktRestart->isKeyframe);
-}
-
-// ============================================================================
-// 2. First-Frame (T0) Initialization & Multi-Frame Visual Tracking
-// ============================================================================
-
-// Verifies that the T0 boot frame (with an empty IMU batch) skips trackExistingFeatures,
-// marks isKeyframe = true, produces a zero-dt IMU delta, and replenishes empty grid buckets.
-TEST_F(FrontendTest, firstFrameInitializesKeyframeAndSeedsFeatures) {
-    sync->start();
-    frontend->start();
-
-    constexpr double kT0 = 1.000;
-    constexpr double kDepth0 = 3.25;
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, -1.0, kT0, cornerGridImage, kDepth0));
-
-    auto pkt0 = frontend->getHfPacket();
-    ASSERT_NE(pkt0, nullptr);
-    EXPECT_EQ(pkt0->frameId, 0u);
-    EXPECT_DOUBLE_EQ(pkt0->timestamp, kT0);
-    EXPECT_TRUE(pkt0->isKeyframe);
-    EXPECT_TRUE(pkt0->visualMeasurements.empty());
-
-    ASSERT_NE(pkt0->imuDelta, nullptr);
-    EXPECT_DOUBLE_EQ(pkt0->imuDelta->deltaTij(), 0.0);
-
-    ASSERT_TRUE(pkt0->depth.has_value());
-    EXPECT_NEAR(*pkt0->depth, kDepth0, 1e-4);
-
-    // Wait briefly for replenishBuckets to complete on frame 0
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    EXPECT_GT(getInternalHfTracker().getActiveFeatures().size(), 15u);
-}
-
-// Verifies that frame T1 tracks features seeded on T0 and packages unique featureIds and
-// calibrated normalized coordinates (VisualMeasurement::featureId and VisualMeasurement::pt).
-TEST_F(FrontendTest, subsequentFrameTracksFeaturesAndPackagesUndistortedMeasurements) {
-    sync->start();
-    frontend->start();
-
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, -1.0, 1.000, cornerGridImage, 5.0));
-    auto pkt0 = frontend->getHfPacket();
-    ASSERT_NE(pkt0, nullptr);
-
-    // Push frame T1 with a sub-pixel horizontal translation (+0.5 px) and zero rotation
-    auto shiftedImage = test_helpers::createCornerGridImage(
-        kImageWidth, kImageHeight, 6, 5, 0.5f, 0.0f);
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, 1.000, 1.040, shiftedImage, 5.0));
-
-    auto pkt1 = frontend->getHfPacket();
-    ASSERT_NE(pkt1, nullptr);
-    EXPECT_EQ(pkt1->frameId, 1u);
-    EXPECT_DOUBLE_EQ(pkt1->timestamp, 1.040);
-    EXPECT_FALSE(pkt1->isKeyframe);
-    EXPECT_GT(pkt1->visualMeasurements.size(), 15u);
-
-    // Verify all VisualMeasurement entries have unique featureIds and valid normalized rays
-    const double maxNormX = (static_cast<double>(kImageWidth) - static_cast<double>(kCx)) / static_cast<double>(kFx);
-    const double maxNormY = (static_cast<double>(kImageHeight) - static_cast<double>(kCy)) / static_cast<double>(kFy);
-    std::unordered_set<uint32_t> seenIds;
-
-    for (size_t i = 0; i < pkt1->visualMeasurements.size(); i++) {
-        const auto &vm = pkt1->visualMeasurements[i];
-        EXPECT_TRUE(seenIds.insert(vm.featureId).second);
-        EXPECT_TRUE(std::isfinite(vm.pt.x()));
-        EXPECT_TRUE(std::isfinite(vm.pt.y()));
-        EXPECT_LE(std::abs(vm.pt.x()), maxNormX + 1e-3);
-        EXPECT_LE(std::abs(vm.pt.y()), maxNormY + 1e-3);
-    }
-}
-
-// ============================================================================
-// 3. IMU Pre-Integration & Thread-Safe Bias Updates
-// ============================================================================
-
-// Verifies that processPacket() integrates the inter-frame IMU batch over (T0, T1] and attaches
-// the resulting PreintegratedImuMeasurements delta to BackendHfPacket.
-TEST_F(FrontendTest, imuPreintegrationAccumulatesAngularVelocityAndAcceleration) {
-    sync->start();
-    frontend->start();
-
-    constexpr double kT0 = 1.000;
-    constexpr double kT1 = 1.050;
-    constexpr double kDt = kT1 - kT0;
-    const Eigen::Vector3d hoverAccel(0.0, 0.0, -kGravity);
-    const Eigen::Vector3d zeroOmega = Eigen::Vector3d::Zero();
-
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, -1.0, kT0, cornerGridImage, 5.0, hoverAccel, zeroOmega));
-    ASSERT_NE(frontend->getHfPacket(), nullptr);
-
-    // Apply a small roll rate (0.02 rad/s about Z) and +0.5 m/s^2 X acceleration over 50 ms
-    const Eigen::Vector3d activeAccel(0.5, 0.0, -kGravity);
-    const Eigen::Vector3d activeOmega(0.0, 0.0, 0.02);
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, kT0, kT1, cornerGridImage, 5.0, activeAccel, activeOmega));
-
-    auto pkt1 = frontend->getHfPacket();
-    ASSERT_NE(pkt1, nullptr);
-    ASSERT_NE(pkt1->imuDelta, nullptr);
-
-    EXPECT_NEAR(pkt1->imuDelta->deltaTij(), kDt, 1e-4);
-    EXPECT_NEAR(pkt1->imuDelta->deltaVij().x(), 0.5 * kDt, 5e-3);
-
-    const Eigen::AngleAxisd deltaAngleAxis(pkt1->imuDelta->deltaRij().matrix());
-    EXPECT_NEAR(deltaAngleAxis.angle(), 0.02 * kDt, 1e-3);
-}
-
-// Verifies that setBias() updates imuBias under mutex lock and that subsequent frames construct
-// their PreintegratedImuMeasurements with the updated bias linearization point.
-TEST_F(FrontendTest, setBiasUpdatesPreintegratorBiasLinearizationPoint) {
-    sync->start();
-    frontend->start();
-
-    const Eigen::Vector3d injectedAccelBias(0.25, -0.15, 0.10);
-    const Eigen::Vector3d injectedGyroBias(0.01, -0.02, 0.015);
-    const gtsam::imuBias::ConstantBias targetBias(injectedAccelBias, injectedGyroBias);
-
-    frontend->setBias(targetBias);
-
-    const auto storedBias = getInternalBias();
-    EXPECT_NEAR((storedBias.accelerometer() - injectedAccelBias).norm(), 0.0, 1e-9);
-    EXPECT_NEAR((storedBias.gyroscope() - injectedGyroBias).norm(), 0.0, 1e-9);
-
-    constexpr double kT0 = 2.000;
-    constexpr double kT1 = 2.050;
-    const Eigen::Vector3d biasedHoverAccel = Eigen::Vector3d(0.0, 0.0, -kGravity) + injectedAccelBias;
-
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, -1.0, kT0, cornerGridImage, 4.0,
-        biasedHoverAccel, injectedGyroBias));
-    ASSERT_NE(frontend->getHfPacket(), nullptr);
-
-    // Sensor readings equal (hover + targetBias), so bias-compensated integration must yield ~0 delta
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, kT0, kT1, cornerGridImage, 4.0,
-        biasedHoverAccel, injectedGyroBias));
-
-    auto pkt1 = frontend->getHfPacket();
-    ASSERT_NE(pkt1, nullptr);
-    ASSERT_NE(pkt1->imuDelta, nullptr);
-
-    EXPECT_NEAR(pkt1->imuDelta->deltaVij().norm(), 0.0, 1e-3);
-    const Eigen::AngleAxisd netRot(pkt1->imuDelta->deltaRij().matrix());
-    EXPECT_NEAR(netRot.angle(), 0.0, 1e-4);
-}
-
-// ============================================================================
-// 4. Depth Propagation & Graceful Degradation
-// ============================================================================
-
-// Verifies that BackendHfPacket::depth contains interpolated depth when active and degrades
-// to std::nullopt when depth measurements stop arriving.
-TEST_F(FrontendTest, depthPopulatedWhenActiveAndNulloptWhenDepthDegrades) {
-    sync->start();
-    frontend->start();
-
-    // Frame 0 with valid depth = 7.5 m
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, -1.0, 1.000, cornerGridImage, 7.5));
-    auto pkt0 = frontend->getHfPacket();
-    ASSERT_NE(pkt0, nullptr);
-    ASSERT_TRUE(pkt0->depth.has_value());
-    EXPECT_NEAR(*pkt0->depth, 7.5, 1e-4);
-
-    // Frame 1 with no new depth pushed past t = 1.030s (depth times out at t = 1.250s)
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, 1.000, 1.250, cornerGridImage, std::nullopt));
-    auto pkt1 = frontend->getHfPacket();
-    ASSERT_NE(pkt1, nullptr);
-    EXPECT_EQ(pkt1->frameId, 1u);
-    EXPECT_FALSE(pkt1->depth.has_value());
-}
-
-// ============================================================================
-// 5. Keyframe Decision Logic (Temporal Timeout & Feature Drop)
-// ============================================================================
-
-// Verifies that a new keyframe is triggered when elapsed time since the previous keyframe
-// exceeds config.maxTimeBetweenKf, even when all features survive tracking.
-TEST_F(FrontendTest, keyframeTriggeredWhenMaxTimeBetweenKfExceeded) {
-    sync->start();
-    frontend->start();
-
-    // T0 = 1.00s -> Keyframe
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, -1.0, 1.000, cornerGridImage, 5.0));
-    auto pkt0 = frontend->getHfPacket();
-    ASSERT_NE(pkt0, nullptr);
-    EXPECT_TRUE(pkt0->isKeyframe);
-
-    // T1 = 1.40s (elapsed 0.40s <= maxTimeBetweenKf = 1.0s) -> Non-keyframe
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, 1.000, 1.400, cornerGridImage, 5.0));
-    auto pkt1 = frontend->getHfPacket();
-    ASSERT_NE(pkt1, nullptr);
-    EXPECT_FALSE(pkt1->isKeyframe);
-
-    // T2 = 1.85s (elapsed 0.85s <= maxTimeBetweenKf = 1.0s) -> Non-keyframe
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, 1.400, 1.850, cornerGridImage, 5.0));
-    auto pkt2 = frontend->getHfPacket();
-    ASSERT_NE(pkt2, nullptr);
-    EXPECT_FALSE(pkt2->isKeyframe);
-
-    // T3 = 2.05s (elapsed 1.05s > maxTimeBetweenKf = 1.0s) -> Keyframe triggered by timeout
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, 1.850, 2.050, cornerGridImage, 5.0));
-    auto pkt3 = frontend->getHfPacket();
-    ASSERT_NE(pkt3, nullptr);
-    EXPECT_TRUE(pkt3->isKeyframe);
-}
-
-// Verifies that a new keyframe is triggered immediately when the ratio of surviving features
-// relative to lastKfFeatures drops below config.droppedFeatureThreshold, and that subsequent
-// frames recover after bucket replenishment updates lastKfFeatures.
-TEST_F(FrontendTest, keyframeTriggeredWhenSurvivingFeatureRatioDropsBelowThreshold) {
-    sync->start();
-    frontend->start();
-
-    // T0 = 1.00s: Initial keyframe seeds ~30 features in replenishBuckets
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, -1.0, 1.000, cornerGridImage, 5.0));
-    auto pkt0 = frontend->getHfPacket();
-    ASSERT_NE(pkt0, nullptr);
-    EXPECT_TRUE(pkt0->isKeyframe);
-
-    // T1 = 1.04s: All ~30 features survive -> Non-keyframe
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, 1.000, 1.040, cornerGridImage, 5.0));
-    auto pkt1 = frontend->getHfPacket();
-    ASSERT_NE(pkt1, nullptr);
-    EXPECT_FALSE(pkt1->isKeyframe);
-    EXPECT_GT(pkt1->visualMeasurements.size(), 15u);
-
-    // T2 = 1.08s: Push partially occluded image (only 6 of 30 corners visible)
-    // Surviving ratio (~6 / 30 = 0.20 < 0.50) triggers a keyframe well before maxTimeBetweenKf (1.0s)
-    auto occludedImage = test_helpers::createCornerGridImage(
-        kImageWidth, kImageHeight, 6, 5, 0.0f, 0.0f, 6);
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, 1.040, 1.080, occludedImage, 5.0));
-    auto pkt2 = frontend->getHfPacket();
-    ASSERT_NE(pkt2, nullptr);
-    EXPECT_TRUE(pkt2->isKeyframe);
-
-    // T3 = 1.12s: Pushing the same 6-corner scene again keeps all 6 features (ratio 6/6 = 1.0 >= 0.5)
-    ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-        imuStream, depthStream, imageStream, 1.080, 1.120, occludedImage, 5.0));
-    auto pkt3 = frontend->getHfPacket();
-    ASSERT_NE(pkt3, nullptr);
-    EXPECT_FALSE(pkt3->isKeyframe);
-}
-
-// ============================================================================
-// 6. Queue Backpressure Eviction & Image Pool Recycling
-// ============================================================================
-
-// Verifies that pushing more frames than config.hfQueueSize evicts the oldest BackendHfPackets
-// while still recycling every raw ImageData* buffer back to ImageStream without pool starvation.
-TEST_F(FrontendTest, queueBackpressureEvictsOldestPacketsAndRecyclesImages) {
-    sync->start();
-    frontend->start();
-
-    constexpr size_t kTotalFramesToPush = 9; // Exceeds config.hfQueueSize (5)
-    double prevTime = -1.0;
-
-    for (size_t i = 0; i < kTotalFramesToPush; i++) {
-        const double curTime = 1.000 + static_cast<double>(i) * 0.040;
-        ASSERT_TRUE(test_helpers::pushSynchronizedFrame(
-            imuStream, depthStream, imageStream, prevTime, curTime, cornerGridImage, 5.0));
-        prevTime = curTime;
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
-    }
-
-    // Wait for Frontend worker thread to process all 9 frames
-    const auto waitStart = std::chrono::steady_clock::now();
-    while (getInternalFrameId() < kTotalFramesToPush) {
-        if (std::chrono::steady_clock::now() - waitStart > std::chrono::seconds(2)) {
-            break;
+    // Producer 2: Depth @ 20 Hz (dt = 50 ms)
+    std::thread depthThread([&]() {
+        double t = 1.000;
+        while (runProducers.load(std::memory_order_relaxed)) {
+            depthStream.pushDepth({t, 8.5});
+            t += 0.050;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    EXPECT_EQ(getInternalFrameId(), kTotalFramesToPush);
-    EXPECT_EQ(getQueuedPacketCount(), config.hfQueueSize);
-
-    // Pop remaining packets: frames 0..3 must have been evicted, leaving frames 4..8 in FIFO order
-    const size_t firstExpectedId = kTotalFramesToPush - config.hfQueueSize;
-    for (size_t i = 0; i < config.hfQueueSize; i++) {
-        auto pkt = frontend->getHfPacket();
-        ASSERT_NE(pkt, nullptr);
-        EXPECT_EQ(pkt->frameId, static_cast<uint32_t>(firstExpectedId + i));
-    }
-
-    // Verify ImageStream pool was not starved by pushing another frame
-    EXPECT_TRUE(imageStream.pushFrame(cornerGridImage.data(), 2.000));
-}
-
-// ============================================================================
-// 7. End-to-End Multi-Threaded Concurrency & LfTracker Access
-// ============================================================================
-
-// Verifies concurrent operation of sensor producer threads, Frontend worker thread, LfTracker
-// worker thread, and a backend consumer thread polling getHfPacket(), setBias(), and getLfTracker().
-TEST_F(FrontendTest, concurrentMultiThreadedStreamingAndBiasUpdates) {
-    sync->start();
-    frontend->start();
-
-    constexpr size_t kNumFrames = 15;
-    std::atomic<bool> producersDone{false};
-
-    std::thread producerThread([&]() {
-        double prevTime = -1.0;
-        for (size_t i = 0; i < kNumFrames; i++) {
-            const double curTime = 1.000 + static_cast<double>(i) * 0.035;
-            const float shift = static_cast<float>(i % 3) * 0.25f;
-            auto frame = test_helpers::createCornerGridImage(
-                kImageWidth, kImageHeight, 6, 5, shift, 0.0f);
-
-            EXPECT_TRUE(test_helpers::pushSynchronizedFrame(
-                imuStream, depthStream, imageStream, prevTime, curTime, frame,
-                4.5 + 0.1 * static_cast<double>(i)));
-            prevTime = curTime;
-            std::this_thread::sleep_for(std::chrono::milliseconds(12));
-        }
-        producersDone.store(true, std::memory_order_release);
     });
 
-    size_t receivedCount = 0;
+    // Producer 3: Camera @ 30 Hz (dt = 33 ms) pushing 15 frames (> kPoolCapacity = 12)
+    constexpr size_t kTotalFrames = 15;
+    std::thread cameraThread([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        double t = 1.020;
+        for (size_t i = 0; i < kTotalFrames && runProducers.load(std::memory_order_relaxed); i++) {
+            EXPECT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), t));
+            t += 0.033;
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        }
+    });
+
+    std::vector<std::unique_ptr<BackendHfPacket>> packets;
     double lastTimestamp = -1.0;
 
-    while (receivedCount < kNumFrames) {
-        auto pkt = frontend->getHfPacket();
-        ASSERT_NE(pkt, nullptr);
-
-        EXPECT_EQ(pkt->frameId, static_cast<uint32_t>(receivedCount));
+    for (size_t i = 0; i < kTotalFrames; i++) {
+        auto pkt = popHfPacketWithTimeout(*frontend, std::chrono::milliseconds(300));
+        if (!pkt) {
+            break;
+        }
+        EXPECT_EQ(pkt->frameId, static_cast<uint32_t>(i));
         EXPECT_GT(pkt->timestamp, lastTimestamp);
         lastTimestamp = pkt->timestamp;
 
-        // Periodically update IMU bias and poll LfTracker from the backend consumer thread
-        if (receivedCount % 3 == 0) {
-            const gtsam::imuBias::ConstantBias updatedBias(
-                Eigen::Vector3d(0.01 * static_cast<double>(receivedCount), 0.0, 0.0),
-                Eigen::Vector3d(0.0, 0.0, 0.001 * static_cast<double>(receivedCount)));
-            frontend->setBias(updatedBias);
+        if (i == 0) {
+            EXPECT_TRUE(pkt->isKeyframe);
+            EXPECT_EQ(pkt->imuDelta, nullptr);
+        } else {
+            ASSERT_NE(pkt->imuDelta, nullptr);
+            EXPECT_NEAR(pkt->imuDelta->deltaTij(), 0.033, 1e-3);
         }
 
-        BackendLfPacket lfMatch{};
-        (void)frontend->getLfTracker().getMatch(lfMatch);
-
-        receivedCount++;
+        EXPECT_TRUE(pkt->depth.has_value());
+        EXPECT_GT(pkt->visualMeasurements.size(), 10u);
+        packets.push_back(std::move(pkt));
     }
 
-    producerThread.join();
-    EXPECT_TRUE(producersDone.load(std::memory_order_acquire));
+    runProducers.store(false, std::memory_order_relaxed);
+    cameraThread.join();
+    imuThread.join();
+    depthThread.join();
+
+    EXPECT_EQ(packets.size(), kTotalFrames);
+}
+
+// ============================================================================
+// 3. Asynchronous Bus Jitter and Transit Delay
+// ============================================================================
+
+// Verifies Frontend processes packets accurately when IMU and Depth streams experience random jitter
+TEST_F(FrontendTest, AsynchronousBusJitter) {
+    synchronizer->start();
+    frontend->start();
+
+    std::atomic<bool> runProducers{true};
+
+    std::thread imuThread([&]() {
+        std::mt19937 rng(42);
+        std::uniform_int_distribution<int> jitterDist(2, 8);
+        double t = 1.000;
+        while (runProducers.load(std::memory_order_relaxed)) {
+            imuStream.pushImu(test_helpers::createImuSample(t));
+            t += 0.005;
+            std::this_thread::sleep_for(std::chrono::milliseconds(jitterDist(rng)));
+        }
+    });
+
+    std::thread depthThread([&]() {
+        std::mt19937 rng(84);
+        std::uniform_int_distribution<int> jitterDist(35, 65);
+        double t = 1.000;
+        while (runProducers.load(std::memory_order_relaxed)) {
+            depthStream.pushDepth({t, 6.0});
+            t += 0.050;
+            std::this_thread::sleep_for(std::chrono::milliseconds(jitterDist(rng)));
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+    constexpr size_t kNumFrames = 8;
+    double camTime = 1.040;
+    for (size_t i = 0; i < kNumFrames; i++) {
+        EXPECT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), camTime));
+        camTime += 0.033;
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+    }
+
+    size_t receivedCount = 0;
+    for (size_t i = 0; i < kNumFrames; i++) {
+        auto pkt = popHfPacketWithTimeout(*frontend, std::chrono::milliseconds(350));
+        if (pkt) {
+            EXPECT_EQ(pkt->frameId, static_cast<uint32_t>(i));
+            receivedCount++;
+        }
+    }
+
+    runProducers.store(false, std::memory_order_relaxed);
+    imuThread.join();
+    depthThread.join();
+
     EXPECT_EQ(receivedCount, kNumFrames);
+}
+
+// ============================================================================
+// 4. Keyframe Selection Policies (Time Threshold & Dropped Feature Threshold)
+// ============================================================================
+
+// Verifies keyframes trigger strictly when maxTimeBetweenKf elapses under steady tracking
+TEST_F(FrontendTest, KeyframeTriggersOnMaxTimeThreshold) {
+    // Set maxTimeBetweenKf = 0.10s
+    FrontendConfig kfCfg = test_helpers::makeFrontendConfig(kImageWidth, kImageHeight, 0.10, 0.5f, 10);
+    Frontend kfFrontend(kfCfg, *synchronizer, vocabPath);
+
+    test_helpers::pushInertialAndDepthWindow(imuStream, depthStream, 1.000, 1.300, 4.0);
+
+    synchronizer->start();
+    kfFrontend.start();
+
+    // Frame 0 at t = 1.020s -> Initial Keyframe (lastKfTime = 1.020)
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.020));
+    auto p0 = popHfPacketWithTimeout(kfFrontend);
+    ASSERT_NE(p0, nullptr);
+    EXPECT_TRUE(p0->isKeyframe);
+
+    // Frame 1 at t = 1.060s (dt = 0.040s <= 0.10s, 0 features dropped) -> Non-keyframe
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.060));
+    auto p1 = popHfPacketWithTimeout(kfFrontend);
+    ASSERT_NE(p1, nullptr);
+    EXPECT_FALSE(p1->isKeyframe);
+
+    // Frame 2 at t = 1.100s (dt = 0.080s <= 0.10s, 0 features dropped) -> Non-keyframe
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.100));
+    auto p2 = popHfPacketWithTimeout(kfFrontend);
+    ASSERT_NE(p2, nullptr);
+    EXPECT_FALSE(p2->isKeyframe);
+
+    // Frame 3 at t = 1.140s (1.140 - 1.020 = 0.120s > 0.10s) -> Keyframe triggered by time!
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.140));
+    auto p3 = popHfPacketWithTimeout(kfFrontend);
+    ASSERT_NE(p3, nullptr);
+    EXPECT_TRUE(p3->isKeyframe);
+
+    kfFrontend.end();
+}
+
+// Verifies keyframes trigger immediately when tracked features drop below droppedFeatureThreshold
+TEST_F(FrontendTest, KeyframeTriggersOnDroppedFeatureThreshold) {
+    // Set maxTimeBetweenKf high (10.0s) to isolate the dropped-feature trigger
+    FrontendConfig kfCfg = test_helpers::makeFrontendConfig(kImageWidth, kImageHeight, 10.0, 0.5f, 10);
+    Frontend kfFrontend(kfCfg, *synchronizer, vocabPath);
+
+    test_helpers::pushInertialAndDepthWindow(imuStream, depthStream, 1.000, 1.250, 4.0);
+
+    synchronizer->start();
+    kfFrontend.start();
+
+    // Frame 0 at t = 1.020s: Rich scene (30 corners) -> Keyframe
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.020));
+    auto p0 = popHfPacketWithTimeout(kfFrontend);
+    ASSERT_NE(p0, nullptr);
+    EXPECT_TRUE(p0->isKeyframe);
+    EXPECT_GE(p0->visualMeasurements.size(), 20u);
+
+    // Frame 1 at t = 1.050s: Same rich scene, all features survive -> Non-keyframe
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.050));
+    auto p1 = popHfPacketWithTimeout(kfFrontend);
+    ASSERT_NE(p1, nullptr);
+    EXPECT_FALSE(p1->isKeyframe);
+
+    // Frame 2 at t = 1.080s: Blank/occluded frame drops all tracked features (< 0.5 * lastKfFeatures)
+    ASSERT_TRUE(imageStream.pushFrame(blankSceneBuffer.data(), 1.080));
+    auto p2 = popHfPacketWithTimeout(kfFrontend);
+    ASSERT_NE(p2, nullptr);
+    EXPECT_TRUE(p2->isKeyframe);
+    EXPECT_EQ(p2->visualMeasurements.size(), 0u);
+
+    kfFrontend.end();
+}
+
+// ============================================================================
+// 5. Underwater VIDO to Monocular VIO Graceful Degradation
+// ============================================================================
+
+// Verifies Frontend transitions to std::nullopt depth when DepthStream times out, without dropping frames
+TEST_F(FrontendTest, DepthDropGracefulDegradationToMonocularVIO) {
+    synchronizer->start();
+    frontend->start();
+
+    std::atomic<bool> runImu{true};
+    std::thread imuThread([&]() {
+        double t = 1.000;
+        while (runImu.load(std::memory_order_relaxed)) {
+            imuStream.pushImu(test_helpers::createImuSample(t));
+            t += 0.005;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+
+    // Provide depth samples only up to t = 1.150s
+    for (size_t i = 0; i < 4; i++) {
+        depthStream.pushDepth({1.000 + static_cast<double>(i) * 0.050, 14.0});
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Frame 0 at t = 1.050s (within depth coverage)
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.050));
+    auto p0 = popHfPacketWithTimeout(*frontend);
+    ASSERT_NE(p0, nullptr);
+    ASSERT_TRUE(p0->depth.has_value());
+    EXPECT_NEAR(*p0->depth, 14.0, 1e-4);
+
+    // Wait for IMU thread to advance past 1.250s while pushing no new depth data
+    std::this_thread::sleep_for(std::chrono::milliseconds(240));
+
+    // Frame 1 at t = 1.220s (past depth coverage; depthStream.waitUntil(1.220) times out)
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.220));
+    auto p1 = popHfPacketWithTimeout(*frontend, std::chrono::milliseconds(400));
+    ASSERT_NE(p1, nullptr);
+    EXPECT_EQ(p1->frameId, 1u);
+    EXPECT_FALSE(p1->depth.has_value());
+    EXPECT_NE(p1->imuDelta, nullptr);
+    EXPECT_GT(p1->visualMeasurements.size(), 0u);
+
+    runImu.store(false, std::memory_order_relaxed);
+    imuThread.join();
+}
+
+// ============================================================================
+// 6. Dynamic IMU Bias Update (setBias)
+// ============================================================================
+
+// Verifies setBias thread-safely updates the bias embedded into subsequent IMU preintegrators
+TEST_F(FrontendTest, SetBiasUpdatesSubsequentPreintegratedImuMeasurements) {
+    test_helpers::pushInertialAndDepthWindow(imuStream, depthStream, 1.000, 1.250, 5.0);
+
+    synchronizer->start();
+    frontend->start();
+
+    // Dispatch T0
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.020));
+    auto p0 = popHfPacketWithTimeout(*frontend);
+    ASSERT_NE(p0, nullptr);
+
+    // Update IMU bias from Backend before pushing T1
+    const Eigen::Vector3d accelBias(0.15, -0.08, 0.22);
+    const Eigen::Vector3d gyroBias(0.01, -0.02, 0.005);
+    const gtsam::imuBias::ConstantBias newBias(accelBias, gyroBias);
+
+    EXPECT_TRUE(frontend->setBias(newBias));
+    EXPECT_TRUE(getImuBias(*frontend).accelerometer().isApprox(accelBias, 1e-9));
+    EXPECT_TRUE(getImuBias(*frontend).gyroscope().isApprox(gyroBias, 1e-9));
+
+    // Dispatch T1 and verify the preintegrator inside BackendHfPacket carries newBias
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.060));
+    auto p1 = popHfPacketWithTimeout(*frontend);
+    ASSERT_NE(p1, nullptr);
+    ASSERT_NE(p1->imuDelta, nullptr);
+    EXPECT_TRUE(p1->imuDelta->biasHat().accelerometer().isApprox(accelBias, 1e-7));
+    EXPECT_TRUE(p1->imuDelta->biasHat().gyroscope().isApprox(gyroBias, 1e-7));
+}
+
+// ============================================================================
+// 7. Bounded hfQueue Backpressure Eviction & Image Pool Recycle Audit
+// ============================================================================
+
+// Verifies that when hfQueue overflows, oldest packets are evicted while raw images are still recycled
+TEST_F(FrontendTest, HfQueueBackpressureEvictsOldestPacketsAndRecyclesImages) {
+    constexpr size_t kBoundedHfQueueSize = 3;
+    FrontendConfig boundedCfg = test_helpers::makeFrontendConfig(
+        kImageWidth, kImageHeight, 1.0, 0.5f, kBoundedHfQueueSize);
+    Frontend boundedFrontend(boundedCfg, *synchronizer, vocabPath);
+
+    test_helpers::pushInertialAndDepthWindow(imuStream, depthStream, 1.000, 1.600, 5.0);
+
+    synchronizer->start();
+    boundedFrontend.start();
+
+    // Push 7 frames without calling getHfPacket()
+    constexpr size_t kFramesPushed = 7;
+    for (size_t i = 0; i < kFramesPushed; i++) {
+        const double t = 1.020 + static_cast<double>(i) * 0.040;
+        EXPECT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), t));
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+
+    // Allow Frontend thread to finish processing all 7 frames
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    EXPECT_EQ(getHfQueueSize(boundedFrontend), kBoundedHfQueueSize);
+
+    // Pop the 3 retained packets: they must be the newest frames (frameIds 4, 5, 6)
+    for (size_t i = 0; i < kBoundedHfQueueSize; i++) {
+        auto pkt = popHfPacketWithTimeout(boundedFrontend);
+        ASSERT_NE(pkt, nullptr);
+        EXPECT_EQ(pkt->frameId, static_cast<uint32_t>(kFramesPushed - kBoundedHfQueueSize + i));
+    }
+
+    // Verify ImageStream pool was not starved by unconsumed BackendHfPackets
+    EXPECT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.500));
+    auto pktAfterDrain = popHfPacketWithTimeout(boundedFrontend);
+    ASSERT_NE(pktAfterDrain, nullptr);
+    EXPECT_EQ(pktAfterDrain->frameId, static_cast<uint32_t>(kFramesPushed));
+
+    boundedFrontend.end();
+}
+
+// ============================================================================
+// 8. Fail-Safe Pipeline Termination on Upstream Sensor Failure
+// ============================================================================
+
+// Verifies that when ImageStream fails (4 consecutive timeouts -> DISABLED) and Synchronizer
+// halts, Frontend exits processPacket() cleanly and unblocks getHfPacket() with nullptr.
+TEST_F(FrontendTest, UpstreamFatalCameraFailureUnblocksGetHfPacketCleanly) {
+    synchronizer->start();
+    frontend->start();
+
+    std::atomic<bool> runImu{true};
+    std::thread imuThread([&]() {
+        double t = 1.000;
+        while (runImu.load(std::memory_order_relaxed)) {
+            imuStream.pushImu(test_helpers::createImuSample(t));
+            t += 0.005;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+
+    // Push zero camera frames: ImageStream latches DISABLED on the 4th timeout (~400 ms),
+    // Synchronizer transitions to FATALCAM, and Frontend must unblock getHfPacket().
+    auto pkt = popHfPacketWithTimeout(*frontend, std::chrono::milliseconds(700));
+    EXPECT_EQ(pkt, nullptr);
+
+    // Subsequent calls to getHfPacket() must return nullptr immediately without blocking
+    auto start = std::chrono::steady_clock::now();
+    auto immediateNull = popHfPacketWithTimeout(*frontend, std::chrono::milliseconds(200));
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start
+    ).count();
+
+    EXPECT_EQ(immediateNull, nullptr);
+    EXPECT_LT(duration, 50);
+
+    runImu.store(false, std::memory_order_relaxed);
+    imuThread.join();
+}
+
+// ============================================================================
+// 9. Lifecycle: Start, End, and Restart
+// ============================================================================
+
+// Verifies Frontend stops cleanly, unblocks waiting consumers, and resets frameId on restart
+TEST_F(FrontendTest, LifecycleStartEndRestartResetsFrameIdAndState) {
+    // Session 1
+    test_helpers::pushInertialAndDepthWindow(imuStream, depthStream, 1.000, 1.150, 3.0);
+    synchronizer->start();
+    frontend->start();
+
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.020));
+    auto p0 = popHfPacketWithTimeout(*frontend);
+    ASSERT_NE(p0, nullptr);
+    EXPECT_EQ(p0->frameId, 0u);
+
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.060));
+    auto p1 = popHfPacketWithTimeout(*frontend);
+    ASSERT_NE(p1, nullptr);
+    EXPECT_EQ(p1->frameId, 1u);
+
+    frontend->end();
+    synchronizer->stop();
+
+    // Session 2: Restart on a new mission timeline (t = 50.0s)
+    test_helpers::pushInertialAndDepthWindow(imuStream, depthStream, 50.000, 50.150, 9.0);
+    synchronizer->start();
+    frontend->start();
+
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 50.020));
+    auto pRestarted = popHfPacketWithTimeout(*frontend);
+    ASSERT_NE(pRestarted, nullptr);
+
+    // frameId must reset to 0 and T0 must have no IMU delta
+    EXPECT_EQ(pRestarted->frameId, 0u);
+    EXPECT_DOUBLE_EQ(pRestarted->timestamp, 50.020);
+    EXPECT_TRUE(pRestarted->isKeyframe);
+    EXPECT_EQ(pRestarted->imuDelta, nullptr);
+    ASSERT_TRUE(pRestarted->depth.has_value());
+    EXPECT_NEAR(*pRestarted->depth, 9.0, 1e-4);
 }
 
 } // namespace PoolSLAM

@@ -190,6 +190,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             if((p - q).norm() <= ransacTau){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = activeFeatures[readIdx];
+                    activeFeatures[writeIdx].ptUndis = epi.currRays.col(static_cast<Eigen::Index>(readIdx)).hnormalized();
                 }
                 writeIdx++;  
             }

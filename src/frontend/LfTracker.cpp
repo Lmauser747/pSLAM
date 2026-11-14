@@ -56,7 +56,7 @@ bool LfTracker::passKeyframe(uint32_t id, double timestamp, const uint8_t *curBu
 
     {
         std::lock_guard<std::mutex> lock(m_passKeyframe);
-        for(size_t i = 0; i < config.wImage * config.hImage; i++){
+        for(size_t i = 0; i < config.w * config.h; i++){
             localBuffer[i] = curBuffer[i];
         }
 
@@ -64,8 +64,8 @@ bool LfTracker::passKeyframe(uint32_t id, double timestamp, const uint8_t *curBu
 
         for(auto &feature : features){
             Eigen::Vector2i kp = feature.ptCurr.cast<int>();
-            if(kp.x() >= QOV_RADIUS && kp.x() < static_cast<int>(config.wImage) - QOV_RADIUS &&
-               kp.y() >= QOV_RADIUS && kp.y() < static_cast<int>(config.hImage) - QOV_RADIUS){
+            if(kp.x() >= QOV_RADIUS && kp.x() < static_cast<int>(config.w) - QOV_RADIUS &&
+               kp.y() >= QOV_RADIUS && kp.y() < static_cast<int>(config.h) - QOV_RADIUS){
                 newFrame.addKp(kp, feature.id);
             }
         }
@@ -274,7 +274,7 @@ void LfTracker::calculateDescriptors(){
         // Find the orientation of the feature
         // BEGIN VECTORIZE
         for(int y = -QOV_RADIUS; y <= QOV_RADIUS; y++){
-            auto rowPtr = localBuffer.get() + static_cast<size_t>(feat.pt.y() + y) * config.wImage + feat.pt.x();
+            auto rowPtr = localBuffer.get() + static_cast<size_t>(feat.pt.y() + y) * config.w + feat.pt.x();
             for(int x = -QOV_RADIUS; x <= QOV_RADIUS; x++){
                 m10 += *(rowPtr + x) * x;
                 m01 += *(rowPtr + x) * y;
@@ -282,7 +282,7 @@ void LfTracker::calculateDescriptors(){
         }
         // END VECTORIZE
         auto angle = std::atan2(static_cast<double>(m01), static_cast<double>(m10));
-        auto featPtr = localBuffer.get() + config.wImage * static_cast<size_t>(feat.pt.y()) + feat.pt.x();
+        auto featPtr = localBuffer.get() + config.w * static_cast<size_t>(feat.pt.y()) + feat.pt.x();
         const auto &offsets = qovPairs.offsetAtAngleRad(angle);
         feat.des = descriptor::generateDescriptor(featPtr, offsets);
     }
@@ -525,8 +525,8 @@ void LfTracker::undistort(Eigen::Matrix3Xd &pts){
 
 void LfTracker::gaussianBlur(){
     // First pass using [1, 4, 6, 4, 1]
-    for(size_t row = 0; row < config.hImage; row++){
-        auto rowPtr = localBuffer.get() + row * config.wImage;
+    for(size_t row = 0; row < config.h; row++){
+        auto rowPtr = localBuffer.get() + row * config.w;
         blurData.rowBuffer[0] = static_cast<uint8_t>((
             *(rowPtr) * BlurData::KERNEL[0] + *(rowPtr) * BlurData::KERNEL[1] + 
             *(rowPtr) * BlurData::KERNEL[2] + *(rowPtr + 1) * BlurData::KERNEL[3] +
@@ -537,15 +537,15 @@ void LfTracker::gaussianBlur(){
             *(rowPtr + 1) * BlurData::KERNEL[2] + *(rowPtr + 2) * BlurData::KERNEL[3] +
             *(rowPtr + 3) * BlurData::KERNEL[4]
         ) >> 4);
-        for(size_t col = 2; col < config.wImage - 2; col++){
+        for(size_t col = 2; col < config.w - 2; col++){
             blurData.rowBuffer[col] = static_cast<uint8_t>((
                 *(rowPtr + col - 2) * BlurData::KERNEL[0] + *(rowPtr + col - 1) * BlurData::KERNEL[1] + 
                 *(rowPtr + col) * BlurData::KERNEL[2] + *(rowPtr + col + 1) * BlurData::KERNEL[3] +
                 *(rowPtr + col + 2) * BlurData::KERNEL[4]
             ) >> 4);
         }
-        const auto lastIndex = config.wImage - 1;
-        blurData.rowBuffer[config.wImage - 2] = static_cast<uint8_t>((
+        const auto lastIndex = config.w - 1;
+        blurData.rowBuffer[config.w - 2] = static_cast<uint8_t>((
             *(rowPtr + lastIndex - 3) * BlurData::KERNEL[0] + *(rowPtr + lastIndex - 2) * BlurData::KERNEL[1] + 
             *(rowPtr + lastIndex - 1) * BlurData::KERNEL[2] + *(rowPtr + lastIndex) * BlurData::KERNEL[3] +
             *(rowPtr + lastIndex) * BlurData::KERNEL[4]
@@ -556,43 +556,43 @@ void LfTracker::gaussianBlur(){
             *(rowPtr + lastIndex) * BlurData::KERNEL[4]
         ) >> 4);
 
-        std::copy(blurData.rowBuffer.get(), blurData.rowBuffer.get() + config.wImage, rowPtr);
+        std::copy(blurData.rowBuffer.get(), blurData.rowBuffer.get() + config.w, rowPtr);
     }
 
     // Second pass using [1, 4, 6, 4, 1]T
 
     // First two rows because they are cut off
     auto firstRowPtr = localBuffer.get();
-    auto secondRowPtr = firstRowPtr + config.wImage;
-    for(size_t col = 0; col < config.wImage; col++){
+    auto secondRowPtr = firstRowPtr + config.w;
+    for(size_t col = 0; col < config.w; col++){
         auto fCol = firstRowPtr + col;
         auto sCol = secondRowPtr + col;
         blurData.ringBuffer[0][col] = static_cast<uint8_t>((
             *(fCol) * BlurData::KERNEL[0] + *(fCol) * BlurData::KERNEL[1] + 
-            *(fCol) * BlurData::KERNEL[2] + *(fCol + config.wImage) * BlurData::KERNEL[3] +
-            *(fCol + 2 * config.wImage) * BlurData::KERNEL[4]
+            *(fCol) * BlurData::KERNEL[2] + *(fCol + config.w) * BlurData::KERNEL[3] +
+            *(fCol + 2 * config.w) * BlurData::KERNEL[4]
         ) >> 4);
         blurData.ringBuffer[1][col] = static_cast<uint8_t>((
             *(fCol) * BlurData::KERNEL[0] + *(fCol) * BlurData::KERNEL[1] + 
-            *(sCol) * BlurData::KERNEL[2] + *(sCol + config.wImage) * BlurData::KERNEL[3] +
-            *(sCol + 2 * config.wImage) * BlurData::KERNEL[4]
+            *(sCol) * BlurData::KERNEL[2] + *(sCol + config.w) * BlurData::KERNEL[3] +
+            *(sCol + 2 * config.w) * BlurData::KERNEL[4]
         ) >> 4);
     }
 
     // Main rows
     size_t ringWIdx = 2;
     size_t ringRIdx = 0;
-    for(size_t row = 2; row < config.hImage - 2; row++){
-        auto rowPtr = localBuffer.get() + row * config.wImage;
-        for(size_t col = 0; col < config.wImage; col++){
+    for(size_t row = 2; row < config.h - 2; row++){
+        auto rowPtr = localBuffer.get() + row * config.w;
+        for(size_t col = 0; col < config.w; col++){
             auto colPtr = rowPtr + col;
             blurData.ringBuffer[ringWIdx][col] = static_cast<uint8_t>((
-                *(colPtr - 2 * config.wImage) * BlurData::KERNEL[0] + *(colPtr - config.wImage) * BlurData::KERNEL[1] + 
-                *(colPtr) * BlurData::KERNEL[2] + *(colPtr + config.wImage) * BlurData::KERNEL[3] +
-                *(colPtr + 2 * config.wImage) * BlurData::KERNEL[4]
+                *(colPtr - 2 * config.w) * BlurData::KERNEL[0] + *(colPtr - config.w) * BlurData::KERNEL[1] + 
+                *(colPtr) * BlurData::KERNEL[2] + *(colPtr + config.w) * BlurData::KERNEL[3] +
+                *(colPtr + 2 * config.w) * BlurData::KERNEL[4]
             ) >> 4);
         }
-        std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage, rowPtr - 2 * config.wImage);
+        std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.w, rowPtr - 2 * config.w);
         ringWIdx++;
         ringWIdx %= 3;
         ringRIdx++;
@@ -600,38 +600,38 @@ void LfTracker::gaussianBlur(){
     }
 
     // Last two rows because they are cut off
-    auto penRowPtr = localBuffer.get() + config.wImage * (config.hImage - 2);
-    for(size_t col = 0; col < config.wImage; col++){
+    auto penRowPtr = localBuffer.get() + config.w * (config.h - 2);
+    for(size_t col = 0; col < config.w; col++){
         auto colPtr = penRowPtr + col;
         blurData.ringBuffer[ringWIdx][col] = static_cast<uint8_t>((
-            *(colPtr - 2 * config.wImage) * BlurData::KERNEL[0] + *(colPtr - config.wImage) * BlurData::KERNEL[1] + 
-            *(colPtr) * BlurData::KERNEL[2] + *(colPtr + config.wImage) * BlurData::KERNEL[3] +
-            *(colPtr + config.wImage) * BlurData::KERNEL[4]
+            *(colPtr - 2 * config.w) * BlurData::KERNEL[0] + *(colPtr - config.w) * BlurData::KERNEL[1] + 
+            *(colPtr) * BlurData::KERNEL[2] + *(colPtr + config.w) * BlurData::KERNEL[3] +
+            *(colPtr + config.w) * BlurData::KERNEL[4]
         ) >> 4);
     }
 
-    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage, penRowPtr - 2 * config.wImage);
+    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.w, penRowPtr - 2 * config.w);
     ringWIdx++;
     ringWIdx %= 3;
     ringRIdx++;
     ringRIdx %= 3;
 
-    auto lastRowPtr = penRowPtr + config.wImage;
-    for(size_t col = 0; col < config.wImage; col++){
+    auto lastRowPtr = penRowPtr + config.w;
+    for(size_t col = 0; col < config.w; col++){
         auto colPtr = lastRowPtr + col;
         *(colPtr) = static_cast<uint8_t>((
-            *(colPtr - 2 * config.wImage) * BlurData::KERNEL[0] + *(colPtr - config.wImage) * BlurData::KERNEL[1] + 
+            *(colPtr - 2 * config.w) * BlurData::KERNEL[0] + *(colPtr - config.w) * BlurData::KERNEL[1] + 
             *(colPtr) * BlurData::KERNEL[2] + *(colPtr) * BlurData::KERNEL[3] +
             *(colPtr) * BlurData::KERNEL[4]
         ) >> 4);
     }
 
-    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage, penRowPtr - config.wImage);
+    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.w, penRowPtr - config.w);
     ringWIdx++;
     ringWIdx %= 3;
     ringRIdx++;
     ringRIdx %= 3;
-    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.wImage, penRowPtr);
+    std::copy(blurData.ringBuffer[ringRIdx].get(), blurData.ringBuffer[ringRIdx].get() + config.w, penRowPtr);
 }
 
 };

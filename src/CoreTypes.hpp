@@ -26,9 +26,9 @@ struct TrackedFeature{
     int age = 0; // Feature age in frames
 
     // Using homogenous coordinates
-    Eigen::Vector2f ptCurr; // Sub-pixel position of feature
-    Eigen::Vector2f ptPrev; // Sub-pixel position of feature in previous frame
-    Eigen::Vector2f ptUndis; // Sub-pixel undistorted position of the points
+    Eigen::Vector2f ptCurr = Eigen::Vector2f::Zero(); // Sub-pixel position of feature
+    Eigen::Vector2f ptPrev = Eigen::Vector2f::Zero(); // Sub-pixel position of feature in previous frame
+    Eigen::Vector2f ptUndis = Eigen::Vector2f::Zero(); // Sub-pixel undistorted position of the points
 
 
     static constexpr int PATCH_SIZE = 2 * Radius + 1;
@@ -44,7 +44,7 @@ struct TrackedFeature{
 
 struct VisualMeasurement{
     uint32_t featureId;
-    gtsam::Point2 pt; 
+    gtsam::Point2 pt = Eigen::Vector2d::Zero(); 
     VisualMeasurement(uint32_t featureId_, const gtsam::Point2 &pt_) : featureId(featureId_), pt(pt_){} 
 };
 

@@ -60,7 +60,7 @@ class Frontend{
 
     friend class FrontendTest;
 public:
-    Frontend(FrontendConfig configuration, Synchronizer &syncronizer, const std::string &vocabPath) : config(configuration), sync(syncronizer), hf(config.w, config.h, config.K, config.dist), lf(config.lfConfig, vocabPath){}
+    Frontend(const FrontendConfig &configuration, Synchronizer &syncronizer, const std::string &vocabPath) : config(configuration), sync(syncronizer), hf(config.w, config.h, config.K, config.dist), lf(config.lfConfig, vocabPath){}
 
     // Pop the Hf feature from the queue
     std::unique_ptr<BackendHfPacket> getHfPacket();
@@ -77,9 +77,7 @@ public:
     bool setBias(const gtsam::imuBias::ConstantBias &bias);
 
     ~Frontend(){
-        if(runFrontend.load(std::memory_order_relaxed)){
-            end();
-        }
+        end();
     }
 };
 
