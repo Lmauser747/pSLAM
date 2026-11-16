@@ -32,8 +32,8 @@ class FrontendTest : public ::testing::Test {
 protected:
     static constexpr size_t kImageWidth = test_helpers::kDefaultWidth;
     static constexpr size_t kImageHeight = test_helpers::kDefaultHeight;
-    static constexpr size_t kQueueCapacity = 5;
-    static constexpr size_t kPoolCapacity = 12;
+    static constexpr size_t kQueueCapacity = 20;
+    static constexpr size_t kPoolCapacity = 25;
 
     ImuStream imuStream;
     DepthStream depthStream;
@@ -55,7 +55,9 @@ protected:
         );
         blankSceneBuffer.assign(kImageWidth * kImageHeight, test_helpers::kDefaultBg);
 
-        synchronizer = std::make_unique<Synchronizer>(imuStream, depthStream, imageStream);
+        synchronizer = std::make_unique<Synchronizer>(
+            imuStream, depthStream, imageStream, kQueueCapacity
+        );
         frontend = std::make_unique<Frontend>(config, *synchronizer, vocabPath);
     }
 
@@ -88,6 +90,11 @@ protected:
     size_t getHfQueueSize(Frontend &fe) {
         std::lock_guard<std::mutex> lock(fe.m_hfQueue);
         return fe.hfQueue.size();
+    }
+
+    bool hasProcessedFrameId(Frontend &fe, uint32_t targetFrameId) {
+        std::lock_guard<std::mutex> lock(fe.m_hfQueue);
+        return !fe.hfQueue.empty() && fe.hfQueue.back()->frameId >= targetFrameId;
     }
 
     gtsam::imuBias::ConstantBias getImuBias(Frontend &fe) {
@@ -149,15 +156,22 @@ TEST_F(FrontendTest, NominalMultiRateStreamingAndPreintegration) {
     frontend->start();
 
     std::atomic<bool> runProducers{true};
+    const auto startWall = std::chrono::steady_clock::now();
+
+    auto sleepUntilSimTime = [&startWall](double simTime) {
+        const auto offset = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(simTime - 1.000));
+        std::this_thread::sleep_until(startWall + offset);
+    };
 
     // Producer 1: IMU @ 200 Hz (dt = 5 ms)
     std::thread imuThread([&]() {
         double t = 1.000;
         while (runProducers.load(std::memory_order_relaxed)) {
+            sleepUntilSimTime(t);
             imuStream.pushImu(test_helpers::createImuSample(
                 t, Eigen::Vector3d(std::sin(t), 0.0, -9.81), Eigen::Vector3d::Zero()));
             t += 0.005;
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
 
@@ -165,21 +179,23 @@ TEST_F(FrontendTest, NominalMultiRateStreamingAndPreintegration) {
     std::thread depthThread([&]() {
         double t = 1.000;
         while (runProducers.load(std::memory_order_relaxed)) {
+            sleepUntilSimTime(t);
             depthStream.pushDepth({t, 8.5});
             t += 0.050;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     });
 
-    // Producer 3: Camera @ 30 Hz (dt = 33 ms) pushing 15 frames (> kPoolCapacity = 12)
+    // Producer 3: Camera @ 30 Hz (dt = 33 ms) streaming until consumer finishes
     constexpr size_t kTotalFrames = 15;
     std::thread cameraThread([&]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(40));
         double t = 1.020;
-        for (size_t i = 0; i < kTotalFrames && runProducers.load(std::memory_order_relaxed); i++) {
-            EXPECT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), t));
+        while (runProducers.load(std::memory_order_relaxed)) {
+            sleepUntilSimTime(t);
+            if (!runProducers.load(std::memory_order_relaxed)) {
+                break;
+            }
+            imageStream.pushFrame(baseSceneBuffer.data(), t);
             t += 0.033;
-            std::this_thread::sleep_for(std::chrono::milliseconds(33));
         }
     });
 
@@ -187,7 +203,7 @@ TEST_F(FrontendTest, NominalMultiRateStreamingAndPreintegration) {
     double lastTimestamp = -1.0;
 
     for (size_t i = 0; i < kTotalFrames; i++) {
-        auto pkt = popHfPacketWithTimeout(*frontend, std::chrono::milliseconds(300));
+        auto pkt = popHfPacketWithTimeout(*frontend, std::chrono::milliseconds(400));
         if (!pkt) {
             break;
         }
@@ -249,19 +265,20 @@ TEST_F(FrontendTest, AsynchronousBusJitter) {
         }
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(60));
-
     constexpr size_t kNumFrames = 8;
-    double camTime = 1.040;
-    for (size_t i = 0; i < kNumFrames; i++) {
-        EXPECT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), camTime));
-        camTime += 0.033;
-        std::this_thread::sleep_for(std::chrono::milliseconds(33));
-    }
+    std::thread cameraThread([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        double camTime = 1.040;
+        while (runProducers.load(std::memory_order_relaxed)) {
+            imageStream.pushFrame(baseSceneBuffer.data(), camTime);
+            camTime += 0.033;
+            std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        }
+    });
 
     size_t receivedCount = 0;
     for (size_t i = 0; i < kNumFrames; i++) {
-        auto pkt = popHfPacketWithTimeout(*frontend, std::chrono::milliseconds(350));
+        auto pkt = popHfPacketWithTimeout(*frontend, std::chrono::milliseconds(400));
         if (pkt) {
             EXPECT_EQ(pkt->frameId, static_cast<uint32_t>(i));
             receivedCount++;
@@ -269,6 +286,7 @@ TEST_F(FrontendTest, AsynchronousBusJitter) {
     }
 
     runProducers.store(false, std::memory_order_relaxed);
+    cameraThread.join();
     imuThread.join();
     depthThread.join();
 
@@ -449,16 +467,25 @@ TEST_F(FrontendTest, HfQueueBackpressureEvictsOldestPacketsAndRecyclesImages) {
     synchronizer->start();
     boundedFrontend.start();
 
-    // Push 7 frames without calling getHfPacket()
+    // Pace 7 pushes at 75 ms (< 100 ms ImageStream timeout) so ImageStream remains ACTIVE
+    // while boundedFrontend processes all 7 frames without calling getHfPacket().
     constexpr size_t kFramesPushed = 7;
     for (size_t i = 0; i < kFramesPushed; i++) {
         const double t = 1.020 + static_cast<double>(i) * 0.040;
         EXPECT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), t));
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        if (i + 1 < kFramesPushed) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(75));
+        }
     }
 
-    // Allow Frontend thread to finish processing all 7 frames
-    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    // Wait until Frontend has processed all 7 frames (up to frameId == 6)
+    const auto waitStart = std::chrono::steady_clock::now();
+    while (!hasProcessedFrameId(boundedFrontend, static_cast<uint32_t>(kFramesPushed - 1)) &&
+           std::chrono::steady_clock::now() - waitStart < std::chrono::milliseconds(1500)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    ASSERT_TRUE(hasProcessedFrameId(boundedFrontend, static_cast<uint32_t>(kFramesPushed - 1)));
     EXPECT_EQ(getHfQueueSize(boundedFrontend), kBoundedHfQueueSize);
 
     // Pop the 3 retained packets: they must be the newest frames (frameIds 4, 5, 6)

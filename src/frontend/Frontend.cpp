@@ -62,27 +62,23 @@ void Frontend::processPacket(){
 
         auto &features = hf.getActiveFeatures();
 
-        // Evaluate keyframe criteria on surviving tracks BEFORE bucket replenishment
+        // On Frame 0, replenish first so X_0 has initial landmarks to anchor the trajectory
+        if(frameId == 0){
+            hf.replenishBuckets(packet.image->arr.data());
+        }
+
+        // Evaluate keyframe criteria on surviving tracks (or initial features on Frame 0)
         bool isKeyframe = false;
         if(frameId == 0 ||
            (packet.timestamp - lastKfTime) > config.maxTimeBetweenKf ||
            static_cast<float>(features.size()) < config.droppedFeatureThreshold * static_cast<float>(lastKfFeatures)){
             isKeyframe = true;
             lastKfTime = packet.timestamp;
-        }
-
-        // Replenish buckets BEFORE building hfPacket so T0 and keyframes include initial observations
-        hf.replenishBuckets(packet.image->arr.data());
-
-        if(isKeyframe){
             lastKfFeatures = features.size();
-            lf.passKeyframe(frameId, packet.timestamp, packet.image->arr.data(), features);
         }
 
-        // Recycle the raw image buffer now that HfTracker and LfTracker are done with it
-        sync.recycleFrame(packet.image);
-
-        // Assemble BackendHfPacket
+        // Assemble BackendHfPacket BEFORE replenishing on frames > 0 so only surviving
+        // RANSAC inliers (age >= 1) are sent to the Backend
         std::unique_ptr<BackendHfPacket> hfPacket = std::make_unique<BackendHfPacket>();
         hfPacket->timestamp = packet.timestamp;
         hfPacket->frameId = frameId;
@@ -96,9 +92,21 @@ void Frontend::processPacket(){
         }
 
         hfPacket->visualMeasurements.reserve(features.size());
-        for(auto &feat : features){
+        for(const auto &feat : features){
             hfPacket->visualMeasurements.emplace_back(feat.id, feat.ptUndis.cast<double>());
         }
+
+        // Replenish empty buckets for subsequent frames after packing BackendHfPacket
+        if(frameId > 0){
+            hf.replenishBuckets(packet.image->arr.data());
+        }
+
+        if(isKeyframe){
+            lf.passKeyframe(frameId, packet.timestamp, packet.image->arr.data(), features);
+        }
+
+        // Recycle the raw image buffer now that HfTracker and LfTracker are done with it
+        sync.recycleFrame(packet.image);
 
         // Push the packet onto the queue
         {
