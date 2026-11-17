@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
+#include <limits>
 
 #include <Eigen/Core>
 #include <Eigen/Cholesky>
@@ -26,13 +27,13 @@ enum class LandmarkState : uint8_t{
 };
 
 struct LandmarkObs{
-    uint64_t frameId = 0;
+    uint32_t frameId = 0;
     gtsam::Point2 ray; // Normalized 
 };
 
 struct LandmarkTrack{
     uint32_t id = 0;
-    uint64_t lastSeenFrame = 0;
+    uint32_t lastSeenFrame = 0;
     LandmarkState state = LandmarkState::UNINITIALIZED;
     std::vector<LandmarkObs> observations;
 
@@ -66,7 +67,7 @@ public:
     );
 
     // Called by Backend at the start of frame k after inserting the IMU-predicted X(k)
-    void startFrame(uint64_t frameId);
+    void startFrame(uint32_t frameId);
 
     // Processes a single 2D normalized feature observation from BackendPacket
     void updateBookeeper(uint32_t landmarkId, const gtsam::Point2 &pt);
@@ -74,8 +75,10 @@ public:
     // Called by Backend at the end of frame k before running isam2.update()
     void pruneDeadTracks();
 
+    friend class LandmarkBookkeeperTest;
+
 private:
-    gtsam::Pose3 getCameraPose(uint64_t frameId) const;
+    gtsam::Pose3 getCameraPose(uint32_t frameId) const;
     bool triangulateLandmark(const std::vector<LandmarkObs> &obs, gtsam::Point3 &outPt) const;
 
     BookkeeperConfig config;
@@ -91,7 +94,7 @@ private:
     gtsam::SharedNoiseModel visualNoise; 
 
     // Per-frame cached state to avoid repeated lookups into stagingValues
-    uint64_t currentFrameId = 0;
+    uint32_t currentFrameId = std::numeric_limits<uint32_t>::max();
     gtsam::Pose3 currentCamPose;
 
     std::unordered_map<uint32_t, LandmarkTrack> activeLandmarks;

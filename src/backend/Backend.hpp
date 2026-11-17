@@ -1,14 +1,15 @@
 #pragma once
 
 #include <atomic>
-#include <gtsam/geometry/Point2.h>
 #include <thread>
 #include <array>
 #include <cstdint>
-#include <vector>
-#include <cstddef>
 
 #include <gtsam/nonlinear/PriorFactor.h>
+#include <gtsam/geometry/Point2.h>
+#include <gtsam/geometry/Pose3.h>
+#include <gtsam/nonlinear/NonlinearFactor.h>
+#include <gtsam/nonlinear/NonlinearFactorGraph.h> 
 
 #include "backend/Bookkeeper.hpp"
 #include "pool_slam/SystemTypes.hpp"
@@ -19,12 +20,19 @@ namespace PoolSLAM{
 
 struct BackendConfig{
     BookkeeperConfig bkConfig;
+    gtsam::Pose3 bodyToCameraFrame; // Body to camera translation
 };
 
 
 class Backend{
     Frontend &fe; // Reference to frontend
     LfTracker &lf; // Reference to backend
+
+    gtsam::NonlinearFactorGraph stagingGraph;
+    gtsam::Values stagingValues;
+    gtsam::Values isamEstimate;
+
+    LandmarkBookkeeper bk; // Bookeeper for triangulating landmarks
 
     std::atomic<uint8_t> activePose = 0; // Index of active pose
     std::array<Pose, 2> poseBuffer; // Buffer to hold active pose
@@ -38,11 +46,9 @@ class Backend{
     // Function for the first frame to bootstrap
     void bootstrap();
 
-    // Function to keep track of landmarks
-    void updateBookkeeper(uint32_t landmarkId, gtsam::Point2 &pt);
-
 public:
-    Backend(Frontend &frontend, LfTracker &lfTracker) : fe(frontend), lf(lfTracker){}
+    Backend(Frontend &frontend, LfTracker &lfTracker, BackendConfig &cfg) : fe(frontend), lf(lfTracker), 
+    bk(stagingGraph, stagingValues, isamEstimate, cfg.bodyToCameraFrame, cfg.bkConfig) {}
 
     // Gets the current pose 
     Pose getCurrentPose();

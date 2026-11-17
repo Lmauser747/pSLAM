@@ -34,7 +34,8 @@ LandmarkBookkeeper::LandmarkBookkeeper(
       stagingValues(stagingValuesRef),
       isamEstimates(isamEstimatesRef),
       bodyPCam(bodyToCamExtrinsics),
-      unitCalib(std::make_shared<gtsam::Cal3_S2>(1.0, 1.0, 0.0, 0.0, 0.0))
+      unitCalib(std::make_shared<gtsam::Cal3_S2>(1.0, 1.0, 0.0, 0.0, 0.0)),
+      currentCamPose(bodyToCamExtrinsics)
 {
     auto baseGaussian = gtsam::noiseModel::Isotropic::Sigma(2, config.visualSigmaNorm);
     visualNoise = gtsam::noiseModel::Robust::Create(
@@ -44,7 +45,7 @@ LandmarkBookkeeper::LandmarkBookkeeper(
     activeLandmarks.reserve(256);
 }
 
-void LandmarkBookkeeper::startFrame(uint64_t frameId) {
+void LandmarkBookkeeper::startFrame(uint32_t frameId) {
     currentFrameId = frameId;
     const gtsam::Symbol currSym('x', frameId);
     const gtsam::Pose3 bodyPose = stagingValues.exists(currSym)
@@ -58,12 +59,12 @@ void LandmarkBookkeeper::updateBookeeper(uint32_t landmarkId, const gtsam::Point
     LandmarkTrack &track = it->second;
     track.lastSeenFrame = currentFrameId;
 
-    // 1. Skip tracks that previously failed geometric verification
+    // Skip tracks that previously failed geometric verification
     if (track.state == LandmarkState::INVALID) {
         return;
     }
 
-    // 2. Fast path: landmark is already initialized in GTSAM
+    // Fast path: landmark is already initialized in GTSAM
     if (track.state == LandmarkState::INITIALIZED) {
         stagingGraph.emplace_shared<ProjectionFactor>(
             pt,
@@ -76,13 +77,13 @@ void LandmarkBookkeeper::updateBookeeper(uint32_t landmarkId, const gtsam::Point
         return;
     }
 
-    // 3. Buffer new 2D ray observation
+    // Buffer new 2D ray observation
     track.observations.push_back({currentFrameId, pt});
     if (track.observations.size() < 2) {
         return;
     }
 
-    // 4. Parallax and translation baseline check (comparing first view vs. current view)
+    // Parallax and translation baseline check (comparing first view vs. current view)
     const LandmarkObs &firstObs = track.observations.front();
     const gtsam::Pose3 poseFirstCam = getCameraPose(firstObs.frameId);
 
@@ -110,7 +111,7 @@ void LandmarkBookkeeper::updateBookeeper(uint32_t landmarkId, const gtsam::Point
         return;
     }
 
-    // 5. Attempt multi-view 3D triangulation
+    // Attempt multi-view 3D triangulation
     gtsam::Point3 triangulatedPt;
     if (triangulateLandmark(track.observations, triangulatedPt)) {
         const gtsam::Symbol landmarkSym('l', landmarkId);
@@ -146,7 +147,7 @@ void LandmarkBookkeeper::pruneDeadTracks() {
     }
 }
 
-gtsam::Pose3 LandmarkBookkeeper::getCameraPose(uint64_t frameId) const {
+gtsam::Pose3 LandmarkBookkeeper::getCameraPose(uint32_t frameId) const {
     if (frameId == currentFrameId) {
         return currentCamPose;
     }
@@ -194,7 +195,7 @@ bool LandmarkBookkeeper::triangulateLandmark(
 
     const Eigen::Vector3d pWorld = ldlt.solve(b);
 
-    // Gates 2, 3, and 4: Cheirality, max pool depth, and normalized reprojection error
+    // Cheirality, max pool depth, and normalized reprojection error
     for (size_t i = 0; i < numObs; i++) {
         const Eigen::Vector3d pCam = camPoses[i].transformTo(pWorld);
 

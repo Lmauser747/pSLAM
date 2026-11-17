@@ -50,22 +50,23 @@ target_link_libraries(poolslam_frontend
         simde::simde
 )
 
-# --- 4. Backend Target (Factor Graph / Optimization) ---[cite: 8]
-# find_package(GTSAM REQUIRED)
-# add_library(poolslam_backend STATIC
-#     backend/factor_graph.cpp
-# )
-# target_include_directories(poolslam_backend
-#     PUBLIC
-#         ${PUBLIC_INCLUDE_DIR}
-#         ${INTERNAL_INCLUDE_DIR}
-# )
-# target_link_libraries(poolslam_backend
-#     PUBLIC
-#         poolslam_frontend
-#         Eigen3::Eigen
-#         # GTSAM::gtsam
-# )
+# Backend
+find_package(GTSAM REQUIRED)
+add_library(poolslam_backend STATIC
+    backend/Bookkeeper.cpp
+)
+target_include_directories(poolslam_backend
+    PUBLIC
+        ${PUBLIC_INCLUDE_DIR}
+        ${INTERNAL_INCLUDE_DIR}
+)
+target_link_libraries(poolslam_backend
+    PUBLIC
+        poolslam_frontend
+        Eigen3::Eigen
+    PRIVATE
+        gtsam
+)
 
 
 add_library(poolslam_descriptor STATIC
