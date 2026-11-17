@@ -1,0 +1,37 @@
+pipeline:
+  use_raw_images: true          # true: ImageStream + host SIMD extraction | false: FeatureStream (smart cam)
+  enable_depth: true            # false: initializes Synchronizer and Backend directly in monocular VIO mode
+  bow_vocabulary_path: "/opt/pool_slam/vocab/pool_vocab_10k.bin"
+
+camera:
+  width: 640
+  height: 480
+  intrinsics:
+    fx: 525.40
+    fy: 525.85
+    cx: 319.50
+    cy: 239.80
+  # Underwater pinhole radial-tangential coefficients [k1, k2, p1, p2, k3]
+  distortion_coeffs: [-0.2814, 0.0912, 0.0004, -0.0002, -0.0145]
+
+imu:
+  # Allan variance noise parameters (fixed at runtime; biases are estimated online)
+  accel_noise_density: 0.0018   # sigma_a  [m / (s^2 * sqrt(Hz))]
+  gyro_noise_density: 0.00015   # sigma_g  [rad / (s * sqrt(Hz))]
+  accel_random_walk: 0.0002     # sigma_ba [m / (s^3 * sqrt(Hz))]
+  gyro_random_walk: 0.00001     # sigma_bg [rad / (s^2 * sqrt(Hz))]
+
+depth:
+  # Required only when pipeline.enable_depth is true
+  noise_sigma: 0.02             # sigma_depth [m] for GTSAM 1D Z-factor
+
+extrinsics:
+  # T_body_camera (T_BC): 4x4 row-major rigid transform mapping Camera frame -> IMU/Body frame
+  T_body_camera:
+    - [ 0.0,  0.0,  1.0,  0.12]
+    - [-1.0,  0.0,  0.0,  0.00]
+    - [ 0.0, -1.0,  0.0, -0.04]
+    - [ 0.0,  0.0,  0.0,  1.00]
+
+  # t_body_depth: 3D lever-arm offset [x, y, z] in meters from IMU origin to pressure transducer
+  t_body_depth: [-0.15, 0.00, 0.05]
