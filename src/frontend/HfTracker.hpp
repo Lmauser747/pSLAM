@@ -97,7 +97,8 @@ private:
 
     // Handle errors in the tracking
     void handleTrackingError(){
-        return;
+        activeFeatures.clear();
+        std::fill(gridOccupancy.begin(), gridOccupancy.end(), GridBucket{0, UINT32_MAX, UINT32_MAX});
     }
 
     // Gets the index of a bucket given sub-pixel coordinates

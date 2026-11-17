@@ -256,27 +256,51 @@ TEST_F(LandmarkBookkeeperTest, insufficientBaselineOrParallaxRemainsUninitialize
     EXPECT_EQ(stagingGraph.size(), 0u);
 }
 
-// Verifies that a track failing to initialize within maxBufferLength is marked INVALID and ignored thereafter.
-TEST_F(LandmarkBookkeeperTest, bufferOverflowMarksTrackInvalidAndIgnoresFutureObservations) {
+// Verifies that a stationary track reaching maxBufferLength remains UNINITIALIZED with a bounded
+// buffer, and successfully initializes once motion provides sufficient baseline.
+TEST_F(LandmarkBookkeeperTest, bufferOverflowRetainsUninitializedTrackAndInitializesOnMotion) {
     config.maxBufferLength = 4;
     reinitBookkeeper(bodyPCam, config);
 
-    // Keep camera stationary across 4 frames so baseline gate repeatedly fails
-    for (size_t k = 0; k < 4; k++) {
+    // Keep camera stationary across 5 frames so baseline gate repeatedly triggers buffer capping
+    for (size_t k = 0; k < 5; k++) {
         const uint32_t frameId = static_cast<uint32_t>(k);
-        setFramePose(frameId, gtsam::Pose3(), k == 3);
+        setFramePose(frameId, gtsam::Pose3(), k == 4);
         bookkeeper->startFrame(frameId);
         bookkeeper->updateBookeeper(99, gtsam::Point2(0.05, 0.05));
     }
 
     const auto &track = getActiveLandmarks().at(99);
-    EXPECT_EQ(track.state, LandmarkState::INVALID);
-    EXPECT_TRUE(track.observations.empty());
+    EXPECT_EQ(track.state, LandmarkState::UNINITIALIZED);
+    EXPECT_LE(track.observations.size(), config.maxBufferLength);
     EXPECT_EQ(stagingGraph.size(), 0u);
 
-    // Frame 4: Even if the camera moves to a valid baseline, the INVALID track must be ignored
-    setFramePose(4, gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(0.5, 0.0, 0.0)), true);
+    // Frame 5: Camera moves to a valid baseline (0.5m) with consistent geometry; landmark must initialize
+    setFramePose(5, gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(0.5, 0.0, 0.0)), true);
     bookkeeper->updateBookeeper(99, gtsam::Point2(-0.15, 0.05));
+    EXPECT_EQ(track.state, LandmarkState::INITIALIZED);
+    EXPECT_TRUE(track.observations.empty());
+    EXPECT_GT(stagingGraph.size(), 0u);
+}
+
+// Verifies that a track reaching maxBufferLength that fails geometric triangulation is marked INVALID.
+TEST_F(LandmarkBookkeeperTest, geometricFailureAtMaxBufferMarksTrackInvalid) {
+    config.maxBufferLength = 3;
+    reinitBookkeeper(bodyPCam, config);
+
+    // Create 3 observations with large baseline but inconsistent/skew rays that cannot intersect
+    setFramePose(0, gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(0.0, 0.0, 0.0)), false);
+    bookkeeper->startFrame(0);
+    bookkeeper->updateBookeeper(88, gtsam::Point2(0.1, 0.1));
+
+    setFramePose(1, gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(0.2, 0.0, 0.0)), false);
+    bookkeeper->startFrame(1);
+    bookkeeper->updateBookeeper(88, gtsam::Point2(0.5, -0.5)); // Inconsistent ray
+
+    setFramePose(2, gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(0.4, 0.0, 0.0)), true);
+    bookkeeper->updateBookeeper(88, gtsam::Point2(-0.8, 0.9)); // Inconsistent ray
+
+    const auto &track = getActiveLandmarks().at(88);
     EXPECT_EQ(track.state, LandmarkState::INVALID);
     EXPECT_TRUE(track.observations.empty());
     EXPECT_EQ(stagingGraph.size(), 0u);
@@ -392,6 +416,48 @@ TEST_F(LandmarkBookkeeperTest, pruneDeadTracksRemovesOnlyStaleLandmarks) {
     EXPECT_EQ(getActiveLandmarks().count(3u), 0u);
     EXPECT_EQ(getActiveLandmarks().count(2u), 1u);
     EXPECT_EQ(getActiveLandmarks().count(4u), 1u);
+}
+
+// Verifies that a landmark pruned by pruneDeadTracks that exists in isamEstimates immediately
+// re-attaches as INITIALIZED when re-observed, avoiding re-triangulation or duplicate insertion.
+TEST_F(LandmarkBookkeeperTest, reobservedCommittedLandmarkImmediatelyReattachesAsInitialized) {
+    const gtsam::Point3 truePt(0.1, 0.2, 3.0);
+    const uint32_t lmId = 55;
+    const gtsam::Symbol lmSym('l', lmId);
+
+    // Frame 0: Initialize landmark 55 across frames 0 and 1
+    const gtsam::Pose3 pose0(gtsam::Rot3(), gtsam::Point3(0.0, 0.0, 0.0));
+    const gtsam::Pose3 pose1(gtsam::Rot3(), gtsam::Point3(0.2, 0.0, 0.0));
+    setFramePose(0, pose0, false);
+    bookkeeper->startFrame(0);
+    bookkeeper->updateBookeeper(lmId, projectToNormalizedRay(0, truePt));
+
+    setFramePose(1, pose1, true);
+    bookkeeper->updateBookeeper(lmId, projectToNormalizedRay(1, truePt));
+    ASSERT_EQ(getActiveLandmarks().at(lmId).state, LandmarkState::INITIALIZED);
+
+    // Commit to isamEstimates and clear staging
+    isamEstimates.insert(gtsam::Symbol('x', 1), pose1);
+    isamEstimates.insert(lmSym, stagingValues.at<gtsam::Point3>(lmSym));
+    stagingGraph.resize(0);
+    stagingValues.clear();
+
+    // Frame 2: Landmark 55 is lost (dropout) -> pruned from activeLandmarks
+    const gtsam::Pose3 pose2(gtsam::Rot3(), gtsam::Point3(0.3, 0.0, 0.0));
+    setFramePose(2, pose2, true);
+    bookkeeper->pruneDeadTracks();
+    EXPECT_EQ(getActiveLandmarks().count(lmId), 0u);
+
+    // Frame 3: Landmark 55 is re-observed!
+    const gtsam::Pose3 pose3(gtsam::Rot3(), gtsam::Point3(0.4, 0.0, 0.0));
+    setFramePose(3, pose3, true);
+    bookkeeper->updateBookeeper(lmId, projectToNormalizedRay(3, truePt));
+
+    // Must be INITIALIZED immediately, not UNINITIALIZED
+    ASSERT_EQ(getActiveLandmarks().count(lmId), 1u);
+    EXPECT_EQ(getActiveLandmarks().at(lmId).state, LandmarkState::INITIALIZED);
+    EXPECT_FALSE(stagingValues.exists(lmSym));
+    EXPECT_EQ(stagingGraph.size(), 1u);
 }
 
 } // namespace PoolSLAM

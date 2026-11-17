@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <optional>
 #include <thread>
+#include <numeric>
 
 #include <eigen3/Eigen/Dense>
 #include <gtsam/geometry/Rot3.h>
@@ -144,11 +145,15 @@ void LfTracker::processKeyframe(){
                 break;
             }
 
+            lock.unlock();
+
             // Blur the image
             gaussianBlur();
             
             // Find the QOV descriptors of the image
             calculateDescriptors();
+
+            lock.lock();
 
             // Iterate over descriptors and add to database
             auto &kf = keyframes.back();
@@ -157,9 +162,27 @@ void LfTracker::processKeyframe(){
                 feat.wordId = vocabTree.matchWord(feat.des, freq, kf.keyframeId, database);
             }
 
-            std::sort(kf.features.begin(), kf.features.end(), [](const auto &a, const auto &b){
-                return a.wordId < b.wordId;
+            std::vector<size_t> perm(kf.features.size());
+            std::iota(perm.begin(), perm.end(), 0);
+            std::sort(perm.begin(), perm.end(), [&](size_t a, size_t b){
+                return kf.features[a].wordId < kf.features[b].wordId;
             });
+
+            std::vector<descriptor::QovFeature> sortedFeatures;
+            sortedFeatures.reserve(kf.features.size());
+            for(size_t idx : perm){
+                sortedFeatures.push_back(std::move(kf.features[idx]));
+            }
+            kf.features = std::move(sortedFeatures);
+
+            if(kf.landmarks.size() == perm.size()){
+                std::vector<Landmark3d> sortedLandmarks;
+                sortedLandmarks.reserve(kf.landmarks.size());
+                for(size_t idx : perm){
+                    sortedLandmarks.push_back(std::move(kf.landmarks[idx]));
+                }
+                kf.landmarks = std::move(sortedLandmarks);
+            }
 
             // Compute L1 norm across unique words in this keyframe
             float sumOfWeights = 0.0f;
@@ -172,6 +195,9 @@ void LfTracker::processKeyframe(){
             }
 
             // Normalize weights and update the score of each frame once per unique word
+            std::vector<uint32_t> scoredKfIndices;
+            scoredKfIndices.reserve(256);
+
             lastWordId = UINT32_MAX;
             auto weightNormFactor = (sumOfWeights > 0.0f) ? (1.0f / sumOfWeights) : 0.0f;
             for(auto &feat : kf.features){
@@ -180,7 +206,11 @@ void LfTracker::processKeyframe(){
                     database.invertedIndex[feat.wordId].back().weight *= weightNormFactor;
                     auto &frames = database.getEntries(feat.wordId);
                     for(uint32_t kfIdx = 0; kfIdx < frames.size(); kfIdx++){
-                        keyframes[frames[kfIdx].keyframeId].score += std::min(frames[kfIdx].weight, frames.back().weight);
+                        uint32_t targetKfId = frames[kfIdx].keyframeId;
+                        if(keyframes[targetKfId].score == 0.0f){
+                            scoredKfIndices.push_back(targetKfId);
+                        }
+                        keyframes[targetKfId].score += std::min(frames[kfIdx].weight, frames.back().weight);
                     }
                 }
             }
@@ -189,8 +219,9 @@ void LfTracker::processKeyframe(){
             Keyframe *bestFrame = &keyframes.front();
             float bestScore = 0.0f;
             float lastScore = (keyframes.size() >= 2) ? keyframes[keyframes.size() - 2].score : 1.0f;
-            // If the keyframeId is less than config.excludedFrames, we just default to the first frame
-            for(auto &frame : keyframes){
+            // Search best frame only over keyframes with non-zero scores
+            for(uint32_t kfId : scoredKfIndices){
+                auto &frame = keyframes[kfId];
                 if(frame.score > bestScore && (frame.keyframeId + config.excludedFrames) < kf.keyframeId && !frame.landmarks.empty()){
                     bestFrame = &frame;
                     bestScore = frame.score;
@@ -294,6 +325,11 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
 
     if(matchKf.landmarks.size() < matchKf.features.size()){
         return 0;
+    }
+
+    if(matching.curFeatures.cols() < static_cast<Eigen::Index>(curKf.features.size())){
+        matching.curFeatures.resize(3, curKf.features.size());
+        matching.matchLandmarks.resize(3, curKf.features.size());
     }
 
     // Match features
@@ -405,13 +441,17 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
     for(int iter = 0; iter < config.ransacIters; iter++){
         // Find 4 distinct random matches
         for(size_t k = 0; k < 4; k++){
-            m[k] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
-            for(size_t prev = 0; prev < k; prev++){
-                if(m[k] == m[prev]){
-                    m[k] = static_cast<Eigen::Index>((static_cast<size_t>(m[k]) + 1) % numMatches);
-                    prev = static_cast<size_t>(-1);
+            bool collision;
+            do{
+                collision = false;
+                m[k] = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numMatches) >> 31);
+                for(size_t prev = 0; prev < k; prev++){
+                    if(m[k] == m[prev]){
+                        collision = true;
+                        break;
+                    }
                 }
-            }
+            }while(collision);
         }
 
         x[0] = matching.matchLandmarks.col(m[0]).cast<double>();

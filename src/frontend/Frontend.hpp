@@ -28,11 +28,18 @@ struct FrontendConfig{
     size_t w, h; // Width and height of image
     Eigen::Matrix3f K; // Camera calibration matrix
     Distortion dist; // Distorion of the camera
-    std::shared_ptr<gtsam::PreintegrationParams> preintParams; // Parameters for IMU preintegration
+    std::shared_ptr<gtsam::PreintegrationParams> preintParams = []() {
+        auto p = gtsam::PreintegrationParams::MakeSharedU(9.81);
+        p->accelerometerCovariance = Eigen::Matrix3d::Identity() * 1e-3;
+        p->gyroscopeCovariance = Eigen::Matrix3d::Identity() * 1e-4;
+        p->integrationCovariance = Eigen::Matrix3d::Identity() * 1e-5;
+        return p;
+    }(); // Parameters for IMU preintegration
 
     float droppedFeatureThreshold = 0.5f; // Percentrage of dropped features frame-to-frame that cause keyframe
     double maxTimeBetweenKf = 1.0; // Maximum time between keyframes
     size_t hfQueueSize = 10; // Max size of hfQueue
+    Eigen::Matrix3f bodyToCameraRot = Eigen::Matrix3f::Identity(); // Rotation from body/IMU frame to camera frame
 };
 
 class Frontend{

@@ -55,9 +55,15 @@ void LandmarkBookkeeper::startFrame(uint32_t frameId) {
 }
 
 void LandmarkBookkeeper::updateBookeeper(uint32_t landmarkId, const gtsam::Point2 &pt) {
+    const gtsam::Symbol landmarkSym('l', landmarkId);
     auto [it, inserted] = activeLandmarks.try_emplace(landmarkId, landmarkId);
     LandmarkTrack &track = it->second;
     track.lastSeenFrame = currentFrameId;
+
+    // If landmark was already committed to ISAM2 or staged, immediately re-attach as INITIALIZED
+    if (inserted && (isamEstimates.exists(landmarkSym) || stagingValues.exists(landmarkSym))) {
+        track.state = LandmarkState::INITIALIZED;
+    }
 
     // Skip tracks that previously failed geometric verification
     if (track.state == LandmarkState::INVALID) {
@@ -70,7 +76,7 @@ void LandmarkBookkeeper::updateBookeeper(uint32_t landmarkId, const gtsam::Point
             pt,
             visualNoise,
             gtsam::Symbol('x', currentFrameId),
-            gtsam::Symbol('l', landmarkId),
+            landmarkSym,
             unitCalib,
             bodyPCam
         );
@@ -89,9 +95,8 @@ void LandmarkBookkeeper::updateBookeeper(uint32_t landmarkId, const gtsam::Point
 
     const double baseline = (currentCamPose.translation() - poseFirstCam.translation()).norm();
     if (baseline < config.minBaselineMeters) {
-        if (track.observations.size() >= config.maxBufferLength) {
-            track.state = LandmarkState::INVALID;
-            track.observations.clear();
+        if (track.observations.size() > config.maxBufferLength) {
+            track.observations.erase(track.observations.begin() + 1);
         }
         return;
     }
@@ -104,9 +109,8 @@ void LandmarkBookkeeper::updateBookeeper(uint32_t landmarkId, const gtsam::Point
 
     const double cosParallax = dirFirstWorld.dot(dirCurrWorld);
     if (cosParallax > config.maxCosParallax) {
-        if (track.observations.size() >= config.maxBufferLength) {
-            track.state = LandmarkState::INVALID;
-            track.observations.clear();
+        if (track.observations.size() > config.maxBufferLength) {
+            track.observations.erase(track.observations.begin() + 1);
         }
         return;
     }
@@ -114,8 +118,9 @@ void LandmarkBookkeeper::updateBookeeper(uint32_t landmarkId, const gtsam::Point
     // Attempt multi-view 3D triangulation
     gtsam::Point3 triangulatedPt;
     if (triangulateLandmark(track.observations, triangulatedPt)) {
-        const gtsam::Symbol landmarkSym('l', landmarkId);
-        stagingValues.insert(landmarkSym, triangulatedPt);
+        if (!stagingValues.exists(landmarkSym) && !isamEstimates.exists(landmarkSym)) {
+            stagingValues.insert(landmarkSym, triangulatedPt);
+        }
 
         for (size_t i = 0; i < track.observations.size(); i++) {
             const LandmarkObs &obs = track.observations[i];

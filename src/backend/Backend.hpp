@@ -109,11 +109,14 @@ class Backend{
     bool isInitialized = false;
     uint32_t prevFrameId = 0;
     double prevTimestamp = 0.0;
+    uint32_t lastCommittedFrameId = 0;
+    double lastCommittedTimestamp = 0.0;
     gtsam::NavState prevNavState;
     gtsam::imuBias::ConstantBias prevBias;
 
     // Tracks recent keyframes so LfTracker receives 3D landmarks once triangulated
     std::deque<PendingKfRecord> trackedKeyframes;
+    std::vector<uint32_t> allKeyframeIds;
 
     std::atomic<uint8_t> activePose{0}; // Index of active pose
     std::array<Pose, 2> poseBuffer; // Buffer to hold active pose
@@ -127,7 +130,7 @@ class Backend{
     void processHfPacket(const BackendHfPacket &pkt);
     void processLfPacket(const BackendLfPacket &pkt);
     void recordKeyframeFeatures(const BackendHfPacket &pkt);
-    void syncKeyframesToLfTracker(bool forceAll);
+    void syncKeyframesToLfTracker(uint32_t currentFrameId, bool forceAll);
     void optimizeAndPublish(uint32_t frameId, double timestamp, bool loopClosed);
 
 public:

@@ -186,8 +186,16 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
     stagingValues.insert(V(frameId), initVel);
     stagingValues.insert(B(frameId), initBias);
 
+    gtsam::SharedNoiseModel posePriorNoise = initPoseNoise;
+    if(!pkt.depth.has_value()){
+        // Without initial depth measurement, set an uninformative prior on vertical position
+        gtsam::Vector6 sigmas = config.initPoseSigma;
+        sigmas(5) = 10.0;
+        posePriorNoise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
+    }
+
     stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
-        X(frameId), initPose, initPoseNoise);
+        X(frameId), initPose, posePriorNoise);
     stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Vector3>>(
         V(frameId), initVel, initVelNoise);
     stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::imuBias::ConstantBias>>(
@@ -202,6 +210,8 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
 
     prevFrameId = frameId;
     prevTimestamp = pkt.timestamp;
+    lastCommittedFrameId = frameId;
+    lastCommittedTimestamp = pkt.timestamp;
     prevNavState = gtsam::NavState(initPose, initVel);
     prevBias = initBias;
     isInitialized = true;
@@ -332,6 +342,7 @@ void Backend::processLfPacket(const BackendLfPacket &pkt){
 }
 
 void Backend::recordKeyframeFeatures(const BackendHfPacket &pkt){
+    allKeyframeIds.push_back(pkt.frameId);
     PendingKfRecord rec;
     rec.frameId = pkt.frameId;
     rec.featureIds.reserve(pkt.visualMeasurements.size());
@@ -342,7 +353,25 @@ void Backend::recordKeyframeFeatures(const BackendHfPacket &pkt){
     trackedKeyframes.push_back(std::move(rec));
 }
 
-void Backend::syncKeyframesToLfTracker(bool forceAll){
+void Backend::syncKeyframesToLfTracker(uint32_t currentFrameId, bool forceAll){
+    (void)currentFrameId;
+    // When a loop closure occurs, update all historical keyframe poses in LfTracker
+    if(forceAll){
+        for(uint32_t kfId : allKeyframeIds){
+            const gtsam::Key poseKey = X(kfId);
+            if(!isamEstimate.exists(poseKey)){
+                continue;
+            }
+            const gtsam::Pose3 bodyPose = isamEstimate.at<gtsam::Pose3>(poseKey);
+            const gtsam::Pose3 camPose = bodyPose.compose(config.bodyToCameraFrame);
+
+            BackendKeyframeUpdate update;
+            update.id = kfId;
+            update.pose = camPose;
+            lf.updateKeyframe(update);
+        }
+    }
+
     for(size_t i = 0; i < trackedKeyframes.size(); i++){
         auto &rec = trackedKeyframes[i];
         const gtsam::Key poseKey = X(rec.frameId);
@@ -391,6 +420,13 @@ void Backend::syncKeyframesToLfTracker(bool forceAll){
             rec.lastLandmarkCount = validCount;
         }
     }
+
+    // Evict keyframes whose features have all triangulated, or when queue capacity is reached
+    while(!trackedKeyframes.empty() &&
+          (trackedKeyframes.front().lastLandmarkCount == trackedKeyframes.front().featureIds.size() ||
+           trackedKeyframes.size() > config.bkConfig.maxBufferLength)){
+        trackedKeyframes.pop_front();
+    }
 }
 
 void Backend::optimizeAndPublish(uint32_t frameId, double timestamp, bool loopClosed){
@@ -400,6 +436,8 @@ void Backend::optimizeAndPublish(uint32_t frameId, double timestamp, bool loopCl
     }catch(const gtsam::IndeterminantLinearSystemException &){
         stagingGraph.resize(0);
         stagingValues.clear();
+        prevFrameId = lastCommittedFrameId;
+        prevTimestamp = lastCommittedTimestamp;
         return;
     }
 
@@ -407,8 +445,13 @@ void Backend::optimizeAndPublish(uint32_t frameId, double timestamp, bool loopCl
     stagingValues.clear();
 
     if(!isamEstimate.exists(X(frameId))){
+        prevFrameId = lastCommittedFrameId;
+        prevTimestamp = lastCommittedTimestamp;
         return;
     }
+
+    lastCommittedFrameId = frameId;
+    lastCommittedTimestamp = timestamp;
 
     const gtsam::Pose3 optPose = isamEstimate.at<gtsam::Pose3>(X(frameId));
     const gtsam::Vector3 optVel = isamEstimate.at<gtsam::Vector3>(V(frameId));
@@ -422,7 +465,7 @@ void Backend::optimizeAndPublish(uint32_t frameId, double timestamp, bool loopCl
     fe.setBias(prevBias);
 
     // Push newly triangulated or loop-refined 3D landmarks to LfTracker keyframes
-    syncKeyframesToLfTracker(loopClosed);
+    syncKeyframesToLfTracker(frameId, loopClosed);
 
     // Write new state into the inactive double-buffer slot and publish atomically
     const uint8_t nextIdx = static_cast<uint8_t>(1u - activePose.load(std::memory_order_relaxed));

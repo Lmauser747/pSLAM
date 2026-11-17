@@ -43,7 +43,14 @@ void Frontend::processPacket(){
         if(!packet.imu.empty()){
             {
                 std::lock_guard<std::mutex> lock(m_imuBias);
-                integrator = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, imuBias);
+                auto params = config.preintParams;
+                if(!params){
+                    params = gtsam::PreintegrationParams::MakeSharedU(9.81);
+                    params->accelerometerCovariance = Eigen::Matrix3d::Identity() * 1e-3;
+                    params->gyroscopeCovariance = Eigen::Matrix3d::Identity() * 1e-4;
+                    params->integrationCovariance = Eigen::Matrix3d::Identity() * 1e-5;
+                }
+                integrator = std::make_unique<gtsam::PreintegratedImuMeasurements>(params, imuBias);
             }
 
             auto lastImu = packet.imu[0];
@@ -56,8 +63,9 @@ void Frontend::processPacket(){
                 lastImu = curImu;
             }
 
-            auto R = integrator->deltaRij();
-            hf.trackExistingFeatures(packet.image->arr.data(), R.matrix().cast<float>());
+            const Eigen::Matrix3f R_body = integrator->deltaRij().matrix().cast<float>();
+            const Eigen::Matrix3f R_cam = config.bodyToCameraRot.transpose() * R_body * config.bodyToCameraRot;
+            hf.trackExistingFeatures(packet.image->arr.data(), R_cam);
         }
 
         auto &features = hf.getActiveFeatures();
@@ -96,13 +104,14 @@ void Frontend::processPacket(){
             hfPacket->visualMeasurements.emplace_back(feat.id, feat.ptUndis.cast<double>());
         }
 
-        // Replenish empty buckets for subsequent frames after packing BackendHfPacket
-        if(frameId > 0){
-            hf.replenishBuckets(packet.image->arr.data());
-        }
-
+        // Pass keyframe to LfTracker using the surviving features that match BackendHfPacket
         if(isKeyframe){
             lf.passKeyframe(frameId, packet.timestamp, packet.image->arr.data(), features);
+        }
+
+        // Replenish empty buckets for subsequent frames after packing BackendHfPacket and passing keyframe
+        if(frameId > 0){
+            hf.replenishBuckets(packet.image->arr.data());
         }
 
         // Recycle the raw image buffer now that HfTracker and LfTracker are done with it

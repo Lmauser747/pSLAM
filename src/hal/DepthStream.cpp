@@ -78,6 +78,11 @@ std::optional<Depth> DepthStream::getInterDepth(double targetTime){
         return *iterator;
     }
 
+    // If target time matches the sample, return it directly without interpolation
+    if(iterator->timestamp == targetTime){
+        return *iterator;
+    }
+
     // Make sure the difference between the two readings is not too large
     const Depth& right = *iterator;
     const Depth& left = *(iterator - 1);

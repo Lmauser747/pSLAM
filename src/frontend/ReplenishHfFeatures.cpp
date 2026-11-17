@@ -28,15 +28,16 @@ size_t HfTracker::replenishBuckets(const uint8_t *curBuffer){
                 continue;
             }
             if(addKp(curBuffer, *kpCanidate)){
+                gridOccupancy[bucket].count = 1;
+                gridOccupancy[bucket].olderIdx = static_cast<uint32_t>(activeFeatures.size() - 1);
+                gridOccupancy[bucket].youngerIdx = UINT32_MAX;
                 bucketsOccipied++;
             }
         }else{
             bucketsOccipied++;
         }
     }
-    if(static_cast<float>(bucketsOccipied) / static_cast<float>(totalBuckets) < MIN_BUCKET_OCCUPANCY){
-        handleTrackingError();
-    }
+    // bucketsOccupied reflects current density; do not destroy sparse features
     return bucketsOccipied;
 }
 

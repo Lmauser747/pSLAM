@@ -26,7 +26,7 @@ namespace PoolSLAM{
 
 struct LfTrackerConfig{
     size_t w, h; // Width and height of image
-    size_t numBuckets; // Number of buckets for features to go in
+    size_t numBuckets = 300; // Number of buckets for features to go in
 
     Eigen::Matrix3f K; // Camera matrix
     Distortion dist; // Distortion parameters

@@ -11,6 +11,9 @@ namespace PoolSLAM{
 namespace descriptor{
 
 uint32_t BinaryBowTree::associatedWord(const QovDescriptor &des) const{
+    if(tree.size() < TOTAL_NODES){
+        return 0;
+    }
     size_t bestBranch = 0;
     int bestScore = fastHamming(tree[0], des);
     // BEGIN VECTORIZE
@@ -39,6 +42,9 @@ uint32_t BinaryBowTree::associatedWord(const QovDescriptor &des) const{
 }
 
 uint32_t BinaryBowTree::matchWord(const QovDescriptor& des, float frequency, uint32_t keyframe, BowDatabase& db) const{
+    if(tree.size() < TOTAL_NODES || vocabulary.size() < VOCAB_SIZE){
+        return 0;
+    }
     uint32_t wordId = associatedWord(des);
     db.addWord(wordId, keyframe, frequency * vocabulary[wordId].idf);
     return wordId;

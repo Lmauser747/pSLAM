@@ -106,7 +106,7 @@ inline double solveLambdaTwistCubic(double a, double b, double c, double d){
 
     double gamma = 0.0;
     if(delta <= 0.0){
-        const double sqrtNegP3 = std::sqrt(-p / 3.0);
+        const double sqrtNegP3 = std::sqrt(std::max(0.0, -p / 3.0));
         const double denom = 2.0 * sqrtNegP3 * (-p / 3.0);
         double w = (std::abs(denom) > K_EPS) ? (-q / denom) : 0.0;
         w = std::clamp(w, -1.0, 1.0);

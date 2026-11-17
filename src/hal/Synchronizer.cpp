@@ -153,6 +153,7 @@ void Synchronizer::stop(){
         return;
     }
     isRunning.store(false, std::memory_order_relaxed);
+    c_outputQueue.notify_all();
     syncThread.join();
     syncStatus.store(SyncStatus::STOPPED);
 }

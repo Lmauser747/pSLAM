@@ -190,8 +190,8 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             if((p - q).norm() <= ransacTau){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = activeFeatures[readIdx];
-                    activeFeatures[writeIdx].ptUndis = epi.currRays.col(static_cast<Eigen::Index>(readIdx)).hnormalized();
                 }
+                activeFeatures[writeIdx].ptUndis = epi.currRays.col(static_cast<Eigen::Index>(readIdx)).hnormalized();
                 writeIdx++;  
             }
         }
@@ -248,9 +248,9 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             if(std::abs(d) < ransacTau){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = std::move(activeFeatures[readIdx]);
-                    activeFeatures[writeIdx].ptUndis = epi.currRays.col(static_cast<Eigen::Index>(readIdx)).hnormalized();
                     epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
                 }
+                activeFeatures[writeIdx].ptUndis = epi.currRays.col(static_cast<Eigen::Index>(readIdx)).hnormalized();
                 writeIdx++;
             }
         }
