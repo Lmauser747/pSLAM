@@ -11,12 +11,16 @@
 
 namespace PoolSLAM{
 
-struct SystemConfig{
+class SystemConfig{
+public:
     int w, h; // Image size
     float fx, fy, cx, cy; // Intrinsic matrix
     float k1, k2, p1, p2; // Distortion coefficients
     std::string vocabPath; // Path of BoW vocabulary
     Eigen::Matrix<double, 3, 4> bodyToCamera; // pose transform between body and camera
+    Eigen::Matrix<double, 3, 1> bodyToDepth; // pose tranform between body and deoth sensor
+
+    SystemConfig(const std::string& configFile);
 };
 
 class System{

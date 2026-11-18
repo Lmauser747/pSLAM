@@ -28,6 +28,7 @@ find_package(Threads REQUIRED)
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(GTSAM REQUIRED)
 find_package(simde REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 add_subdirectory(src)
 

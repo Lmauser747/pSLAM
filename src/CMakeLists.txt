@@ -89,3 +89,24 @@ target_link_libraries(poolslam_descriptor
     PRIVATE
         simde::simde
 )
+
+add_library(poolslam_core STATIC
+    core/Config.cpp
+)
+target_include_directories(poolslam_core
+    PUBLIC
+        ${PUBLIC_INCLUDE_DIR}
+    PRIVATE
+        ${INTERNAL_INCLUDE_DIR}
+)
+
+target_link_libraries(poolslam_core
+    PUBLIC
+        poolslam_hal
+        poolslam_backend
+        poolslam_frontend
+        Eigen3::Eigen
+        gtsam
+    PRIVATE
+        yaml-cpp
+)

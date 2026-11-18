@@ -15,7 +15,8 @@ sudo apt-get install -y --no-install-recommends \
     python3 \
     python3-dev \
     python3-pip \
-    python3-venv
+    python3-venv \
+    libyaml-cpp-dev
 
 # 2. Configure Python Virtual Environment for Calibration & Tooling
 VENV_DIR=".venv"
