@@ -29,6 +29,6 @@ fi
 # shellcheck source=/dev/null
 source "${VENV_DIR}/bin/activate"
 pip install --upgrade pip
-pip install numpy scipy pyyaml
+pip install numpy scipy pyyaml scikit-learn pillow
 
 echo "=== Setup Complete. Activate your environment with: source .venv/bin/activate ==="

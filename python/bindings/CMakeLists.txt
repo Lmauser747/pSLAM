@@ -14,5 +14,6 @@ pybind11_add_module(pool_slam
 
 target_link_libraries(pool_slam PRIVATE
     poolslam_core
+    poolslam_descriptor
     Eigen3::Eigen
 )

@@ -105,6 +105,7 @@ target_link_libraries(poolslam_core
         poolslam_hal
         poolslam_backend
         poolslam_frontend
+        poolslam_descriptor
         Eigen3::Eigen
         gtsam
     PRIVATE

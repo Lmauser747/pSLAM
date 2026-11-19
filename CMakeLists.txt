@@ -30,11 +30,11 @@ find_package(GTSAM REQUIRED)
 find_package(simde REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
-add_subdirectory(src)
-
 if(BUILD_PYTHON_BINDINGS)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
+
+add_subdirectory(src)
 
 if(BUILD_TESTING)
     enable_testing()
@@ -45,6 +45,6 @@ if(BUILD_BENCHMARKS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks")
     add_subdirectory(benchmarks)
 endif()
 
-if(BUILD_PYTHON_BINDINGS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bindings/python")
-    add_subdirectory(bindings/python)
+if(BUILD_PYTHON_BINDINGS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/python/bindings")
+    add_subdirectory(python/bindings)
 endif()
