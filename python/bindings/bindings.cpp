@@ -4,7 +4,6 @@
 #include <pybind11/cast.h>
 #include <pybind11/detail/common.h>
 
-#include <pybind11/eigen.h>
 #include <pybind11/gil.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -26,19 +25,37 @@ PYBIND11_MODULE(pool_slam, m) {
     py::class_<PoolSLAM::Imu>(m, "Imu")
         .def(py::init<>())
         .def(py::init([](double timestamp,
-                         const decltype(PoolSLAM::Imu::a)& a,
-                         const decltype(PoolSLAM::Imu::w)& w,
+                         py::object a_obj,
+                         py::object w_obj,
                          decltype(PoolSLAM::Imu::t) t) {
             PoolSLAM::Imu sample{};
             sample.timestamp = timestamp;
-            sample.a = a;
-            sample.w = w;
             sample.t = t;
+            if (py::isinstance<py::sequence>(a_obj)) {
+                py::sequence seq = a_obj.cast<py::sequence>();
+                sample.a = Eigen::Vector3d(seq[0].cast<double>(), seq[1].cast<double>(), seq[2].cast<double>());
+            }
+            if (py::isinstance<py::sequence>(w_obj)) {
+                py::sequence seq = w_obj.cast<py::sequence>();
+                sample.w = Eigen::Vector3d(seq[0].cast<double>(), seq[1].cast<double>(), seq[2].cast<double>());
+            }
             return sample;
         }), py::arg("timestamp"), py::arg("a"), py::arg("w"), py::arg("t") = 0.0f)
         .def_readwrite("timestamp", &PoolSLAM::Imu::timestamp)
-        .def_readwrite("a", &PoolSLAM::Imu::a)
-        .def_readwrite("w", &PoolSLAM::Imu::w)
+        .def_property("a",
+            [](const PoolSLAM::Imu& imu) {
+                return py::make_tuple(imu.a.x(), imu.a.y(), imu.a.z());
+            },
+            [](PoolSLAM::Imu& imu, py::sequence seq) {
+                imu.a = Eigen::Vector3d(seq[0].cast<double>(), seq[1].cast<double>(), seq[2].cast<double>());
+            })
+        .def_property("w",
+            [](const PoolSLAM::Imu& imu) {
+                return py::make_tuple(imu.w.x(), imu.w.y(), imu.w.z());
+            },
+            [](PoolSLAM::Imu& imu, py::sequence seq) {
+                imu.w = Eigen::Vector3d(seq[0].cast<double>(), seq[1].cast<double>(), seq[2].cast<double>());
+            })
         .def_readwrite("t", &PoolSLAM::Imu::t)
         .def("__repr__", [](const PoolSLAM::Imu& imu) {
             std::ostringstream oss;
@@ -69,34 +86,42 @@ PYBIND11_MODULE(pool_slam, m) {
     py::class_<PoolSLAM::Pose>(m, "Pose")
         .def(py::init<>())
         .def(py::init([](double timestamp,
-                         const Eigen::Vector3d& t,
-                         const Eigen::Vector4d& r_wxyz,
-                         const Eigen::Vector3d& v) {
+                         py::sequence t,
+                         py::sequence r_wxyz,
+                         py::sequence v) {
             PoolSLAM::Pose pose{};
             pose.timestamp = timestamp;
-            pose.t = t;
-            pose.r = Eigen::Quaterniond(r_wxyz(0), r_wxyz(1), r_wxyz(2), r_wxyz(3));
-            pose.v = v;
+            pose.t = Eigen::Vector3d(t[0].cast<double>(), t[1].cast<double>(), t[2].cast<double>());
+            pose.r = Eigen::Quaterniond(r_wxyz[0].cast<double>(), r_wxyz[1].cast<double>(), r_wxyz[2].cast<double>(), r_wxyz[3].cast<double>());
+            pose.v = Eigen::Vector3d(v[0].cast<double>(), v[1].cast<double>(), v[2].cast<double>());
             return pose;
         }), py::arg("timestamp") = 0.0,
-            py::arg("t") = Eigen::Vector3d::Zero(),
-            py::arg("r") = Eigen::Vector4d(1.0, 0.0, 0.0, 0.0),
-            py::arg("v") = Eigen::Vector3d::Zero())
+            py::arg("t") = py::make_tuple(0.0, 0.0, 0.0),
+            py::arg("r") = py::make_tuple(1.0, 0.0, 0.0, 0.0),
+            py::arg("v") = py::make_tuple(0.0, 0.0, 0.0))
         .def_readwrite("timestamp", &PoolSLAM::Pose::timestamp)
-        .def_readwrite("t", &PoolSLAM::Pose::t)
-        .def_property_readonly("position", [](const PoolSLAM::Pose& p) { return p.t; })
+        .def_property_readonly("t", [](const PoolSLAM::Pose& p) {
+            return py::make_tuple(p.t.x(), p.t.y(), p.t.z());
+        })
+        .def_property_readonly("position", [](const PoolSLAM::Pose& p) {
+            return py::make_tuple(p.t.x(), p.t.y(), p.t.z());
+        })
         .def_property("r",
             [](const PoolSLAM::Pose& p) {
-                return Eigen::Vector4d(p.r.w(), p.r.x(), p.r.y(), p.r.z());
+                return py::make_tuple(p.r.w(), p.r.x(), p.r.y(), p.r.z());
             },
-            [](PoolSLAM::Pose& p, const Eigen::Vector4d& q) {
-                p.r = Eigen::Quaterniond(q(0), q(1), q(2), q(3));
+            [](PoolSLAM::Pose& p, py::sequence q) {
+                p.r = Eigen::Quaterniond(q[0].cast<double>(), q[1].cast<double>(), q[2].cast<double>(), q[3].cast<double>());
             })
         .def_property_readonly("orientation", [](const PoolSLAM::Pose& p) {
-            return Eigen::Vector4d(p.r.w(), p.r.x(), p.r.y(), p.r.z());
+            return py::make_tuple(p.r.w(), p.r.x(), p.r.y(), p.r.z());
         })
-        .def_readwrite("v", &PoolSLAM::Pose::v)
-        .def_property_readonly("velocity", [](const PoolSLAM::Pose& p) { return p.v; })
+        .def_property_readonly("v", [](const PoolSLAM::Pose& p) {
+            return py::make_tuple(p.v.x(), p.v.y(), p.v.z());
+        })
+        .def_property_readonly("velocity", [](const PoolSLAM::Pose& p) {
+            return py::make_tuple(p.v.x(), p.v.y(), p.v.z());
+        })
         .def("__repr__", [](const PoolSLAM::Pose& p) {
             std::ostringstream oss;
             oss << "Pose(timestamp=" << p.timestamp
@@ -120,8 +145,35 @@ PYBIND11_MODULE(pool_slam, m) {
         .def_readwrite("p1", &PoolSLAM::SystemConfig::p1)
         .def_readwrite("p2", &PoolSLAM::SystemConfig::p2)
         .def_readwrite("vocab_path", &PoolSLAM::SystemConfig::vocabPath)
-        .def_readwrite("body_to_camera", &PoolSLAM::SystemConfig::bodyToCamera)
-        .def_readwrite("body_to_depth", &PoolSLAM::SystemConfig::bodyToDepth)
+        .def_property("body_to_camera",
+            [](const PoolSLAM::SystemConfig& cfg) {
+                py::list outer;
+                for (int r = 0; r < 3; ++r) {
+                    py::list inner;
+                    for (int c = 0; c < 4; ++c) {
+                        inner.append(cfg.bodyToCamera(r, c));
+                    }
+                    outer.append(inner);
+                }
+                return outer;
+            },
+            [](PoolSLAM::SystemConfig& cfg, py::sequence seq) {
+                for (int r = 0; r < 3 && r < static_cast<int>(py::len(seq)); ++r) {
+                    py::sequence row = seq[r].cast<py::sequence>();
+                    for (int c = 0; c < 4 && c < static_cast<int>(py::len(row)); ++c) {
+                        cfg.bodyToCamera(r, c) = row[c].cast<double>();
+                    }
+                }
+            })
+        .def_property("body_to_depth",
+            [](const PoolSLAM::SystemConfig& cfg) {
+                return py::make_tuple(cfg.bodyToDepth(0, 0), cfg.bodyToDepth(1, 0), cfg.bodyToDepth(2, 0));
+            },
+            [](PoolSLAM::SystemConfig& cfg, py::sequence seq) {
+                for (int i = 0; i < 3 && i < static_cast<int>(py::len(seq)); ++i) {
+                    cfg.bodyToDepth(i, 0) = seq[i].cast<double>();
+                }
+            })
         .def("__repr__", [](const PoolSLAM::SystemConfig& cfg) {
             std::ostringstream oss;
             oss << "SystemConfig(w=" << cfg.w << ", h=" << cfg.h
@@ -171,8 +223,12 @@ PYBIND11_MODULE(pool_slam, m) {
             }
 
             auto* rawPixels = static_cast<uint8_t*>(buf.ptr);
-            py::gil_scoped_release release;
-            return self.pushFrame(rawPixels, timestamp);
+            bool result = false;
+            {
+                py::gil_scoped_release release;
+                result = self.pushFrame(rawPixels, timestamp);
+            }
+            return result;
         }, py::arg("frame"), py::arg("timestamp"))
         .def("get_pose", &PoolSLAM::System::getPose,
              py::call_guard<py::gil_scoped_release>())

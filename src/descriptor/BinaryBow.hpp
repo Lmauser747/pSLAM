@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <stdexcept>
 
 #include "descriptor/Qov.hpp"
 #ifndef FORCE_INLINE
@@ -62,7 +63,11 @@ public:
     BinaryBowTree() = default;
 
     explicit BinaryBowTree(const std::string &vocabPath){
-        readVocabFile(vocabPath);
+        if(!vocabPath.empty()){
+            if(!readVocabFile(vocabPath)){
+                throw std::runtime_error("BinaryBowTree: Failed to read vocabulary file: " + vocabPath);
+            }
+        }
     }
 
     // Matches descriptor to word and updates the database. Returns the word ID

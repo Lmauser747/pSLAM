@@ -190,7 +190,9 @@ void LfTracker::processKeyframe(){
             for(auto &feat : kf.features){
                 if(lastWordId != feat.wordId){
                     lastWordId = feat.wordId;
-                    sumOfWeights += database.getEntries(feat.wordId).back().weight;
+                    if(feat.wordId < database.invertedIndex.size() && !database.getEntries(feat.wordId).empty()){
+                        sumOfWeights += database.getEntries(feat.wordId).back().weight;
+                    }
                 }
             }
 
@@ -203,20 +205,24 @@ void LfTracker::processKeyframe(){
             for(auto &feat : kf.features){
                 if(lastWordId != feat.wordId){
                     lastWordId = feat.wordId;
-                    database.invertedIndex[feat.wordId].back().weight *= weightNormFactor;
-                    auto &frames = database.getEntries(feat.wordId);
-                    for(uint32_t kfIdx = 0; kfIdx < frames.size(); kfIdx++){
-                        uint32_t targetKfId = frames[kfIdx].keyframeId;
-                        if(keyframes[targetKfId].score == 0.0f){
-                            scoredKfIndices.push_back(targetKfId);
+                    if(feat.wordId < database.invertedIndex.size() && !database.invertedIndex[feat.wordId].empty()){
+                        database.invertedIndex[feat.wordId].back().weight *= weightNormFactor;
+                        auto &frames = database.getEntries(feat.wordId);
+                        for(uint32_t kfIdx = 0; kfIdx < frames.size(); kfIdx++){
+                            uint32_t targetKfId = frames[kfIdx].keyframeId;
+                            if(targetKfId < keyframes.size() && keyframes[targetKfId].score == 0.0f){
+                                scoredKfIndices.push_back(targetKfId);
+                            }
+                            if(targetKfId < keyframes.size()){
+                                keyframes[targetKfId].score += std::min(frames[kfIdx].weight, frames.back().weight);
+                            }
                         }
-                        keyframes[targetKfId].score += std::min(frames[kfIdx].weight, frames.back().weight);
                     }
                 }
             }
 
             // Find the best frame
-            Keyframe *bestFrame = &keyframes.front();
+            Keyframe *bestFrame = nullptr;
             float bestScore = 0.0f;
             float lastScore = (keyframes.size() >= 2) ? keyframes[keyframes.size() - 2].score : 1.0f;
             // Search best frame only over keyframes with non-zero scores
@@ -227,6 +233,11 @@ void LfTracker::processKeyframe(){
                     bestScore = frame.score;
                 }
                 frame.score = 0.0f;
+            }
+
+            if(bestFrame == nullptr){
+                busy.store(false, std::memory_order_release);
+                continue;
             }
 
             packet.currentFrameId = kf.id;
@@ -269,6 +280,11 @@ void LfTracker::processKeyframe(){
             continue;
         }
 
+        if(!outCovariance.allFinite()){
+            busy.store(false, std::memory_order_release);
+            continue;
+        }
+
         gtsam::Rot3 rot(T.block<3, 3>(0, 0));
         gtsam::Point3 trans(T.block<3, 1>(0, 3));
         
@@ -280,6 +296,11 @@ void LfTracker::processKeyframe(){
             std::sqrt(std::max(1e-12, outCovariance(0, 0))), // Trans X
             std::sqrt(std::max(1e-12, outCovariance(1, 1))), // Trans Y
             std::sqrt(std::max(1e-12, outCovariance(2, 2))); // Trans Z
+
+        if(!sigmas.allFinite()){
+            busy.store(false, std::memory_order_release);
+            continue;
+        }
 
         auto baseGaussian = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
 
@@ -323,7 +344,7 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
     auto &curKf = keyframes[curId];
     auto &matchKf = keyframes[matchId];
 
-    if(matchKf.landmarks.size() < matchKf.features.size()){
+    if(matchKf.landmarks.empty() || matchKf.landmarks.size() < matchKf.features.size()){
         return 0;
     }
 
@@ -339,6 +360,9 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
         int secondDist = INT32_MAX; // Distance of the second best match
         size_t bestIdx = 0;
         auto &curFeat = curKf.features[curFeatIdx];
+        if(curFeat.wordId >= vocabTree.vocabulary.size()){
+            continue;
+        }
         auto curParent = vocabTree.vocabulary[curFeat.wordId].parent;
         bool firstChild = false;
         bool exactMatch = false;
@@ -353,6 +377,9 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
                 exactMatch = true;
                 bestIdx = matchFeatIdx;
                 break;
+            }
+            if(matchFeat.wordId >= vocabTree.vocabulary.size()){
+                continue;
             }
             auto matchParent = vocabTree.vocabulary[matchFeat.wordId].parent;
             // Only look at features whose associated words share a parent
@@ -413,9 +440,11 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
             }
         }
 
-        matching.curFeatures.col(matchingIdx) = curFeat.pt.homogeneous().cast<double>();
-        matching.matchLandmarks.col(matchingIdx) = matchKf.landmarks[static_cast<size_t>(bestIdx)].pt3d;
-        matchingIdx++; 
+        if(matchingIdx < matching.curFeatures.cols() && static_cast<size_t>(bestIdx) < matchKf.landmarks.size()){
+            matching.curFeatures.col(matchingIdx) = curFeat.pt.homogeneous().cast<double>();
+            matching.matchLandmarks.col(matchingIdx) = matchKf.landmarks[static_cast<size_t>(bestIdx)].pt3d;
+            matchingIdx++;
+        } 
     }
 
     return static_cast<size_t>(matchingIdx);
@@ -427,7 +456,7 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
     }
 
     // Undistort the features
-    undistort(matching.curFeatures);
+    undistort(matching.curFeatures, numMatches);
     
     const double fx = static_cast<double>(config.K(0, 0));
     const double fy = static_cast<double>(config.K(1, 1));
@@ -528,15 +557,20 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
 
 
 
-void LfTracker::undistort(Eigen::Matrix3Xd &pts){    
-    auto count = pts.cols();
+void LfTracker::undistort(Eigen::Matrix3Xd &pts, size_t count){    
+    if(count == 0 || count > static_cast<size_t>(pts.cols())){
+        count = static_cast<size_t>(pts.cols());
+    }
     float cx = config.K(0, 2);
     float cy = config.K(1, 2);
     float fxInv = 1.0f / config.K(0, 0);
     float fyInv = 1.0f / config.K(1, 1);
     // START VECTORIZE
-    for(Eigen::Index i = 0; i < count; i++){
+    for(size_t i = 0; i < count; i++){
         auto pt = pts.col(i).cast<float>();
+        if(!std::isfinite(pt.x()) || !std::isfinite(pt.y())){
+            continue;
+        }
         float xd = (pt.x() - cx) * fxInv;
         float yd = (pt.y() - cy) * fyInv;
         float x = xd;
@@ -555,9 +589,11 @@ void LfTracker::undistort(Eigen::Matrix3Xd &pts){
             y -= (yEst - yd);
         }
 
-        pts(0, i) = static_cast<double>(x);
-        pts(1, i) = static_cast<double>(y);
-        pts(2, i) = 1.0;
+        if(std::isfinite(x) && std::isfinite(y)){
+            pts(0, i) = static_cast<double>(x);
+            pts(1, i) = static_cast<double>(y);
+            pts(2, i) = 1.0;
+        }
     }
     // END VECTORIZE
 }

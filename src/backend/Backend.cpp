@@ -79,6 +79,7 @@ Backend::Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &
     gtsam::ISAM2Params isamParams;
     isamParams.relinearizeThreshold = config.relinearizeThreshold;
     isamParams.relinearizeSkip = config.relinearizeSkip;
+    isamParams.factorization = gtsam::ISAM2Params::QR;
     isam = gtsam::ISAM2(isamParams);
 
     initPoseNoise = gtsam::noiseModel::Diagonal::Sigmas(config.initPoseSigma);
@@ -433,7 +434,13 @@ void Backend::optimizeAndPublish(uint32_t frameId, double timestamp, bool loopCl
     try{
         isam.update(stagingGraph, stagingValues);
         isamEstimate = isam.calculateEstimate();
-    }catch(const gtsam::IndeterminantLinearSystemException &){
+    }catch(const std::exception &){
+        stagingGraph.resize(0);
+        stagingValues.clear();
+        prevFrameId = lastCommittedFrameId;
+        prevTimestamp = lastCommittedTimestamp;
+        return;
+    }catch(...){
         stagingGraph.resize(0);
         stagingValues.clear();
         prevFrameId = lastCommittedFrameId;

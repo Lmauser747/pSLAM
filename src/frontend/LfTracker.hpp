@@ -141,7 +141,7 @@ private:
     size_t matchFeatures(size_t curId, size_t matchId);
 
     // Undistort the features
-    void undistort(Eigen::Matrix3Xd &pts);
+    void undistort(Eigen::Matrix3Xd &pts, size_t count = 0);
 
     // Use RANSAC algorihtm to prune outliers based on P3P
     std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> ransac(size_t numMatches);

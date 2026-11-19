@@ -177,7 +177,23 @@ bool LfTracker::refinePoseLM(size_t numInliers, const Eigen::Matrix3d& K_cam, Ei
         HFinal.noalias() += J.transpose() * J;
     }
 
-    outCovariance = HFinal.inverse();
+    if(!HFinal.allFinite()){
+        return false;
+    }
+    Eigen::LDLT<Eigen::Matrix<double, 6, 6>> ldlt(HFinal);
+    if(ldlt.info() != Eigen::Success || !ldlt.isPositive()){
+        return false;
+    }
+    outCovariance = ldlt.solve(Eigen::Matrix<double, 6, 6>::Identity());
+    outCovariance = 0.5 * (outCovariance + outCovariance.transpose());
+    if(!outCovariance.allFinite()){
+        return false;
+    }
+    for(int i = 0; i < 6; ++i){
+        if(outCovariance(i, i) <= 0.0){
+            return false;
+        }
+    }
     return true;
 }
 

@@ -91,6 +91,11 @@ void LandmarkBookkeeper::updateBookeeper(uint32_t landmarkId, const gtsam::Point
 
     // Parallax and translation baseline check (comparing first view vs. current view)
     const LandmarkObs &firstObs = track.observations.front();
+    const gtsam::Symbol firstSym('x', firstObs.frameId);
+    if (firstObs.frameId != currentFrameId && !stagingValues.exists(firstSym) && !isamEstimates.exists(firstSym)) {
+        track.observations.erase(track.observations.begin());
+        return;
+    }
     const gtsam::Pose3 poseFirstCam = getCameraPose(firstObs.frameId);
 
     const double baseline = (currentCamPose.translation() - poseFirstCam.translation()).norm();
@@ -160,7 +165,10 @@ gtsam::Pose3 LandmarkBookkeeper::getCameraPose(uint32_t frameId) const {
     if (stagingValues.exists(poseSym)) {
         return stagingValues.at<gtsam::Pose3>(poseSym).compose(bodyPCam);
     }
-    return isamEstimates.at<gtsam::Pose3>(poseSym).compose(bodyPCam);
+    if (isamEstimates.exists(poseSym)) {
+        return isamEstimates.at<gtsam::Pose3>(poseSym).compose(bodyPCam);
+    }
+    return currentCamPose;
 }
 
 bool LandmarkBookkeeper::triangulateLandmark(
@@ -176,6 +184,10 @@ bool LandmarkBookkeeper::triangulateLandmark(
     camPoses.reserve(numObs);
 
     for (size_t i = 0; i < numObs; i++) {
+        const gtsam::Symbol sym('x', obs[i].frameId);
+        if (obs[i].frameId != currentFrameId && !stagingValues.exists(sym) && !isamEstimates.exists(sym)) {
+            return false;
+        }
         const gtsam::Pose3 camPose = getCameraPose(obs[i].frameId);
         camPoses.push_back(camPose);
 

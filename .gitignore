@@ -76,3 +76,8 @@ Testing/
 
 # test outputs
 test.*
+
+test_dataset
+
+benchmarks/accuracy/runs
+benchmarks/accuracy/__*

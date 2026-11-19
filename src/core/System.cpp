@@ -2,6 +2,8 @@
 #include "core/Core.hpp"
 
 #include <utility>
+#include <fstream>
+#include <stdexcept>
 
 #include <gtsam/geometry/Point3.h>
 #include <gtsam/geometry/Pose3.h>
@@ -36,6 +38,13 @@ System::System(SystemConfig sysConfig)
     beConfig.bodyToDepthSensor = gtsam::Point3(
         config.bodyToDepth(0), config.bodyToDepth(1), config.bodyToDepth(2)
     );
+
+    if (!config.vocabPath.empty()) {
+        std::ifstream testStream(config.vocabPath, std::ios::binary);
+        if (!testStream.good()) {
+            throw std::runtime_error("System: Vocabulary file does not exist or cannot be opened: " + config.vocabPath);
+        }
+    }
 
     core = std::make_unique<Core>(feConfig, beConfig, config.vocabPath, config.w, config.h);
 }
