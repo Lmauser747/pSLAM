@@ -32,6 +32,10 @@ find_package(yaml-cpp REQUIRED)
 
 add_subdirectory(src)
 
+if(BUILD_PYTHON_BINDINGS)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 if(BUILD_TESTING)
     enable_testing()
     add_subdirectory(tests)

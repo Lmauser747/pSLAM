@@ -5,7 +5,7 @@
 
 #include <eigen3/Eigen/Dense>
 
-#include "Hal.hpp"
+#include "HalTypes.hpp"
 #include "SystemTypes.hpp"
 
 
@@ -24,10 +24,6 @@ public:
 };
 
 class System{
-public:
-    ImuStream imuStream;
-    DepthStream depthStream;
-    ImageStream imageStream;
 private:
     const SystemConfig config;
     class Core;
@@ -35,14 +31,28 @@ private:
     // Pimpl
     std::unique_ptr<Core> core;
 public:
-    System(SystemConfig sysConfig);
+    explicit System(SystemConfig sysConfig);
     ~System();
 
-    // get the pose
-    Pose getPose();
+    System(const System&) = delete;
+    System& operator=(const System&) = delete;
+    System(System&&) = delete;
+    System& operator=(System&&) = delete;
 
-    System(System&&) noexcept;
-    System& operator=(System&&) noexcept;
+    // Lifecycle
+    void start();
+    void stop();
+
+    // Data ingestion
+    bool pushImu(const Imu &imu);
+    bool pushDepth(const Depth &depth);
+    bool pushFrame(uint8_t *rawPixels, double timestamp);
+
+    // Get the pose
+    Pose getPose() const;
+
+    // Get config
+    const SystemConfig& getConfig() const;
 };
 
 }

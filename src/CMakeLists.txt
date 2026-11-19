@@ -92,6 +92,7 @@ target_link_libraries(poolslam_descriptor
 
 add_library(poolslam_core STATIC
     core/Config.cpp
+    core/System.cpp
 )
 target_include_directories(poolslam_core
     PUBLIC
@@ -99,7 +100,6 @@ target_include_directories(poolslam_core
     PRIVATE
         ${INTERNAL_INCLUDE_DIR}
 )
-
 target_link_libraries(poolslam_core
     PUBLIC
         poolslam_hal

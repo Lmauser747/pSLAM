@@ -2,9 +2,11 @@ add_executable(system_tests
     TestSynchronizer.cpp
     TestFrontend.cpp
     TestBackend.cpp
+    TestSystem.cpp
 )
 
 target_link_libraries(system_tests PRIVATE
+    poolslam_core
     poolslam_backend
     poolslam_frontend
     poolslam_hal

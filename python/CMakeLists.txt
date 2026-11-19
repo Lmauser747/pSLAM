@@ -1,3 +1,0 @@
-pybind11_add_module(pool_slam_py wrappers.cpp)
-
-target_link_libraries(pool_slam_py PRIVATE pool_slam_core)
