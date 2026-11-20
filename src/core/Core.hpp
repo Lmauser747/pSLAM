@@ -8,6 +8,7 @@
 #include "frontend/Frontend.hpp"
 #include "hal/Synchronizer.hpp"
 #include "pool_slam/Hal.hpp"
+#include "pool_slam/HalTypes.hpp"
 #include "pool_slam/System.hpp"
 #include "pool_slam/SystemTypes.hpp"
 

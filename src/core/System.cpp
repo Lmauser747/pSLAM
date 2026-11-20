@@ -38,6 +38,12 @@ System::System(SystemConfig sysConfig)
     beConfig.bodyToDepthSensor = gtsam::Point3(
         config.bodyToDepth(0), config.bodyToDepth(1), config.bodyToDepth(2)
     );
+    if (config.hasInitialPose) {
+        beConfig.initialPose = gtsam::Pose3(
+            gtsam::Rot3(config.initialPose.block<3, 3>(0, 0)),
+            config.initialPose.block<3, 1>(0, 3)
+        );
+    }
 
     if (!config.vocabPath.empty()) {
         std::ifstream testStream(config.vocabPath, std::ios::binary);

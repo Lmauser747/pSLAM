@@ -187,6 +187,38 @@ TEST_F(BackendTest, FirstFrameAnchorInitializesPoseWithDepthAndZeroVelocity) {
     EXPECT_NEAR(pose0.y(), 0.0, 1e-2);
 }
 
+TEST_F(BackendTest, FirstFrameStationaryImuGravityLevelingAlignsAttitude) {
+    synchronizer->start();
+    frontend->start();
+    backend->start();
+
+    // Push tilted stationary IMU measurement (accelerometer measures +9.81 along X axis)
+    imuStream.pushImu(test_helpers::createImuSample(
+        1.010, Eigen::Vector3d(9.81, 0.0, 0.0), Eigen::Vector3d::Zero()));
+    imuStream.pushImu(test_helpers::createImuSample(
+        1.020, Eigen::Vector3d(9.81, 0.0, 0.0), Eigen::Vector3d::Zero()));
+
+    // Push initial depth
+    depthStream.pushDepth({1.000, 5.0});
+    depthStream.pushDepth({1.050, 5.0});
+
+    ASSERT_TRUE(imageStream.pushFrame(baseSceneBuffer.data(), 1.020));
+
+    ASSERT_TRUE(waitUntilProcessedFrame(0u, 1.020));
+    EXPECT_TRUE(isBackendInitialized(*backend));
+
+    Pose p0 = backend->getCurrentPose();
+    EXPECT_DOUBLE_EQ(p0.timestamp, 1.020);
+    EXPECT_NEAR(p0.t.z(), 5.0, 0.1);
+
+    // Verify gravity leveling rotated body acceleration [9.81, 0, 0] to world [0, 0, 9.81]
+    const Eigen::Vector3d a_body(9.81, 0.0, 0.0);
+    const Eigen::Vector3d a_world = p0.r * a_body;
+    EXPECT_NEAR(a_world.x(), 0.0, 1e-3);
+    EXPECT_NEAR(a_world.y(), 0.0, 1e-3);
+    EXPECT_NEAR(a_world.z(), 9.81, 1e-3);
+}
+
 // ============================================================================
 // 2. Sequential Multi-Frame VIO Tracking
 // ============================================================================
@@ -226,11 +258,11 @@ TEST_F(BackendTest, MultiFrameVioSequentialTrackingMaintainsFiniteEstimates) {
         }
     });
 
-    // Producer 3: Camera @ 30 Hz for 8 frames
+    // Producer 3: Camera @ 30 Hz
     constexpr size_t kNumFrames = 8;
     std::thread cameraThread([&]() {
         double t = 1.020;
-        for (size_t i = 0; i < kNumFrames && runProducers.load(std::memory_order_relaxed); i++) {
+        while (runProducers.load(std::memory_order_relaxed)) {
             sleepUntilSimTime(t);
             imageStream.pushFrame(baseSceneBuffer.data(), t);
             t += 0.033;

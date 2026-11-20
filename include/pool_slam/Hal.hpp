@@ -77,6 +77,8 @@ public:
 
     bool pushImu(const Imu &imu); // Pushes IMU data onto the stack
     bool extractRange(double tStart, double tEnd, std::vector<Imu> &targetBuffer); // Extracts a range of IMU data to target buffer
+    std::optional<Eigen::Vector3d> getAverageAcceleration(double tEnd, double windowSec = 0.2); // Computes average accelerometer measurement
+    std::optional<Eigen::Vector3d> getAverageAngularVelocity(double tEnd, double windowSec = 0.2); // Computes average gyroscope measurement
     SensorHealth waitUntil(double timestamp); // Blocking wait until imu data more recent then timestamp is ingested
     void pruneUntil(double horizonTime); // Remove all items older than horizonTime
     void flush(); // Flush the buffer

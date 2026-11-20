@@ -488,6 +488,7 @@ def create_system_config_yaml(
     dist: Tuple[float, float, float, float] = (-0.283408, 0.073959, 0.000194, 0.000018),
     t_bc: Optional[List[List[float]]] = None,
     t_depth: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    initial_pose: Optional[List[List[float]]] = None,
 ) -> str:
     if t_bc is None:
         t_bc = [
@@ -496,6 +497,16 @@ def create_system_config_yaml(
             [-0.02577443, 0.00375619, 0.99966073, 0.00981073],
             [0.00000000, 0.00000000, 0.00000000, 1.00000000],
         ]
+
+    initial_pose_block = ""
+    if initial_pose is not None:
+        initial_pose_block = (
+            f"\ninitial_pose:\n"
+            f"  - [{initial_pose[0][0]}, {initial_pose[0][1]}, {initial_pose[0][2]}, {initial_pose[0][3]}]\n"
+            f"  - [{initial_pose[1][0]}, {initial_pose[1][1]}, {initial_pose[1][2]}, {initial_pose[1][3]}]\n"
+            f"  - [{initial_pose[2][0]}, {initial_pose[2][1]}, {initial_pose[2][2]}, {initial_pose[2][3]}]\n"
+            f"  - [{initial_pose[3][0]}, {initial_pose[3][1]}, {initial_pose[3][2]}, {initial_pose[3][3]}]\n"
+        )
 
     content = f"""pipeline:
   bow_vocabulary_path: "{vocab_path}"
@@ -516,7 +527,7 @@ extrinsics:
     - [{t_bc[1][0]}, {t_bc[1][1]}, {t_bc[1][2]}, {t_bc[1][3]}]
     - [{t_bc[2][0]}, {t_bc[2][1]}, {t_bc[2][2]}, {t_bc[2][3]}]
     - [{t_bc[3][0]}, {t_bc[3][1]}, {t_bc[3][2]}, {t_bc[3][3]}]
-  t_body_depth: [{t_depth[0]}, {t_depth[1]}, {t_depth[2]}]
+  t_body_depth: [{t_depth[0]}, {t_depth[1]}, {t_depth[2]}]{initial_pose_block}
 """
     with open(output_yaml, "w", encoding="utf-8") as f:
         f.write(content)
@@ -548,6 +559,22 @@ def run_accuracy_benchmark(
         calib_origin = f"Custom YAML ({custom_config_path})"
     else:
         cfg_yaml_path = os.path.join(temp_dir.name, "euroc_system_config.yaml")
+        initial_pose = None
+        if len(dataset.gt_times) > 0 and len(dataset.gt_positions) > 0:
+            p0 = dataset.gt_positions[0]
+            q0 = dataset.gt_quaternions[0]  # [w, x, y, z]
+            qw, qx, qy, qz = float(q0[0]), float(q0[1]), float(q0[2]), float(q0[3])
+            R0 = [
+                [1.0 - 2.0 * (qy*qy + qz*qz), 2.0 * (qx*qy - qz*qw), 2.0 * (qx*qz + qy*qw)],
+                [2.0 * (qx*qy + qz*qw), 1.0 - 2.0 * (qx*qx + qz*qz), 2.0 * (qy*qz - qx*qw)],
+                [2.0 * (qx*qz - qy*qw), 2.0 * (qy*qz + qx*qw), 1.0 - 2.0 * (qx*qx + qy*qy)],
+            ]
+            initial_pose = [
+                [R0[0][0], R0[0][1], R0[0][2], float(p0[0])],
+                [R0[1][0], R0[1][1], R0[1][2], float(p0[1])],
+                [R0[2][0], R0[2][1], R0[2][2], float(p0[2])],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
         create_system_config_yaml(
             vocab_path=vocab_path,
             output_yaml=cfg_yaml_path,
@@ -559,6 +586,7 @@ def run_accuracy_benchmark(
             cy=dataset.cy,
             dist=dataset.dist,
             t_bc=dataset.t_bc,
+            initial_pose=initial_pose,
         )
         calib_origin = getattr(dataset, "calib_source", "Auto-generated from sensor.yaml")
 
@@ -618,10 +646,15 @@ def run_accuracy_benchmark(
             system.push_depth(pool_slam.Depth(timestamp=t_d, z=z_d))
             depth_idx += 1
 
-        # 3. Read image and push frame
+        # 3. Read image and push frame with backpressure wait
         with Image.open(frame_path) as img:
             frame_arr = np.array(img.convert("L"), dtype=np.uint8)
-        system.push_frame(frame_arr, t_frame)
+        pushed = False
+        for _ in range(200):
+            if system.push_frame(frame_arr, t_frame):
+                pushed = True
+                break
+            time.sleep(0.005)
 
         # Optional real-time playback throttling
         if realtime and frame_idx > 0:
@@ -632,8 +665,7 @@ def run_accuracy_benchmark(
                 time.sleep(target_sleep - elapsed_frame_time)
             last_frame_wall_time = time.time()
         else:
-            # Short yield so worker threads advance factor graph optimization
-            time.sleep(0.008)
+            time.sleep(0.005)
 
         # 4. Check if current dataset time hits or passes next evaluation interval
         if t_frame >= next_eval_time:

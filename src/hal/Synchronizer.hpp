@@ -28,6 +28,11 @@ struct SyncedPacket{
 
     // Depth data
     std::optional<Depth> depth;
+
+    // Initial acceleration reading for stationary gravity leveling
+    std::optional<Eigen::Vector3d> initialAccel;
+    // Initial angular velocity reading for stationary gyro bias initialization
+    std::optional<Eigen::Vector3d> initialGyro;
 };
 
 class Synchronizer{

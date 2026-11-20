@@ -46,6 +46,12 @@ void Synchronizer::threadTask(){
                 initPacket.depth = std::nullopt;
             }
 
+            SensorHealth imuHealth = imuStream.waitUntil(initPacket.timestamp);
+            if (imuHealth != SensorHealth::DISABLED) {
+                initPacket.initialAccel = imuStream.getAverageAcceleration(initPacket.timestamp);
+                initPacket.initialGyro = imuStream.getAverageAngularVelocity(initPacket.timestamp);
+            }
+
             {
                 {
                     std::lock_guard<std::mutex> lock(m_outputQueue);

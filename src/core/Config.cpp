@@ -76,6 +76,22 @@ SystemConfig::SystemConfig(const std::string& configFile) {
         for (size_t i = 0; i < 3; i++) {
             bodyToDepth(static_cast<Eigen::Index>(i), 0) = tDepthNode[i].as<double>();
         }
+
+        // Optional initial state pose [R | t]
+        const YAML::Node initPoseNode = root["initial_pose"];
+        if (initPoseNode && initPoseNode.IsDefined() && initPoseNode.IsSequence()) {
+            if (initPoseNode.size() == 3 || initPoseNode.size() == 4) {
+                hasInitialPose = true;
+                for (size_t r = 0; r < 3; r++) {
+                    const YAML::Node row = initPoseNode[r];
+                    if (row.IsSequence() && row.size() >= 4) {
+                        for (size_t c = 0; c < 4; c++) {
+                            initialPose(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(c)) = row[c].as<double>();
+                        }
+                    }
+                }
+            }
+        }
     } catch (const YAML::Exception& e) {
         throw std::runtime_error("SystemConfig: YAML error while parsing '" + configFile + "': " + e.what());
     }

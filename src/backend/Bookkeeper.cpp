@@ -142,8 +142,12 @@ void LandmarkBookkeeper::updateBookeeper(uint32_t landmarkId, const gtsam::Point
         track.state = LandmarkState::INITIALIZED;
         track.observations.clear();
     } else if (track.observations.size() >= config.maxBufferLength) {
-        track.state = LandmarkState::INVALID;
-        track.observations.clear();
+        if (baseline >= config.minBaselineMeters * 2.0 || track.observations.size() <= 2) {
+            track.state = LandmarkState::INVALID;
+            track.observations.clear();
+        } else {
+            track.observations.erase(track.observations.begin() + 1);
+        }
     }
 }
 
@@ -227,6 +231,22 @@ bool LandmarkBookkeeper::triangulateLandmark(
         if ((du * du + dv * dv) > config.maxReprojErrorSq) {
             return false;
         }
+    }
+
+    // Verify true 3D triangulation parallax angle across camera baseline
+    double minCosParallaxAtPoint = 1.0;
+    for (size_t i = 0; i < numObs; i++) {
+        const Eigen::Vector3d vi = (pWorld - camPoses[i].translation()).normalized();
+        for (size_t j = i + 1; j < numObs; j++) {
+            const Eigen::Vector3d vj = (pWorld - camPoses[j].translation()).normalized();
+            const double cosP = vi.dot(vj);
+            if (cosP < minCosParallaxAtPoint) {
+                minCosParallaxAtPoint = cosP;
+            }
+        }
+    }
+    if (minCosParallaxAtPoint > config.maxCosParallax) {
+        return false;
     }
 
     outPt = pWorld;

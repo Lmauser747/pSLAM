@@ -6,6 +6,8 @@
 #include <thread>
 #include <utility>
 
+#include <Eigen/Geometry>
+
 #include <gtsam/base/Matrix.h>
 #include <gtsam/base/Vector.h>
 #include <gtsam/base/types.h>
@@ -175,21 +177,38 @@ void Backend::backendTask(){
 void Backend::initializeSystem(const BackendHfPacket &pkt){
     const uint32_t frameId = pkt.frameId;
 
+    const double defaultZ = config.initialPose.has_value()
+                                ? config.initialPose->z()
+                                : 0.0;
     const double initZ = pkt.depth.has_value()
                              ? (*pkt.depth - config.bodyToDepthSensor.z())
-                             : 0.0;
+                             : defaultZ;
 
-    const gtsam::Pose3 initPose(gtsam::Rot3(), gtsam::Point3(0.0, 0.0, initZ));
+    gtsam::Pose3 initPose;
+    if(config.initialPose.has_value()){
+        initPose = gtsam::Pose3(config.initialPose->rotation(),
+                                gtsam::Point3(config.initialPose->x(), config.initialPose->y(), initZ));
+    }else if(pkt.initialAccel.has_value() && pkt.initialAccel->norm() > 1e-3){
+        // Stationary IMU gravity leveling: align measured specific force with world vertical +Z
+        const Eigen::Vector3d a_norm = pkt.initialAccel->normalized();
+        const Eigen::Quaterniond q = Eigen::Quaterniond::FromTwoVectors(a_norm, Eigen::Vector3d::UnitZ());
+        initPose = gtsam::Pose3(gtsam::Rot3(q.matrix()), gtsam::Point3(0.0, 0.0, initZ));
+    }else{
+        initPose = gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(0.0, 0.0, initZ));
+    }
     const gtsam::Vector3 initVel = gtsam::Vector3::Zero();
-    const gtsam::imuBias::ConstantBias initBias;
+    gtsam::imuBias::ConstantBias initBias;
+    if(pkt.initialGyro.has_value()){
+        initBias = gtsam::imuBias::ConstantBias(Eigen::Vector3d::Zero(), *pkt.initialGyro);
+    }
 
     stagingValues.insert(X(frameId), initPose);
     stagingValues.insert(V(frameId), initVel);
     stagingValues.insert(B(frameId), initBias);
 
     gtsam::SharedNoiseModel posePriorNoise = initPoseNoise;
-    if(!pkt.depth.has_value()){
-        // Without initial depth measurement, set an uninformative prior on vertical position
+    if(!pkt.depth.has_value() && !config.initialPose.has_value()){
+        // Without initial depth measurement or initial pose anchor, set an uninformative prior on vertical position
         gtsam::Vector6 sigmas = config.initPoseSigma;
         sigmas(5) = 10.0;
         posePriorNoise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
@@ -215,6 +234,7 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
     lastCommittedTimestamp = pkt.timestamp;
     prevNavState = gtsam::NavState(initPose, initVel);
     prevBias = initBias;
+    fe.setBias(initBias);
     isInitialized = true;
 }
 

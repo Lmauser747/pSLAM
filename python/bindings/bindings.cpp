@@ -174,6 +174,28 @@ PYBIND11_MODULE(pool_slam, m) {
                     cfg.bodyToDepth(i, 0) = seq[i].cast<double>();
                 }
             })
+        .def_readwrite("has_initial_pose", &PoolSLAM::SystemConfig::hasInitialPose)
+        .def_property("initial_pose",
+            [](const PoolSLAM::SystemConfig& cfg) {
+                py::list outer;
+                for (int r = 0; r < 3; ++r) {
+                    py::list inner;
+                    for (int c = 0; c < 4; ++c) {
+                        inner.append(cfg.initialPose(r, c));
+                    }
+                    outer.append(inner);
+                }
+                return outer;
+            },
+            [](PoolSLAM::SystemConfig& cfg, py::sequence seq) {
+                cfg.hasInitialPose = true;
+                for (int r = 0; r < 3 && r < static_cast<int>(py::len(seq)); ++r) {
+                    py::sequence row = seq[r].cast<py::sequence>();
+                    for (int c = 0; c < 4 && c < static_cast<int>(py::len(row)); ++c) {
+                        cfg.initialPose(r, c) = row[c].cast<double>();
+                    }
+                }
+            })
         .def("__repr__", [](const PoolSLAM::SystemConfig& cfg) {
             std::ostringstream oss;
             oss << "SystemConfig(w=" << cfg.w << ", h=" << cfg.h

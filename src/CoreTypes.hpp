@@ -62,6 +62,11 @@ struct BackendHfPacket{
 
     // Depth in meters
     std::optional<double> depth;
+
+    // Initial acceleration reading for stationary gravity leveling
+    std::optional<gtsam::Vector3> initialAccel;
+    // Initial angular velocity reading for stationary gyro bias initialization
+    std::optional<gtsam::Vector3> initialGyro;
 };
 
 // Data passed from the Lf frontend to the backend

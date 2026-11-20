@@ -42,6 +42,7 @@ struct BackendConfig{
     // Sensor extrinsics relative to the ROV body/IMU frame
     gtsam::Pose3 bodyToCameraFrame; // T_BC: transforms points from camera frame to body frame
     gtsam::Point3 bodyToDepthSensor = gtsam::Point3(0.0, 0.0, 0.0); // Depth sensor lever arm in body frame
+    std::optional<gtsam::Pose3> initialPose = std::nullopt; // Optional user/dataset initial pose anchor
 
     // iSAM2 incremental solver parameters
     double relinearizeThreshold = 0.01;
@@ -51,8 +52,8 @@ struct BackendConfig{
     Eigen::Matrix<double, 6, 1> initPoseSigma =
         (Eigen::Matrix<double, 6, 1>() << 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 1e-3).finished(); // [rot (rad), pos (m)]
     double initVelSigma = 1e-3;       // m/s
-    double initAccelBiasSigma = 1e-2; // m/s^2
-    double initGyroBiasSigma = 1e-3;  // rad/s
+    double initAccelBiasSigma = 0.1;  // m/s^2
+    double initGyroBiasSigma = 0.05;  // rad/s
 
     // Continuous-time IMU bias random-walk noise densities
     double accelBiasRwSigma = 1e-4;   // m / (s^2 * sqrt(s))

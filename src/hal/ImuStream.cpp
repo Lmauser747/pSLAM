@@ -142,6 +142,62 @@ bool ImuStream::extractRange(double tStart, double tEnd, std::vector<Imu> &targe
     return true;
 }
 
+std::optional<Eigen::Vector3d> ImuStream::getAverageAcceleration(double tEnd, double windowSec){
+    std::lock_guard<std::mutex> lock(m_imuBuffer);
+    if(imuBuffer.size() <= head){
+        return std::nullopt;
+    }
+    const double tStart = tEnd - windowSec;
+    Eigen::Vector3d sumA = Eigen::Vector3d::Zero();
+    size_t count = 0;
+    for(size_t i = head; i < imuBuffer.size(); ++i){
+        if(imuBuffer[i].timestamp > tEnd){
+            break;
+        }
+        if(imuBuffer[i].timestamp >= tStart){
+            sumA += imuBuffer[i].a;
+            count++;
+        }
+    }
+    if(count == 0){
+        for(ptrdiff_t i = static_cast<ptrdiff_t>(imuBuffer.size()) - 1; i >= static_cast<ptrdiff_t>(head); --i){
+            if(imuBuffer[i].timestamp <= tEnd){
+                return imuBuffer[i].a;
+            }
+        }
+        return std::nullopt;
+    }
+    return sumA / static_cast<double>(count);
+}
+
+std::optional<Eigen::Vector3d> ImuStream::getAverageAngularVelocity(double tEnd, double windowSec){
+    std::lock_guard<std::mutex> lock(m_imuBuffer);
+    if(imuBuffer.size() <= head){
+        return std::nullopt;
+    }
+    const double tStart = tEnd - windowSec;
+    Eigen::Vector3d sumW = Eigen::Vector3d::Zero();
+    size_t count = 0;
+    for(size_t i = head; i < imuBuffer.size(); ++i){
+        if(imuBuffer[i].timestamp > tEnd){
+            break;
+        }
+        if(imuBuffer[i].timestamp >= tStart){
+            sumW += imuBuffer[i].w;
+            count++;
+        }
+    }
+    if(count == 0){
+        for(ptrdiff_t i = static_cast<ptrdiff_t>(imuBuffer.size()) - 1; i >= static_cast<ptrdiff_t>(head); --i){
+            if(imuBuffer[i].timestamp <= tEnd){
+                return imuBuffer[i].w;
+            }
+        }
+        return std::nullopt;
+    }
+    return sumW / static_cast<double>(count);
+}
+
 SensorHealth ImuStream::waitUntil(double timestamp){
     if(health.load(std::memory_order_relaxed) == SensorHealth::DISABLED){
         return SensorHealth::DISABLED;

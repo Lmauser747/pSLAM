@@ -197,8 +197,13 @@ public:
 };
 
 FORCE_INLINE size_t HfTracker::getBucketIdx(double x, double y) const{
-    const size_t col = static_cast<size_t>((x - static_cast<double>(xMargin)) / static_cast<double>(wBucket));
-    const size_t row = static_cast<size_t>((y - static_cast<double>(yMargin)) / static_cast<double>(hBucket));
+    if(std::isnan(x) || std::isnan(y)){
+        return 0;
+    }
+    const double colD = (x - static_cast<double>(xMargin)) / static_cast<double>(wBucket);
+    const double rowD = (y - static_cast<double>(yMargin)) / static_cast<double>(hBucket);
+    const size_t col = (colD <= 0.0) ? 0 : ((colD >= static_cast<double>(bCols)) ? (bCols - 1) : static_cast<size_t>(colD));
+    const size_t row = (rowD <= 0.0) ? 0 : ((rowD >= static_cast<double>(bRows)) ? (bRows - 1) : static_cast<size_t>(rowD));
     return row * bCols + col;
 }
 

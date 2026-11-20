@@ -36,7 +36,7 @@ inline BackendConfig makeDefaultBackendConfig(
     cfg.bkConfig.maxCosParallax = 0.99939;
     cfg.bkConfig.minDepthMeters = 0.15;
     cfg.bkConfig.maxDepthMeters = 20.0;
-    cfg.bkConfig.maxReprojErrorSq = 2.5e-5;
+    cfg.bkConfig.maxReprojErrorSq = 1.0e-4;
     cfg.bkConfig.minLdltDiag = 1e-4;
     cfg.bkConfig.visualSigmaNorm = 0.002;
     cfg.bkConfig.huberK = 1.345;

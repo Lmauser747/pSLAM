@@ -47,7 +47,7 @@ struct BookkeeperConfig{
     double maxCosParallax = 0.99939;    // Mimimum cosine in parallax calculations
     double minDepthMeters = 0.15;       // Minimum valid cheirality depth in front of camera
     double maxDepthMeters = 20.0;       // Maximum valid depth of landmark in front of camera
-    double maxReprojErrorSq = 2.5e-5;   // Maximum square of reprojection error
+    double maxReprojErrorSq = 1.0e-4;   // Maximum square of reprojection error
     double minLdltDiag = 1e-4;          // Minimum normalized eigenvalue for ray conditioning
     double visualSigmaNorm = 0.002;     // ~1.0 px / 500 fx in normalized coordinates
     double huberK = 1.345;              // Huber M-estimator tuning constant

@@ -19,6 +19,8 @@ public:
     std::string vocabPath; // Path of BoW vocabulary
     Eigen::Matrix<double, 3, 4> bodyToCamera; // pose transform between body and camera
     Eigen::Matrix<double, 3, 1> bodyToDepth; // pose tranform between body and deoth sensor
+    bool hasInitialPose = false;
+    Eigen::Matrix<double, 3, 4> initialPose = Eigen::Matrix<double, 3, 4>::Identity();
 
     SystemConfig(const std::string& configFile);
 };

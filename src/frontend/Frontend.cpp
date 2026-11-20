@@ -86,7 +86,7 @@ void Frontend::processPacket(){
         }
 
         // Assemble BackendHfPacket BEFORE replenishing on frames > 0 so only surviving
-        // RANSAC inliers (age >= 1) are sent to the Backend
+        // RANSAC inliers are sent to the Backend
         std::unique_ptr<BackendHfPacket> hfPacket = std::make_unique<BackendHfPacket>();
         hfPacket->timestamp = packet.timestamp;
         hfPacket->frameId = frameId;
@@ -97,6 +97,26 @@ void Frontend::processPacket(){
             hfPacket->depth = packet.depth->z;
         }else{
             hfPacket->depth = std::nullopt;
+        }
+
+        if(packet.initialAccel.has_value()){
+            hfPacket->initialAccel = *packet.initialAccel;
+        }else if(!packet.imu.empty()){
+            Eigen::Vector3d sumA = Eigen::Vector3d::Zero();
+            for(const auto &s : packet.imu){
+                sumA += s.a;
+            }
+            hfPacket->initialAccel = sumA / static_cast<double>(packet.imu.size());
+        }
+
+        if(packet.initialGyro.has_value()){
+            hfPacket->initialGyro = *packet.initialGyro;
+        }else if(!packet.imu.empty()){
+            Eigen::Vector3d sumW = Eigen::Vector3d::Zero();
+            for(const auto &s : packet.imu){
+                sumW += s.w;
+            }
+            hfPacket->initialGyro = sumW / static_cast<double>(packet.imu.size());
         }
 
         hfPacket->visualMeasurements.reserve(features.size());
