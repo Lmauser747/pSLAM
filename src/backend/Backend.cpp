@@ -2,31 +2,23 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <gtsam/geometry/Cal3.h>
+#include <gtsam/inference/Factor.h>
 #include <memory>
 #include <thread>
 #include <utility>
 
-#include <Eigen/Geometry>
-
-#include <gtsam/base/Matrix.h>
 #include <gtsam/base/Vector.h>
-#include <gtsam/base/types.h>
-#include <gtsam/geometry/Point3.h>
-#include <gtsam/geometry/Pose3.h>
-#include <gtsam/geometry/Rot3.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/linear/LossFunctions.h>
 #include <gtsam/linear/NoiseModel.h>
-#include <gtsam/linear/linearExceptions.h>
 #include <gtsam/navigation/ImuBias.h>
 #include <gtsam/navigation/ImuFactor.h>
-#include <gtsam/navigation/NavState.h>
 #include <gtsam/nonlinear/ISAM2.h>
 #include <gtsam/nonlinear/ISAM2Params.h>
-#include <gtsam/nonlinear/NoiseModelFactorN.h>
-#include <gtsam/nonlinear/NonlinearFactor.h>
-#include <gtsam/nonlinear/PriorFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
+#include <gtsam/geometry/Cal3_S2.h>
+#include <gtsam/slam/SmartProjectionPoseFactor.h>
 
 #include "backend/Backend.hpp"
 #include "CoreTypes.hpp"
@@ -42,50 +34,16 @@ using gtsam::symbol_shorthand::L;
 using gtsam::symbol_shorthand::V;
 using gtsam::symbol_shorthand::X;
 
-// ============================================================================
-// DepthFactor
-// ============================================================================
-
-DepthFactor::DepthFactor(
-    gtsam::Key poseKey,
-    double depthIn,
-    const gtsam::SharedNoiseModel &model,
-    const gtsam::Point3 &leverArm)
-    : gtsam::NoiseModelFactorN<gtsam::Pose3>(model, poseKey),
-      measuredDepth(depthIn),
-      bodyToSensor(leverArm){}
-
-gtsam::Vector DepthFactor::evaluateError(
-    const gtsam::Pose3 &pose,
-    gtsam::OptionalMatrixType H) const{
-    gtsam::Matrix36 dSensor_dPose;
-    const gtsam::Point3 sensorWorld =
-        pose.transformFrom(bodyToSensor, H ? &dSensor_dPose : nullptr);
-
-    if(H){
-        *H = dSensor_dPose.row(2);
-    }
-
-    return (gtsam::Vector(1) << (sensorWorld.z() - measuredDepth)).finished();
-}
-
-// ============================================================================
-// Backend Lifecycle & Public API
-// ============================================================================
-
 Backend::Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &cfg)
     : fe(frontend),
       lf(lfTracker),
       config(cfg),
-      bk(stagingGraph, stagingValues, isamEstimate, cfg.bodyToCameraFrame, cfg.bkConfig){
+      Kptr(std::make_shared<gtsam::Cal3_S2>(1.0, 1.0, 0.0, 0.0, 0.0)){
     gtsam::ISAM2Params isamParams;
     isamParams.relinearizeThreshold = config.relinearizeThreshold;
     isamParams.relinearizeSkip = config.relinearizeSkip;
     isamParams.factorization = gtsam::ISAM2Params::QR;
     isam = gtsam::ISAM2(isamParams);
-
-    initPoseNoise = gtsam::noiseModel::Diagonal::Sigmas(config.initPoseSigma);
-    initVelNoise = gtsam::noiseModel::Isotropic::Sigma(3, config.initVelSigma);
 
     gtsam::Vector6 initBiasSigmas;
     initBiasSigmas << config.initAccelBiasSigma, config.initAccelBiasSigma, config.initAccelBiasSigma,
@@ -105,6 +63,8 @@ Backend::Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &
         poseBuffer[i].v = Eigen::Vector3d::Zero();
     }
     prevBias = gtsam::imuBias::ConstantBias();
+
+    visualNoise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0 / config.K(0, 0));
 }
 
 Backend::~Backend(){
@@ -139,158 +99,51 @@ void Backend::end(){
     }
 }
 
-// ============================================================================
-// Worker Loop & Factor Graph Assembly
-// ============================================================================
-
 void Backend::backendTask(){
     while(runBackend.load(std::memory_order_acquire)){
-        std::unique_ptr<BackendHfPacket> hfPkt = fe.getHfPacket();
+        auto hfPkt = fe.getHfPacket();
         if(!hfPkt){
             break;
         }
 
         if(!isInitialized){
             initializeSystem(*hfPkt);
-        }else{
-            if(hfPkt->frameId <= prevFrameId){
-                continue;
-            }
-            processHfPacket(*hfPkt);
+            publishPose(prevNavState.pose(), prevNavState.velocity(), hfPkt->timestamp);
+            continue;
         }
 
+        if(hfPkt->frameId <= prevFrameId){
+            continue;
+        }
+
+        // Propogate state with Imu data for high frequency navigation tasks
+        if(hfPkt->imuDelta != nullptr && hfPkt->imuDelta->deltaTij() > 0.0){
+            prevNavState = hfPkt->imuDelta->predict(prevNavState, prevBias);
+        }
+        publishPose(prevNavState.pose(), prevNavState.velocity(), hfPkt->timestamp);
+
+        // Do the factor graph solve if the packet is a keyframe
         if(hfPkt->isKeyframe){
-            recordKeyframeFeatures(*hfPkt);
+           processKeyframe(*hfPkt);
         }
-
-        bool loopClosed = false;
-        BackendLfPacket lfPkt;
-        while(lf.getMatch(lfPkt)){
-            processLfPacket(lfPkt);
-            loopClosed = true;
-        }
-
-        optimizeAndPublish(hfPkt->frameId, hfPkt->timestamp, loopClosed);
+        
+        prevFrameId = hfPkt->frameId;
+        prevTimestamp = hfPkt->timestamp;
     }
 }
 
-void Backend::initializeSystem(const BackendHfPacket &pkt){
-    const uint32_t frameId = pkt.frameId;
+void Backend::processKeyframe(const BackendHfPacket &pkt){
+    stagingValues.clear();
+    stagingGraph.resize(0);
+    
+    double dt = pkt.timestamp - lastCommittedTimestamp;
+    
+    stagingValues.insert(X(pkt.frameId), prevNavState.pose());
+    stagingValues.insert(V(pkt.frameId), prevNavState.velocity());
+    stagingValues.insert(B(pkt.frameId), prevBias);
 
-    const double defaultZ = config.initialPose.has_value()
-                                ? config.initialPose->z()
-                                : 0.0;
-    const double initZ = pkt.depth.has_value()
-                             ? (*pkt.depth - config.bodyToDepthSensor.z())
-                             : defaultZ;
+    stagingGraph.emplace_shared<gtsam::ImuFactor>(X(lastCommittedFrameId), V(lastCommittedFrameId), X(pkt.frameId), V(pkt.frameId), B(lastCommittedFrameId), *pkt.imuDelta);
 
-    gtsam::Pose3 initPose;
-    if(config.initialPose.has_value()){
-        initPose = gtsam::Pose3(config.initialPose->rotation(),
-                                gtsam::Point3(config.initialPose->x(), config.initialPose->y(), initZ));
-    }else if(pkt.initialAccel.has_value() && pkt.initialAccel->norm() > 1e-3){
-        // Stationary IMU gravity leveling: align measured specific force with world vertical +Z
-        const Eigen::Vector3d a_norm = pkt.initialAccel->normalized();
-        const Eigen::Quaterniond q = Eigen::Quaterniond::FromTwoVectors(a_norm, Eigen::Vector3d::UnitZ());
-        initPose = gtsam::Pose3(gtsam::Rot3(q.matrix()), gtsam::Point3(0.0, 0.0, initZ));
-    }else{
-        initPose = gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(0.0, 0.0, initZ));
-    }
-    const gtsam::Vector3 initVel = gtsam::Vector3::Zero();
-    gtsam::imuBias::ConstantBias initBias;
-    if(pkt.initialGyro.has_value()){
-        initBias = gtsam::imuBias::ConstantBias(Eigen::Vector3d::Zero(), *pkt.initialGyro);
-    }
-
-    stagingValues.insert(X(frameId), initPose);
-    stagingValues.insert(V(frameId), initVel);
-    stagingValues.insert(B(frameId), initBias);
-
-    gtsam::SharedNoiseModel posePriorNoise = initPoseNoise;
-    if(!pkt.depth.has_value() && !config.initialPose.has_value()){
-        // Without initial depth measurement or initial pose anchor, set an uninformative prior on vertical position
-        gtsam::Vector6 sigmas = config.initPoseSigma;
-        sigmas(5) = 10.0;
-        posePriorNoise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
-    }
-
-    stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
-        X(frameId), initPose, posePriorNoise);
-    stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Vector3>>(
-        V(frameId), initVel, initVelNoise);
-    stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::imuBias::ConstantBias>>(
-        B(frameId), initBias, initBiasNoise);
-
-    bk.startFrame(frameId);
-    for(size_t i = 0; i < pkt.visualMeasurements.size(); i++){
-        const auto &meas = pkt.visualMeasurements[i];
-        bk.updateBookeeper(meas.featureId, meas.pt);
-    }
-    bk.pruneDeadTracks();
-
-    prevFrameId = frameId;
-    prevTimestamp = pkt.timestamp;
-    lastCommittedFrameId = frameId;
-    lastCommittedTimestamp = pkt.timestamp;
-    prevNavState = gtsam::NavState(initPose, initVel);
-    prevBias = initBias;
-    fe.setBias(initBias);
-    isInitialized = true;
-}
-
-void Backend::processHfPacket(const BackendHfPacket &pkt){
-    const uint32_t frameId = pkt.frameId;
-    const bool isContiguousFrame = (frameId == prevFrameId + 1);
-
-    double dt = pkt.timestamp - prevTimestamp;
-    if(dt <= 0.0 && pkt.imuDelta != nullptr){
-        dt = pkt.imuDelta->deltaTij();
-    }
-    if(dt <= 0.0){
-        dt = 1e-3;
-    }
-
-    // 1. Predict initial state guess and attach motion constraint
-    gtsam::Pose3 predPose;
-    gtsam::Vector3 predVel;
-
-    if(isContiguousFrame && pkt.imuDelta != nullptr && pkt.imuDelta->deltaTij() > 0.0){
-        const gtsam::NavState predState = pkt.imuDelta->predict(prevNavState, prevBias);
-        predPose = predState.pose();
-        predVel = predState.velocity();
-
-        stagingGraph.emplace_shared<gtsam::ImuFactor>(
-            X(prevFrameId), V(prevFrameId),
-            X(frameId), V(frameId),
-            B(prevFrameId),
-            *pkt.imuDelta
-        );
-    }else{
-        // Fallback if an intermediate packet was evicted from hfQueue or IMU delta is absent
-        predPose = gtsam::Pose3(
-            prevNavState.attitude(),
-            prevNavState.position() + prevNavState.velocity() * dt
-        );
-        predVel = prevNavState.velocity();
-
-        const gtsam::Pose3 relPose = prevNavState.pose().between(predPose);
-        auto fallbackPoseNoise = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << 0.1 * dt, 0.1 * dt, 0.1 * dt,
-                                 0.5 * dt, 0.5 * dt, 0.5 * dt).finished()
-        );
-        auto fallbackVelNoise = gtsam::noiseModel::Isotropic::Sigma(3, 0.5 * dt);
-
-        stagingGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
-            X(prevFrameId), X(frameId), relPose, fallbackPoseNoise);
-        stagingGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Vector3>>(
-            V(prevFrameId), V(frameId), gtsam::Vector3::Zero(), fallbackVelNoise);
-    }
-
-    stagingValues.insert(X(frameId), predPose);
-    stagingValues.insert(V(frameId), predVel);
-    stagingValues.insert(B(frameId), prevBias);
-
-    // 2. IMU bias random-walk constraint: sigma_discrete = sigma_continuous * sqrt(dt)
     const double sqrtDt = std::sqrt(dt);
     gtsam::Vector6 biasRwSigmas;
     biasRwSigmas << config.accelBiasRwSigma * sqrtDt,
@@ -299,210 +152,51 @@ void Backend::processHfPacket(const BackendHfPacket &pkt){
                     config.gyroBiasRwSigma * sqrtDt,
                     config.gyroBiasRwSigma * sqrtDt,
                     config.gyroBiasRwSigma * sqrtDt;
-
     auto biasRwNoise = gtsam::noiseModel::Diagonal::Sigmas(biasRwSigmas);
-    stagingGraph.emplace_shared<gtsam::BetweenFactor<gtsam::imuBias::ConstantBias>>(
-        B(prevFrameId),
-        B(frameId),
-        gtsam::imuBias::ConstantBias(),
-        biasRwNoise
-    );
 
-    // 3. Optional 1D pressure-transducer depth factor
+    stagingGraph.emplace_shared<gtsam::BetweenFactor<gtsam::imuBias::ConstantBias>>(B(prevFrameId), B(pkt.frameId), gtsam::imuBias::ConstantBias(), biasRwNoise);
     if(pkt.depth.has_value()){
-        stagingGraph.emplace_shared<DepthFactor>(
-            X(frameId), *pkt.depth, depthNoise, config.bodyToDepthSensor);
+         stagingGraph.emplace_shared<DepthFactor>(X(pkt.frameId), pkt.depth.value(), depthNoise, config.bodyToDepthSensor);
     }
 
-    // 4. Visual observation buffering, triangulation, and projection factors
-    bk.startFrame(frameId);
-    for(size_t i = 0; i < pkt.visualMeasurements.size(); i++){
-        const auto &meas = pkt.visualMeasurements[i];
-        bk.updateBookeeper(meas.featureId, meas.pt);
-    }
-    bk.pruneDeadTracks();
-
-    prevFrameId = frameId;
-    prevTimestamp = pkt.timestamp;
-}
-
-void Backend::processLfPacket(const BackendLfPacket &pkt){
-    const gtsam::Key matchedKey = X(pkt.matchedFrameId);
-    const gtsam::Key currentKey = X(pkt.currentFrameId);
-
-    const bool hasMatched = isamEstimate.exists(matchedKey) || stagingValues.exists(matchedKey);
-    const bool hasCurrent = isamEstimate.exists(currentKey) || stagingValues.exists(currentKey);
-    if(!hasMatched || !hasCurrent){
-        return;
+    BackendLfPacket lfPkt;
+    bool loopClosed = false;
+    while(lf.getMatch(lfPkt)){
+        processLfPacket(lfPkt);
+        loopClosed = true;
     }
 
-    gtsam::SharedNoiseModel loopNoise = pkt.noiseModel;
-    if(!loopNoise){
-        auto baseLoop = gtsam::noiseModel::Diagonal::Sigmas(
-            (gtsam::Vector(6) << 0.02, 0.02, 0.02, 0.05, 0.05, 0.05).finished());
-        loopNoise = gtsam::noiseModel::Robust::Create(
-            gtsam::noiseModel::mEstimator::Huber::Create(1.345),
-            baseLoop
-        );
-    }
+    gtsam::FactorIndices removeIndices;
+    std::vector<uint32_t> stagedFeatureIds;
+    
+    for(auto &feat : pkt.visualFeatures){
+        auto it = smartFactors.find(feat.featureId);
 
-    // LfTracker solves P_cam_curr = R * P_cam_matched + t (i.e., T_cam_curr_from_matched).
-    // BetweenFactor<Pose3>(X_matched, X_curr, T_between) requires T_body_matched_from_curr:
-    // T_body_matched_from_curr = T_BC * (pkt.relativePose)^{-1} * T_BC^{-1}
-    const gtsam::Pose3 camMatchedFromCurr = pkt.relativePose.inverse();
-    const gtsam::Pose3 bodyMatchedFromCurr =
-        config.bodyToCameraFrame.compose(camMatchedFromCurr)
-            .compose(config.bodyToCameraFrame.inverse());
+        if(feat.isNewTrack){
+            auto factor = std::make_shared<SmartFactor>(visualNoise, Kptr, config.bodyToCameraFrame);
+            factor->add(feat.pt, X(pkt.frameId));
+            smartFactors[feat.featureId] = factor;
+        }else{
+            auto factor = it->second;
+            factor->add(feat.pt, X(pkt.frameId));
 
-    stagingGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
-        matchedKey,
-        currentKey,
-        bodyMatchedFromCurr,
-        loopNoise
-    );
-}
+            auto slotIt = smartFactorSlots.find(feat.featureId);
 
-void Backend::recordKeyframeFeatures(const BackendHfPacket &pkt){
-    allKeyframeIds.push_back(pkt.frameId);
-    PendingKfRecord rec;
-    rec.frameId = pkt.frameId;
-    rec.featureIds.reserve(pkt.visualMeasurements.size());
-    for(size_t i = 0; i < pkt.visualMeasurements.size(); i++){
-        rec.featureIds.push_back(pkt.visualMeasurements[i].featureId);
-    }
-    rec.lastLandmarkCount = 0;
-    trackedKeyframes.push_back(std::move(rec));
-}
-
-void Backend::syncKeyframesToLfTracker(uint32_t currentFrameId, bool forceAll){
-    (void)currentFrameId;
-    // When a loop closure occurs, update all historical keyframe poses in LfTracker
-    if(forceAll){
-        for(uint32_t kfId : allKeyframeIds){
-            const gtsam::Key poseKey = X(kfId);
-            if(!isamEstimate.exists(poseKey)){
-                continue;
+            if(slotIt != smartFactorSlots.end()){
+                removeIndices.push_back(slotIt->second);
             }
-            const gtsam::Pose3 bodyPose = isamEstimate.at<gtsam::Pose3>(poseKey);
-            const gtsam::Pose3 camPose = bodyPose.compose(config.bodyToCameraFrame);
 
-            BackendKeyframeUpdate update;
-            update.id = kfId;
-            update.pose = camPose;
-            lf.updateKeyframe(update);
+            stagingGraph.push_back(factor);
+            stagedFeatureIds.push_back(feat.featureId);
         }
     }
 
-    for(size_t i = 0; i < trackedKeyframes.size(); i++){
-        auto &rec = trackedKeyframes[i];
-        const gtsam::Key poseKey = X(rec.frameId);
-        if(!isamEstimate.exists(poseKey)){
-            continue;
-        }
-
-        // Count how many of this keyframe's features are now triangulated in isamEstimate
-        size_t validCount = 0;
-        for(size_t j = 0; j < rec.featureIds.size(); j++){
-            if(isamEstimate.exists(L(rec.featureIds[j]))){
-                validCount++;
-            }
-        }
-
-        if(validCount == 0 || (!forceAll && validCount == rec.lastLandmarkCount)){
-            continue;
-        }
-
-        const gtsam::Pose3 bodyPose = isamEstimate.at<gtsam::Pose3>(poseKey);
-        const gtsam::Pose3 camPose = bodyPose.compose(config.bodyToCameraFrame);
-
-        BackendKeyframeUpdate update;
-        update.id = rec.frameId;
-        update.pose = camPose;
-        update.landmarks.reserve(validCount);
-
-        for(size_t j = 0; j < rec.featureIds.size(); j++){
-            const uint32_t featId = rec.featureIds[j];
-            const gtsam::Key lmKey = L(featId);
-            if(isamEstimate.exists(lmKey)){
-                const gtsam::Point3 worldPt = isamEstimate.at<gtsam::Point3>(lmKey);
-                // Transform 3D landmark into the keyframe's local camera optical frame
-                const gtsam::Point3 camPt = camPose.transformTo(worldPt);
-                if(camPt.z() > 0.0){
-                    Landmark3d lm;
-                    lm.pt3d = camPt;
-                    lm.featureId = featId;
-                    update.landmarks.push_back(lm);
-                }
-            }
-        }
-
-        if(!update.landmarks.empty()){
-            lf.updateKeyframe(update);
-            rec.lastLandmarkCount = validCount;
-        }
+    if(solveGraph(pkt.frameId, removeIndices)){
+        lastCommittedFrameId = pkt.frameId;
+        lastCommittedTimestamp = pkt.timestamp;
+        publishPose(prevNavState.pose(), prevNavState.velocity(), pkt.timestamp);
+        syncLfTracker(pkt.frameId, loopClosed);
     }
-
-    // Evict keyframes whose features have all triangulated, or when queue capacity is reached
-    while(!trackedKeyframes.empty() &&
-          (trackedKeyframes.front().lastLandmarkCount == trackedKeyframes.front().featureIds.size() ||
-           trackedKeyframes.size() > config.bkConfig.maxBufferLength)){
-        trackedKeyframes.pop_front();
-    }
-}
-
-void Backend::optimizeAndPublish(uint32_t frameId, double timestamp, bool loopClosed){
-    try{
-        isam.update(stagingGraph, stagingValues);
-        isamEstimate = isam.calculateEstimate();
-    }catch(const std::exception &){
-        stagingGraph.resize(0);
-        stagingValues.clear();
-        prevFrameId = lastCommittedFrameId;
-        prevTimestamp = lastCommittedTimestamp;
-        return;
-    }catch(...){
-        stagingGraph.resize(0);
-        stagingValues.clear();
-        prevFrameId = lastCommittedFrameId;
-        prevTimestamp = lastCommittedTimestamp;
-        return;
-    }
-
-    stagingGraph.resize(0);
-    stagingValues.clear();
-
-    if(!isamEstimate.exists(X(frameId))){
-        prevFrameId = lastCommittedFrameId;
-        prevTimestamp = lastCommittedTimestamp;
-        return;
-    }
-
-    lastCommittedFrameId = frameId;
-    lastCommittedTimestamp = timestamp;
-
-    const gtsam::Pose3 optPose = isamEstimate.at<gtsam::Pose3>(X(frameId));
-    const gtsam::Vector3 optVel = isamEstimate.at<gtsam::Vector3>(V(frameId));
-    const gtsam::imuBias::ConstantBias optBias =
-        isamEstimate.at<gtsam::imuBias::ConstantBias>(B(frameId));
-
-    prevNavState = gtsam::NavState(optPose, optVel);
-    prevBias = optBias;
-
-    // Feed updated IMU bias back to the frontend pre-integrator
-    fe.setBias(prevBias);
-
-    // Push newly triangulated or loop-refined 3D landmarks to LfTracker keyframes
-    syncKeyframesToLfTracker(frameId, loopClosed);
-
-    // Write new state into the inactive double-buffer slot and publish atomically
-    const uint8_t nextIdx = static_cast<uint8_t>(1u - activePose.load(std::memory_order_relaxed));
-    Pose &outPose = poseBuffer[nextIdx];
-    outPose.timestamp = timestamp;
-    outPose.t = optPose.translation();
-    outPose.r = optPose.rotation().toQuaternion();
-    outPose.v = optVel;
-
-    activePose.store(nextIdx, std::memory_order_release);
 }
 
 } // namespace PoolSLAM

@@ -81,3 +81,5 @@ test_dataset
 
 benchmarks/accuracy/runs
 benchmarks/accuracy/__*
+
+ARCH*

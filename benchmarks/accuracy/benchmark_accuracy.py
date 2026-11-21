@@ -634,14 +634,14 @@ def run_accuracy_benchmark(
     last_frame_wall_time = start_wall_time
 
     for frame_idx, (t_frame, frame_path) in enumerate(dataset.frame_records):
-        # 1. Push all IMU samples up to t_frame + 0.005 so Synchronizer has data
-        while imu_idx < total_imu and dataset.imu_samples[imu_idx][0] <= t_frame + 0.005:
+        # 1. Push all IMU samples up to t_frame + 0.500 so Synchronizer has sufficient margin
+        while imu_idx < total_imu and dataset.imu_samples[imu_idx][0] <= t_frame + 0.500:
             t_imu, a, w = dataset.imu_samples[imu_idx]
             system.push_imu(pool_slam.Imu(timestamp=t_imu, a=a, w=w, t=20.0))
             imu_idx += 1
 
-        # 2. Push all Depth samples up to t_frame + 0.010
-        while depth_idx < len(depth_samples) and depth_samples[depth_idx][0] <= t_frame + 0.010:
+        # 2. Push all Depth samples up to t_frame + 0.500 (100 samples ahead, well within buffer size 500)
+        while depth_idx < len(depth_samples) and depth_samples[depth_idx][0] <= t_frame + 0.500:
             t_d, z_d = depth_samples[depth_idx]
             system.push_depth(pool_slam.Depth(timestamp=t_d, z=z_d))
             depth_idx += 1
@@ -665,14 +665,45 @@ def run_accuracy_benchmark(
                 time.sleep(target_sleep - elapsed_frame_time)
             last_frame_wall_time = time.time()
         else:
-            time.sleep(0.005)
+            # Non-realtime mode: throttle ingestion if Backend falls behind to prevent queue overflow and frame drops
+            t_throttle_start = time.time()
+            pose = system.get_pose()
+            while pose.timestamp > 0.0 and (t_frame - pose.timestamp) > 0.15 and (time.time() - t_throttle_start) < 0.25:
+                while imu_idx < total_imu and dataset.imu_samples[imu_idx][0] <= t_frame + 0.500:
+                    t_imu, a, w = dataset.imu_samples[imu_idx]
+                    system.push_imu(pool_slam.Imu(timestamp=t_imu, a=a, w=w, t=20.0))
+                    imu_idx += 1
+                while depth_idx < len(depth_samples) and depth_samples[depth_idx][0] <= t_frame + 0.500:
+                    t_d, z_d = depth_samples[depth_idx]
+                    system.push_depth(pool_slam.Depth(timestamp=t_d, z=z_d))
+                    depth_idx += 1
+                time.sleep(0.002)
+                pose = system.get_pose()
 
         # 4. Check if current dataset time hits or passes next evaluation interval
         if t_frame >= next_eval_time:
-            time.sleep(0.02)
+            # Synchronize with backend worker thread so pose matches evaluation time
+            # Limit blocking wait to 250ms (strictly < Hal 400ms timeout) so ImageStream is never starved into FATALCAM
+            t_wait_start = time.time()
             pose = system.get_pose()
+            while pose.timestamp < t_frame - 1e-4 and (time.time() - t_wait_start) < 0.25:
+                while imu_idx < total_imu and dataset.imu_samples[imu_idx][0] <= t_frame + 0.500:
+                    t_imu, a, w = dataset.imu_samples[imu_idx]
+                    system.push_imu(pool_slam.Imu(timestamp=t_imu, a=a, w=w, t=20.0))
+                    imu_idx += 1
+                while depth_idx < len(depth_samples) and depth_samples[depth_idx][0] <= t_frame + 0.500:
+                    t_d, z_d = depth_samples[depth_idx]
+                    system.push_depth(pool_slam.Depth(timestamp=t_d, z=z_d))
+                    depth_idx += 1
+                time.sleep(0.002)
+                pose = system.get_pose()
+
+            if pose.timestamp < next_eval_time - 0.5 and pose.timestamp > 0.0:
+                print(f"[Benchmark WARNING] Estimator lagging: checkpoint {next_eval_time:.1f}s, current pose {pose.timestamp:.2f}s", file=sys.stderr)
+
+            eval_t = pose.timestamp if pose.timestamp > 0.0 else t_frame
             gt_pos, gt_quat = interpolate_pose(
-                dataset.gt_times, dataset.gt_positions, dataset.gt_quaternions, t_frame
+                dataset.gt_times, dataset.gt_positions, dataset.gt_quaternions, eval_t
             )
 
             est_pos = np.asarray(pose.t, dtype=np.float64)
@@ -686,11 +717,11 @@ def run_accuracy_benchmark(
 
             now_wall = time.time()
             elapsed_wall = now_wall - start_wall_time
-            rtf = t_frame / max(0.001, elapsed_wall)
+            rtf = eval_t / max(0.001, elapsed_wall)
 
             checkpoint_data = {
                 "checkpoint": len(checkpoints) + 1,
-                "dataset_time": t_frame,
+                "dataset_time": eval_t,
                 "wall_time": elapsed_wall,
                 "est_pos": est_pos,
                 "gt_pos": gt_pos,
@@ -706,7 +737,7 @@ def run_accuracy_benchmark(
 
             # Concise single-line console output
             print(
-                f"[{t_frame:6.1f}s / {dataset.duration:5.1f}s] "
+                f"[{eval_t:6.1f}s / {dataset.duration:5.1f}s] "
                 f"Pos Err: {pos_err:6.3f}m (Horiz: {horiz_err:5.3f}m, Depth: {depth_err:5.3f}m) | "
                 f"Rot Err: {rot_err:5.2f}° | RTF: {rtf:4.2f}x"
             )
@@ -714,7 +745,17 @@ def run_accuracy_benchmark(
             next_eval_time += eval_interval_sec
 
     # Drain remaining processing
-    time.sleep(0.15)
+    while imu_idx < total_imu:
+        t_imu, a, w = dataset.imu_samples[imu_idx]
+        system.push_imu(pool_slam.Imu(timestamp=t_imu, a=a, w=w, t=20.0))
+        imu_idx += 1
+    while depth_idx < len(depth_samples):
+        t_d, z_d = depth_samples[depth_idx]
+        system.push_depth(pool_slam.Depth(timestamp=t_d, z=z_d))
+        depth_idx += 1
+    t_drain_start = time.time()
+    while system.get_pose().timestamp < dataset.duration - 0.10 and (time.time() - t_drain_start) < 0.30:
+        time.sleep(0.01)
     system.stop()
     total_wall_time = time.time() - start_wall_time
 

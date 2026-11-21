@@ -37,9 +37,10 @@ struct FrontendConfig{
     }(); // Parameters for IMU preintegration
 
     float droppedFeatureThreshold = 0.5f; // Percentrage of dropped features frame-to-frame that cause keyframe
+    float meanDisplacementThreshold = 15.0f; // Mean displacement between keyframes
     double maxTimeBetweenKf = 1.0; // Maximum time between keyframes
     size_t hfQueueSize = 10; // Max size of hfQueue
-    Eigen::Matrix3f bodyToCameraRot = Eigen::Matrix3f::Identity(); // Rotation from body/IMU frame to camera frame
+    Eigen::Matrix3d bodyToCameraRot = Eigen::Matrix3d::Identity(); // Rotation from body/IMU frame to camera frame
 };
 
 class Frontend{

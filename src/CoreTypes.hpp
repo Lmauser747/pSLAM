@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <array>
-#include <gtsam/linear/NoiseModel.h>
 #include <vector>
 #include <optional>
 #include <memory>
@@ -12,6 +11,7 @@
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/linear/NoiseModel.h>
+#include <gtsam/base/Vector.h>
 
 namespace PoolSLAM{
 
@@ -25,10 +25,9 @@ struct TrackedFeature{
     uint32_t id; // Feature id for tracking
     int age = 0; // Feature age in frames
 
-    // Using homogenous coordinates
-    Eigen::Vector2f ptCurr = Eigen::Vector2f::Zero(); // Sub-pixel position of feature
-    Eigen::Vector2f ptPrev = Eigen::Vector2f::Zero(); // Sub-pixel position of feature in previous frame
-    Eigen::Vector2f ptUndis = Eigen::Vector2f::Zero(); // Sub-pixel undistorted position of the points
+    Eigen::Vector2f ptCurr = Eigen::Vector2f::Zero(); // Disorted position of the feature in pixel coordinates
+    Eigen::Vector2f ptPrev = Eigen::Vector2f::Zero(); // Disorted position of the feature in pixel coordinates in previous frame
+    Eigen::Vector2f ptUndis = Eigen::Vector2f::Zero(); // Undistorted position of the points in normalzied camera coordinates
 
 
     static constexpr int PATCH_SIZE = 2 * Radius + 1;
@@ -42,20 +41,21 @@ struct TrackedFeature{
     Eigen::Matrix2f HInv{{0.0, 0.0}, {0.0, 0.0}};
 };
 
-struct VisualMeasurement{
+struct VisualFeatureObs{
     uint32_t featureId;
-    gtsam::Point2 pt = Eigen::Vector2d::Zero(); 
-    VisualMeasurement(uint32_t featureId_, const gtsam::Point2 &pt_) : featureId(featureId_), pt(pt_){} 
+    gtsam::Point2 pt = Eigen::Vector2d::Zero(); // Normalized camera coordinates <x/, x/z> 
+    bool isNewTrack = false;
+
+    VisualFeatureObs(uint32_t id, const gtsam::Point2 &p, bool isNew = false);
 };
 
-// Data passed from the Hf frontend to the backend
+// Data passed from the Frontend to the backend
 struct BackendHfPacket{
     uint32_t frameId = 0;
     double timestamp = 0.0;
-    bool isKeyframe = false;
+    bool isKeyframe = false; // If false only IMU data is used, true triggers a full factor graph solve
 
-    // Vector of visual measurements
-    std::vector<VisualMeasurement> visualMeasurements;
+    std::vector<VisualFeatureObs> visualFeatures; // Visual Features
     
     // Preintegrated IMU measurements
     std::unique_ptr<gtsam::PreintegratedImuMeasurements> imuDelta;
@@ -98,7 +98,7 @@ struct Landmark3d{
 struct BackendKeyframeUpdate{
     uint32_t id = 0; // Id of keyframe
     gtsam::Pose3 pose; // Pose of keyframe
-    std::vector<Landmark3d> landmarks; // Updates positions of landmarks in keyframe
+    std::vector<Landmark3d> landmarks; // Positions of the landmarks in 3d camera coordinates
 };
 
 

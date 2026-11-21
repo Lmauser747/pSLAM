@@ -3,6 +3,7 @@
 #include <optional>
 #include <thread>
 #include <chrono>
+#include <iostream>
 
 #include "hal/Synchronizer.hpp"
 #include "pool_slam/HalTypes.hpp"
@@ -103,6 +104,8 @@ void Synchronizer::threadTask(){
             std::lock_guard<std::mutex> lock(m_outputQueue);
             if(outputQueue.size() >= maxOutputQueueSize){
                 SyncedPacket &stale = outputQueue.front();
+                std::cerr << "[Synchronizer WARNING] outputQueue full (" << outputQueue.size()
+                          << "), dropping stale frame ts=" << stale.timestamp << std::endl;
                 if(stale.image){
                     imageStream.recycleFrame(stale.image);
                 }
@@ -119,6 +122,11 @@ void Synchronizer::threadTask(){
 }
 
 void Synchronizer::syncFatalShutdown(SyncStatus reason, PixelArray *checkedOutFrame){
+    const char *reasonStr = "UNKNOWN";
+    if (reason == SyncStatus::FATALCAM) reasonStr = "FATALCAM (camera timeout or disabled)";
+    else if (reason == SyncStatus::FATALIMU) reasonStr = "FATALIMU (IMU timeout or disabled)";
+    std::cerr << "[Synchronizer ERROR] Fatal shutdown triggered: " << reasonStr << std::endl;
+
     syncStatus.store(reason, std::memory_order_relaxed);
     isRunning.store(false);
 

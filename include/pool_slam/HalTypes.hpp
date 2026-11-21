@@ -11,10 +11,10 @@ struct Imu{
     // timestamp is a time measured in seconds relative to some standard starting point
     double timestamp;
 
-    // a = (ax, ay, az) is acceleration in the x, y, z directions respectively measured in m^2/s
+    // a = (ax, ay, az) is acceleration in the x, y, z directions respectively measured in m/s^2
     Eigen::Vector3d a;
 
-    // w = (wx, wy, wz) is angular velocity around the x, y, and z axis repectively measureing in deg/s
+    // w = (wx, wy, wz) is angular velocity around the x, y, and z axis repectively measureing in rad/s
     // wx = roll, wy = pitch, wz = yaw
     Eigen::Vector3d w;
 

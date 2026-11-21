@@ -2,10 +2,15 @@
 
 #include <atomic>
 #include <cstddef>
+#include <gtsam/geometry/Cal3_S2.h>
+#include <gtsam/slam/SmartProjectionPoseFactor.h>
+#include <memory>
+#include <optional>
 #include <thread>
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <unordered_map>
 #include <vector>
 
 #include <Eigen/Core>
@@ -27,21 +32,23 @@
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/base/Vector.h>
 #include <gtsam/base/types.h>
+#include <gtsam/geometry/Cal3.h>
 
 #include "CoreTypes.hpp"
-#include "backend/Bookkeeper.hpp"
 #include "pool_slam/SystemTypes.hpp"
 #include "frontend/Frontend.hpp"
 #include "frontend/LfTracker.hpp"
 
 namespace PoolSLAM{
 
+using SmartFactor = gtsam::SmartProjectionPoseFactor<gtsam::Cal3_S2>;
+
 struct BackendConfig{
-    BookkeeperConfig bkConfig;
 
     // Sensor extrinsics relative to the ROV body/IMU frame
     gtsam::Pose3 bodyToCameraFrame; // T_BC: transforms points from camera frame to body frame
     gtsam::Point3 bodyToDepthSensor = gtsam::Point3(0.0, 0.0, 0.0); // Depth sensor lever arm in body frame
+    Eigen::Matrix3d K;
     std::optional<gtsam::Pose3> initialPose = std::nullopt; // Optional user/dataset initial pose anchor
 
     // iSAM2 incremental solver parameters
@@ -98,13 +105,14 @@ class Backend{
     gtsam::Values stagingValues;
     gtsam::Values isamEstimate;
 
-    LandmarkBookkeeper bk; // Bookkeeper for triangulating landmarks
-
     // Pre-allocated noise models for priors and depth factors
     gtsam::SharedNoiseModel initPoseNoise;
     gtsam::SharedNoiseModel initVelNoise;
+    gtsam::SharedNoiseModel visualNoise;
     gtsam::SharedNoiseModel initBiasNoise;
     gtsam::SharedNoiseModel depthNoise;
+
+    const std::shared_ptr<gtsam::Cal3_S2> Kptr;
 
     // Sequential state tracking across frames (k-1 -> k)
     bool isInitialized = false;
@@ -115,9 +123,8 @@ class Backend{
     gtsam::NavState prevNavState;
     gtsam::imuBias::ConstantBias prevBias;
 
-    // Tracks recent keyframes so LfTracker receives 3D landmarks once triangulated
-    std::deque<PendingKfRecord> trackedKeyframes;
-    std::vector<uint32_t> allKeyframeIds;
+    std::unordered_map<uint32_t, std::shared_ptr<SmartFactor>> smartFactors;
+    std::unordered_map<uint32_t, gtsam::FactorIndex> smartFactorSlots;
 
     std::atomic<uint8_t> activePose{0}; // Index of active pose
     std::array<Pose, 2> poseBuffer; // Buffer to hold active pose
@@ -125,14 +132,26 @@ class Backend{
     std::atomic<bool> runBackend{false}; // Variable to run backend
     std::thread backendThread; // Thread to run backend
 
-    // Backend packet processing task and helpers
+    // Main backend processing task
     void backendTask();
+
+    // Use packet to initialize the system
     void initializeSystem(const BackendHfPacket &pkt);
-    void processHfPacket(const BackendHfPacket &pkt);
+
+    // Process keyframe data coming from HfTracker
+    void processKeyframe(const BackendHfPacket &pkt);
+
+    // Process lf packets for loop closure
     void processLfPacket(const BackendLfPacket &pkt);
-    void recordKeyframeFeatures(const BackendHfPacket &pkt);
-    void syncKeyframesToLfTracker(uint32_t currentFrameId, bool forceAll);
-    void optimizeAndPublish(uint32_t frameId, double timestamp, bool loopClosed);
+
+    // Sync 3d landmarks to the LfTracker
+    void syncLfTracker(uint32_t currentFrameId, bool forceAll);
+
+    // Published pose to the buffer
+    void publishPose(const gtsam::Pose3 &pose, const gtsam::Vector3 &velocity, double timestamp);
+
+    // Solve the factor graph
+    bool solveGraph(uint32_t currentFrameId, const gtsam::FactorIndices &removeIndices = {});
 
 public:
     Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &cfg);

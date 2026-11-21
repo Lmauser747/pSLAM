@@ -81,6 +81,8 @@ private:
 
     EpipolarData epi; // Normalized rays to be used in RANSAC and Epipolar geometry calcs
 
+    float displacement; // Sum of the differences between undistorted tracked pixel coordinates
+
     std::vector<TrackedFeature<RADIUS>> activeFeatures; // Stores all active features
     std::vector<GridBucket> gridOccupancy; // Stores the age of the oldest frame in the grid
     std::vector<uint8_t> keep; // Stores all the features to keep during bucket size enforcing
@@ -186,7 +188,7 @@ public:
     };
 
     // Tracks existing features with IC-LK, removes outliers with RANSAC, and retunrs the number of active features
-    size_t trackExistingFeatures(const uint8_t *curBuffer, const Eigen::Matrix3f &R);
+    float trackExistingFeatures(const uint8_t *curBuffer, const Eigen::Matrix3f &R);
 
     // Replenishs drained buckets with new keypoints obtained via FAST + Shi-Thomasi
     size_t replenishBuckets(const uint8_t *curBuffer);
