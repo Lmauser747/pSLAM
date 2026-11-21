@@ -590,9 +590,9 @@ void LfTracker::undistort(Eigen::Matrix3Xd &pts, size_t count){
         }
 
         if(std::isfinite(x) && std::isfinite(y)){
-            pts(0, i) = static_cast<double>(x);
-            pts(1, i) = static_cast<double>(y);
-            pts(2, i) = 1.0;
+            pts(0, static_cast<int>(i)) = static_cast<double>(x);
+            pts(1, static_cast<int>(i)) = static_cast<double>(y);
+            pts(2, static_cast<int>(i)) = 1.0;
         }
     }
     // END VECTORIZE

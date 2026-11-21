@@ -58,17 +58,19 @@ struct BackendConfig{
     // Initial state prior standard deviations (Frame 0 bootstrapping)
     Eigen::Matrix<double, 6, 1> initPoseSigma =
         (Eigen::Matrix<double, 6, 1>() << 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 1e-3).finished(); // [rot (rad), pos (m)]
-    double initVelSigma = 1e-3;       // m/s
-    double initAccelBiasSigma = 0.1;  // m/s^2
-    double initGyroBiasSigma = 0.05;  // rad/s
+    double initVelSigma = 1e-3;
+    double initAccelBiasSigma = 0.1;
+    double initGyroBiasSigma = 0.05;
 
     // Continuous-time IMU bias random-walk noise densities
-    double accelBiasRwSigma = 1e-4;   // m / (s^2 * sqrt(s))
-    double gyroBiasRwSigma = 1e-5;    // rad / (s * sqrt(s))
+    double accelBiasRwSigma = 1e-4;
+    double gyroBiasRwSigma = 1e-5;
 
     // 1D Depth sensor noise and robust M-estimator threshold
-    double depthSigma = 0.05;         // m
+    double depthSigma = 0.05; 
     double depthHuberK = 1.345;
+
+    size_t keyframeWindowSize = 20; // Number of keyframes to keep in trackedKeyframes
 };
 
 class DepthFactor : public gtsam::NoiseModelFactorN<gtsam::Pose3>{
@@ -84,6 +86,12 @@ public:
     gtsam::Vector evaluateError(
         const gtsam::Pose3 &pose,
         gtsam::OptionalMatrixType H = nullptr) const override;
+};
+
+struct TrackedKeyframe{
+    uint32_t frameId;
+    std::vector<uint32_t> featureIds;
+    size_t lastLandmarkCount = 0;
 };
 
 class Backend{
@@ -103,6 +111,7 @@ class Backend{
     gtsam::ISAM2 isam;
     gtsam::NonlinearFactorGraph stagingGraph; 
     gtsam::Values stagingValues;
+    std::vector<uint32_t> stagedFeatureIds;
     gtsam::Values isamEstimate;
 
     // Pre-allocated noise models for priors and depth factors
@@ -112,6 +121,7 @@ class Backend{
     gtsam::SharedNoiseModel initBiasNoise;
     gtsam::SharedNoiseModel depthNoise;
 
+    // Camera intrinsics
     const std::shared_ptr<gtsam::Cal3_S2> Kptr;
 
     // Sequential state tracking across frames (k-1 -> k)
@@ -123,8 +133,12 @@ class Backend{
     gtsam::NavState prevNavState;
     gtsam::imuBias::ConstantBias prevBias;
 
+    // Smart factor storage
     std::unordered_map<uint32_t, std::shared_ptr<SmartFactor>> smartFactors;
     std::unordered_map<uint32_t, gtsam::FactorIndex> smartFactorSlots;
+
+    // Queue of recent keyframes and their associated features
+    std::deque<TrackedKeyframe> trackedKeyframes;
 
     std::atomic<uint8_t> activePose{0}; // Index of active pose
     std::array<Pose, 2> poseBuffer; // Buffer to hold active pose
