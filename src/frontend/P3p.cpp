@@ -390,5 +390,5 @@ std::optional<Eigen::Matrix<double, 3, 4>> solveP4PLambdaTwist(const std::array<
     return bestT;
 }
 
-} // namespace geometry
+}
 } 

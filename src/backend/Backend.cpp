@@ -367,7 +367,9 @@ void Backend::syncLfTracker(uint32_t currentFrameId, bool forceAll){
     for(auto &kf : trackedKeyframes){
         BackendKeyframeUpdate update;
         update.id = kf.frameId;
-        if(!isamEstimate.exists(X(kf.frameId)));
+        if(!isamEstimate.exists(X(kf.frameId))){
+            continue;
+        }
         update.pose = isamEstimate.at<gtsam::Pose3>(X(kf.frameId)) * config.bodyToCameraFrame;
         update.landmarks.reserve(kf.lastLandmarkCount);
         size_t count = 0;
@@ -382,7 +384,7 @@ void Backend::syncLfTracker(uint32_t currentFrameId, bool forceAll){
                 if(ptCam.z() <= 0.0){
                     continue;
                 }
-                update.landmarks.emplace_back(ptCam, featId);
+                update.landmarks.push_back({ptCam, featId});
                 count++;
             } 
         }
@@ -391,6 +393,16 @@ void Backend::syncLfTracker(uint32_t currentFrameId, bool forceAll){
             lf.updateKeyframe(update);
         }
     }
+}
+
+void Backend::publishPose(const gtsam::Pose3 &pose, const gtsam::Vector3 &velocity, double timestamp){
+    uint8_t inactivePose = activePose.load(std::memory_order_relaxed) == 0 ? 1 : 0;
+    poseBuffer[inactivePose].timestamp = timestamp;
+    poseBuffer[inactivePose].t = pose.translation();
+    poseBuffer[inactivePose].r = pose.rotation().toQuaternion();
+    poseBuffer[inactivePose].v = velocity;
+
+    activePose.store(inactivePose, std::memory_order_release);
 }
 
 }

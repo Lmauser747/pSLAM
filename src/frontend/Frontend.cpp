@@ -53,7 +53,7 @@ void Frontend::processPacket(){
         auto Rcam = config.bodyToCameraRot.transpose() * imuDelta->deltaRij().matrix() * config.bodyToCameraRot; // Frame to frame relative camera rotation
         
         // Track the existing features using IC-LK
-        auto meanDisplacement = hf.trackExistingFeatures(syncPkt.image->arr.data(), Rcam); 
+        auto meanDisplacement = hf.trackExistingFeatures(syncPkt.image->arr.data(), Rcam.cast<float>()); 
         
         auto featureCount = hf.getActiveFeatures().size();
 

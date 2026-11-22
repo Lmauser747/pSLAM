@@ -12,7 +12,7 @@
 
 namespace PoolSLAM{
 
-size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const Eigen::Matrix3f &R){
+float HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const Eigen::Matrix3f &R){
     if(curBuffer == nullptr){
         handleTrackingError();
         return 0;
@@ -20,7 +20,7 @@ size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const Eigen::M
 
     // Run IC-LK if we have previous features to track
     if(!activeFeatures.empty()){
-        Eigen::Matrix3f prior = K * R * KInv;
+        Eigen::Matrix3f prior = K * R.transpose() * KInv;
 
         size_t survivorCount = 0;
         for(size_t i = 0; i < activeFeatures.size(); i++){
@@ -36,16 +36,16 @@ size_t HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const Eigen::M
 
         activeFeatures.resize(survivorCount);
         
-        // Run RANSAC to filter out outliers.
-        if(ransac(R) < RANSAC_MIN_INLIERS){
-            handleTrackingError();
-            return 0;
-        }
+        ransac(R);
 
         // Remove features from buckets with too many features
         enforceBucketDensity();
 
-        return activeFeatures.size();
+        float totalDisplacement = 0.0f;
+        for (const auto &feat : activeFeatures) {
+            totalDisplacement += (feat.ptCurr - feat.ptPrev).norm();
+        }
+        return activeFeatures.empty() ? 0.0f : (totalDisplacement / static_cast<float>(activeFeatures.size()));
     }else{
         return 0;
     }
@@ -167,7 +167,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
     undistort(epi.xCurr, epi.yCurr, epi.currRays, numFeatures);
 
     // Rotate the rays from the previous frame to the current frame
-    epi.scratch.noalias() = R * epi.prevRays.leftCols(numFeatures);
+    epi.scratch.noalias() = R.transpose() * epi.prevRays.leftCols(numFeatures);
     
 
     // Check for pure rotation
@@ -201,13 +201,8 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
         return static_cast<int>(writeIdx);
     }
 
-    // cross the rays from the current frame with the rays from the old frame
-    for(Eigen::Index i = 0; i < static_cast<Eigen::Index>(numFeatures); i++){
-        Eigen::Vector3f qi = epi.scratch.col(i);
-        epi.scratch.col(i) = qi.cross(epi.currRays.col(i));
-    }
-
-    // epi.scratch is the matrix M in the RASAC calcs
+   
+    // epi scratch holds the previous rays rotated by R.T
     int maxInliers = 0;
     Eigen::Vector3f t, tBest;
     for(int iter = 0; iter < RANSAC_ITERS; iter++){
@@ -216,18 +211,31 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
         auto b = static_cast<Eigen::Index>((ransacRng() * numFeatures) >> 31);
         b = a == b ? (static_cast<size_t>(b) == (numFeatures - 1) ? b - 1 : b + 1) : b;
 
-        t = epi.scratch.col(a).cross(epi.scratch.col(b));
+        Eigen::Vector3f ma = epi.scratch.col(a).cross(epi.currRays.col(a));
+        Eigen::Vector3f mb = epi.scratch.col(b).cross(epi.currRays.col(b));
+
+        t = ma.cross(mb);
         if(t.norm() < RANSAC_TRANS_EP){
             continue;
         }
+
         t = t.normalized();
-        epi.residual = epi.scratch.leftCols(numFeatures).transpose() * t;
 
         int inliers = 0;
         // START VECTORIZE
-        for(size_t i = 0; i < numFeatures; i++){
-            auto d = std::abs(epi.residual(static_cast<Eigen::Index>(i)));
-            inliers = (d < ransacTau) ? inliers + 1 : inliers;
+        for(int i = 0; static_cast<size_t>(i) < numFeatures; i++){
+            // Use the Sampson Epipolar Distance
+            Eigen::Vector3f lCurr = t.cross(epi.scratch.col(i));
+            Eigen::Vector3f lPrev = t.cross(epi.currRays.col(i));
+
+            float numerator = epi.currRays.col(i).dot(lCurr);
+            float numerator2 = numerator * numerator;
+
+            float denomenator2 = lCurr.head<2>().squaredNorm() + lPrev.head<2>().squaredNorm();
+
+            float sed = denomenator2 > 1e-7 ? numerator2 / denomenator2 : 1e9;
+
+            inliers = (sed < ransacTau * ransacTau) ? inliers + 1 : inliers;
         }
         // END VECTORIZE
         
@@ -242,10 +250,20 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
 
     if(maxInliers >= RANSAC_MIN_INLIERS){
         size_t writeIdx = 0;
-        epi.residual = epi.scratch.leftCols(numFeatures).transpose() * tBest;
         for(size_t readIdx = 0; readIdx < numFeatures; readIdx++){
-            auto d = epi.residual(static_cast<Eigen::Index>(readIdx));
-            if(std::abs(d) < ransacTau){
+            auto i = static_cast<Eigen::Index>(readIdx);
+            // Use the Sampson Epipolar Distance
+            Eigen::Vector3f lCurr = tBest.cross(epi.scratch.col(i));
+            Eigen::Vector3f lPrev = tBest.cross(epi.currRays.col(i));
+
+            float numerator = epi.currRays.col(i).dot(lCurr);
+            float numerator2 = numerator * numerator;
+
+            float denomenator2 = lCurr.head<2>().squaredNorm() + lPrev.head<2>().squaredNorm();
+
+            float sed = denomenator2 > 1e-7 ? numerator2 / denomenator2 : 1e9;
+
+            if(sed < ransacTau * ransacTau){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = std::move(activeFeatures[readIdx]);
                     epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
@@ -255,7 +273,13 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             }
         }
         activeFeatures.resize(writeIdx);
+    }else{
+        for(size_t i = 0; i < numFeatures; i++){
+            activeFeatures[i].ptUndis = epi.currRays.col(static_cast<Eigen::Index>(i)).hnormalized();
+        }
     }
+        
+    
 
     return maxInliers;
 }

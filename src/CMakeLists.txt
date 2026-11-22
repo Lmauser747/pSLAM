@@ -53,8 +53,8 @@ target_link_libraries(poolslam_frontend
 # Backend
 find_package(GTSAM REQUIRED)
 add_library(poolslam_backend STATIC
-    backend/Bookkeeper.cpp
     backend/Backend.cpp
+    backend/DepthFactor.cpp
 )
 target_include_directories(poolslam_backend
     PUBLIC
