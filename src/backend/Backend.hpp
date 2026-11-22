@@ -2,8 +2,6 @@
 
 #include <atomic>
 #include <cstddef>
-#include <gtsam/geometry/Cal3_S2.h>
-#include <gtsam/slam/SmartProjectionPoseFactor.h>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -33,6 +31,9 @@
 #include <gtsam/base/Vector.h>
 #include <gtsam/base/types.h>
 #include <gtsam/geometry/Cal3.h>
+#include <gtsam/geometry/Cal3_S2.h>
+#include <gtsam/inference/Factor.h>
+#include <gtsam/slam/SmartProjectionPoseFactor.h>
 
 #include "CoreTypes.hpp"
 #include "pool_slam/SystemTypes.hpp"
@@ -159,7 +160,7 @@ class Backend{
     void processLfPacket(const BackendLfPacket &pkt);
 
     // Sync 3d landmarks to the LfTracker
-    void syncLfTracker(uint32_t currentFrameId, bool forceAll);
+    void syncLfTracker(bool forceAll);
 
     // Published pose to the buffer
     void publishPose(const gtsam::Pose3 &pose, const gtsam::Vector3 &velocity, double timestamp);

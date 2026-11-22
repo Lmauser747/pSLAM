@@ -2,6 +2,7 @@
 #include <atomic>
 #include <iterator>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include <cstddef>
 #include <cmath>
@@ -161,8 +162,8 @@ std::optional<Eigen::Vector3d> ImuStream::getAverageAcceleration(double tEnd, do
     }
     if(count == 0){
         for(ptrdiff_t i = static_cast<ptrdiff_t>(imuBuffer.size()) - 1; i >= static_cast<ptrdiff_t>(head); --i){
-            if(imuBuffer[i].timestamp <= tEnd){
-                return imuBuffer[i].a;
+            if(imuBuffer[static_cast<size_t>(i)].timestamp <= tEnd){
+                return imuBuffer[static_cast<size_t>(i)].a;
             }
         }
         return std::nullopt;
@@ -189,8 +190,8 @@ std::optional<Eigen::Vector3d> ImuStream::getAverageAngularVelocity(double tEnd,
     }
     if(count == 0){
         for(ptrdiff_t i = static_cast<ptrdiff_t>(imuBuffer.size()) - 1; i >= static_cast<ptrdiff_t>(head); --i){
-            if(imuBuffer[i].timestamp <= tEnd){
-                return imuBuffer[i].w;
+            if(imuBuffer[static_cast<size_t>(i)].timestamp <= tEnd){
+                return imuBuffer[static_cast<size_t>(i)].w;
             }
         }
         return std::nullopt;

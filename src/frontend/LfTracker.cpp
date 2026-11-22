@@ -349,8 +349,8 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
     }
 
     if(matching.curFeatures.cols() < static_cast<Eigen::Index>(curKf.features.size())){
-        matching.curFeatures.resize(3, curKf.features.size());
-        matching.matchLandmarks.resize(3, curKf.features.size());
+        matching.curFeatures.resize(3, static_cast<int>(curKf.features.size()));
+        matching.matchLandmarks.resize(3, static_cast<int>(curKf.features.size()));
     }
 
     // Match features
@@ -567,7 +567,7 @@ void LfTracker::undistort(Eigen::Matrix3Xd &pts, size_t count){
     float fyInv = 1.0f / config.K(1, 1);
     // START VECTORIZE
     for(size_t i = 0; i < count; i++){
-        auto pt = pts.col(i).cast<float>();
+        auto pt = pts.col(static_cast<int>(i)).cast<float>();
         if(!std::isfinite(pt.x()) || !std::isfinite(pt.y())){
             continue;
         }

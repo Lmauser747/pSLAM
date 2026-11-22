@@ -1,16 +1,10 @@
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
-#include <gtsam/geometry/Cal3.h>
-#include <gtsam/geometry/Pose3.h>
-#include <gtsam/geometry/Quaternion.h>
-#include <gtsam/geometry/Rot3.h>
-#include <gtsam/inference/Factor.h>
-#include <gtsam/navigation/NavState.h>
-#include <gtsam/nonlinear/ISAM2Result.h>
-#include <gtsam/nonlinear/PriorFactor.h>
+#include <iostream>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -26,6 +20,16 @@
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/geometry/Cal3_S2.h>
 #include <gtsam/slam/SmartProjectionPoseFactor.h>
+#include <gtsam/geometry/Cal3.h>
+#include <gtsam/geometry/Point3.h>
+#include <gtsam/geometry/Pose3.h>
+#include <gtsam/geometry/Quaternion.h>
+#include <gtsam/geometry/Rot3.h>
+#include <gtsam/inference/Factor.h>
+#include <gtsam/linear/linearExceptions.h>
+#include <gtsam/navigation/NavState.h>
+#include <gtsam/nonlinear/ISAM2Result.h>
+#include <gtsam/nonlinear/PriorFactor.h>
 
 #include "backend/Backend.hpp"
 #include "CoreTypes.hpp"
@@ -227,7 +231,7 @@ void Backend::processKeyframe(const BackendHfPacket &pkt){
         trackedKeyframes.push_back(kf);
 
         publishPose(prevNavState.pose(), prevNavState.velocity(), pkt.timestamp);
-        syncLfTracker(pkt.frameId, loopClosed);
+        syncLfTracker(loopClosed);
     }
 }
 
@@ -363,7 +367,7 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
     prevTimestamp = pkt.timestamp;
 }
 
-void Backend::syncLfTracker(uint32_t currentFrameId, bool forceAll){
+void Backend::syncLfTracker(bool forceAll){
     for(auto &kf : trackedKeyframes){
         BackendKeyframeUpdate update;
         update.id = kf.frameId;

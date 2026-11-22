@@ -1,6 +1,7 @@
-#include "pool_slam/System.hpp"
-#include "core/Core.hpp"
-
+#include <cstddef>
+#include <cstdint>
+#include <ios>
+#include <memory>
 #include <utility>
 #include <fstream>
 #include <stdexcept>
@@ -8,6 +9,13 @@
 #include <gtsam/geometry/Point3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/geometry/Rot3.h>
+
+#include "pool_slam/System.hpp"
+#include "backend/Backend.hpp"
+#include "core/Core.hpp"
+#include "frontend/Frontend.hpp"
+#include "pool_slam/HalTypes.hpp"
+#include "pool_slam/SystemTypes.hpp"
 
 namespace PoolSLAM {
 
@@ -24,7 +32,7 @@ System::System(SystemConfig sysConfig)
          0.0f, 0.0f, 1.0f;
     feConfig.K = K;
     feConfig.dist = {config.k1, config.k2, config.p1, config.p2};
-    feConfig.bodyToCameraRot = config.bodyToCamera.block<3, 3>(0, 0).cast<float>();
+    feConfig.bodyToCameraRot = config.bodyToCamera.block<3, 3>(0, 0);
 
     feConfig.lfConfig.w = feConfig.w;
     feConfig.lfConfig.h = feConfig.h;
