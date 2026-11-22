@@ -46,7 +46,7 @@ struct VisualFeatureObs{
     gtsam::Point2 pt = Eigen::Vector2d::Zero(); // Normalized camera coordinates <x/, x/z> 
     bool isNewTrack = false;
 
-    VisualFeatureObs(uint32_t id, const gtsam::Point2 &p, bool isNew = false);
+    VisualFeatureObs(uint32_t id, const gtsam::Point2 &p, bool isNew = false) : featureId(id), pt(p), isNewTrack(isNew){}
 };
 
 // Data passed from the Frontend to the backend

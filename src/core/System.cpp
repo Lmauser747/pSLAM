@@ -52,6 +52,7 @@ System::System(SystemConfig sysConfig)
             config.initialPose.block<3, 1>(0, 3)
         );
     }
+    beConfig.K = K.cast<double>();
 
     if (!config.vocabPath.empty()) {
         std::ifstream testStream(config.vocabPath, std::ios::binary);

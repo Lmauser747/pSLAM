@@ -48,7 +48,7 @@ size_t HfTracker::getFast(const uint8_t *curBuffer, size_t bucket){
     #ifdef POOL_SLAM_SIMD
     size_t lineWidth = 16;
     #else
-    size_t lineWidth = 1
+    size_t lineWidth = 1;
     std::array<uint8_t, 16> ring = {0};
     #endif
     // START VECTORIZE

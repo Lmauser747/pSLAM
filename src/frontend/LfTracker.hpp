@@ -35,13 +35,14 @@ struct LfTrackerConfig{
     // size_t targetFeatureCount; // Target number of QOV features per-frame
     // float fastThreshold = 20.0f; // Threshold for FAST in QOV
 
-    float minTfIdfScore; // Minimum score for TF-IDF
-    size_t excludedFrames; // Number of previous frames to exclude to ensure long-term matches
+    float minTfIdfScore = 0.05f; // Minimum score for TF-IDF
+    size_t excludedFrames = 20; // Number of previous frames to exclude to ensure long-term matches
 
     uint32_t ransacInliearThreshold = 20; // Minimum number of RANSAC inliers
     int ransacIters = 20;
     float minInliearRatio = 0.30f; // Minimum ratio of inlier to total landmarks
     float maxReprojectionError = 2.00f; // Maximum reprojection error from mathec frame to current frame
+    
 
 };
 
