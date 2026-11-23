@@ -150,7 +150,9 @@ private:
     // Do LMA to find the optimal pose
     bool refinePoseLM(size_t numInliers, const Eigen::Matrix3d& K_cam, Eigen::Matrix<double, 3, 4>& Tcand, Eigen::Matrix<double, 6, 6>& outCovariance);
 
-    friend class LfTrackerTest;
+    friend class TestLfTracker;
+    friend class TestLma;
+    friend class TestP3p;
 public:
     LfTracker(LfTrackerConfig c, const std::string &vocabPath) : config(c), qovPairs(config.w),
     vocabTree(vocabPath){

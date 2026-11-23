@@ -93,13 +93,6 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
 
         // Update estimate based on the gradient
         ptEst += delta;
-
-        // Check for convergence
-        // float stepMagSqaured = delta.dot(delta);
-        // if(stepMagSqaured < ICLK_CONVERGENCE_THRESHOLD){
-        //     converged =  true;
-        //     break;
-        // }
     }
 
     if(!converged || (madError > ICLK_MAD_THRESHOLD)){

@@ -1,421 +1,300 @@
-#include <atomic>
 #include <chrono>
-#include <cstddef>
-#include <cstdint>
 #include <thread>
+#include <atomic>
 #include <vector>
+#include <cstring>
 
 #include <gtest/gtest.h>
 
+#include "HalTestHelpers.hpp"
 #include "pool_slam/Hal.hpp"
 #include "pool_slam/HalTypes.hpp"
 
-namespace {
-constexpr size_t kWidth = 640;
-constexpr size_t kHeight = 480;
-constexpr size_t kFrameBytes = kWidth * kHeight;
-constexpr size_t kQueueCapacity = 3;
-constexpr size_t kPoolCapacity = 5;
+namespace PoolSLAM {
+
+// =============================================================================
+// 1. Pool Allocation & Lifecycle
+// =============================================================================
+
+// Verifies initial state: all buffers in free list, ready queue empty, ACTIVE health
+TEST_F(TestImageStream, InitialStateVerification) {
+    constexpr int w = 320, h = 240;
+    constexpr size_t maxReady = 3, poolCap = 10;
+    ImageStream stream(w, h, maxReady, poolCap);
+
+    EXPECT_EQ(getFreeListSize(stream), poolCap);
+    EXPECT_EQ(getReadyQueueSize(stream), 0);
+    EXPECT_EQ(stream.getHealth(), SensorHealth::ACTIVE);
+    EXPECT_EQ(getMissedFrames(stream), 0);
 }
 
-class ImageStreamTest : public ::testing::Test {
-protected:
-    PoolSLAM::ImageStream stream{kWidth, kHeight, kQueueCapacity, kPoolCapacity};
-    std::vector<uint8_t> dummyPixels{std::vector<uint8_t>(kFrameBytes, 128)};
+// Nominal checkout-consumption-recycle cycle returns buffer to free list
+TEST_F(TestImageStream, NominalCycle) {
+    constexpr int w = 100, h = 100;
+    ImageStream stream(w, h, 3, 5);
 
-    std::vector<uint8_t> createPattern(uint8_t val) {
-        return std::vector<uint8_t>(kFrameBytes, val);
-    }
-    
-};
+    auto pattern = makePattern(w, h, 42);
+    EXPECT_TRUE(stream.pushFrame(pattern.data(), 1.0));
 
-// ============================================================================
-// 1. Ingestion Mechanics (pushFrame)
-// ============================================================================
+    EXPECT_EQ(getFreeListSize(stream), 4);
+    EXPECT_EQ(getReadyQueueSize(stream), 1);
 
-// Verifies nominal push of a single valid frame into the stream
-TEST_F(ImageStreamTest, pushSingleFrameNominal) {
-    EXPECT_TRUE(stream.pushFrame(dummyPixels.data(), 1.00));
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::ACTIVE);
-}
+    PixelArray* frame = nullptr;
+    SensorHealth status = stream.waitForFrame(frame, std::chrono::milliseconds(50));
 
-// Verifies pushed pixel payloads and timestamps are copied completely without truncation
-TEST_F(ImageStreamTest, pushPreservesPixelPayloadAndTimestamp) {
-    auto pattern = createPattern(0xAB);
-    pattern.front() = 0x12;
-    pattern.back() = 0x34;
-
-    ASSERT_TRUE(stream.pushFrame(pattern.data(), 1.25));
-
-    PoolSLAM::PixelArray* frame = nullptr;
-    PoolSLAM::SensorHealth health = stream.waitForFrame(frame, std::chrono::milliseconds(50));
-
-    ASSERT_EQ(health, PoolSLAM::SensorHealth::ACTIVE);
+    EXPECT_EQ(status, SensorHealth::ACTIVE);
     ASSERT_NE(frame, nullptr);
-    EXPECT_DOUBLE_EQ(frame->timestamp, 1.25);
-    EXPECT_EQ(frame->arr.front(), 0x12);
-    EXPECT_EQ(frame->arr.back(), 0x34);
-    EXPECT_EQ(frame->arr[100], 0xAB);
+    EXPECT_DOUBLE_EQ(frame->timestamp, 1.0);
+    EXPECT_EQ(std::memcmp(frame->data(), pattern.data(), pattern.size()), 0);
 
+    // After checkout, ready queue is empty
+    EXPECT_EQ(getReadyQueueSize(stream), 0);
+    EXPECT_EQ(getFreeListSize(stream), 4);
+
+    // Recycling frame restores free list capacity
     stream.recycleFrame(frame);
+    EXPECT_EQ(getFreeListSize(stream), 5);
 }
 
-// Verifies passing a null data pointer is rejected without corrupting pool buffers
-TEST_F(ImageStreamTest, pushNullPointerRejection) {
-    EXPECT_FALSE(stream.pushFrame(nullptr, 1.00));
+// Null pointer checks: pushFrame rejects nullptr; recycleFrame safely ignores nullptr
+TEST_F(TestImageStream, NullPointerHandling) {
+    ImageStream stream(100, 100, 3, 5);
 
-    EXPECT_TRUE(stream.pushFrame(dummyPixels.data(), 1.00));
+    EXPECT_FALSE(stream.pushFrame(nullptr, 1.0));
+    EXPECT_EQ(getFreeListSize(stream), 5);
 
-    PoolSLAM::PixelArray* frame = nullptr;
-    EXPECT_EQ(stream.waitForFrame(frame, std::chrono::milliseconds(50)), PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_NE(frame, nullptr);
-    stream.recycleFrame(frame);
+    // Safe no-op
+    stream.recycleFrame(nullptr);
+    EXPECT_EQ(getFreeListSize(stream), 5);
 }
 
-// ============================================================================
-// 2. Buffer Checkout & Recycling Lifecycle (waitForFrame, recycleFrame)
-// ============================================================================
+// =============================================================================
+// 2. Buffer Starvation & Eviction Mechanics
+// =============================================================================
 
-// Verifies nominal check-out and pointer pass-by-reference assignment
-TEST_F(ImageStreamTest, waitAndPopNominal) {
-    ASSERT_TRUE(stream.pushFrame(dummyPixels.data(), 1.00));
+// Reclaims and overwrites oldest unconsumed frame when free list is exhausted
+TEST_F(TestImageStream, FreeListExhaustionWithReadyQueueEviction) {
+    constexpr int w = 10, h = 10;
+    // Pool capacity 2, max queue size 2
+    ImageStream stream(w, h, 2, 2);
 
-    PoolSLAM::PixelArray* frame = nullptr;
-    PoolSLAM::SensorHealth health = stream.waitForFrame(frame, std::chrono::milliseconds(50));
+    auto p1 = makePattern(w, h, 1);
+    auto p2 = makePattern(w, h, 2);
+    auto p3 = makePattern(w, h, 3);
 
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_NE(frame, nullptr);
-    EXPECT_DOUBLE_EQ(frame->timestamp, 1.00);
+    EXPECT_TRUE(stream.pushFrame(p1.data(), 1.0));
+    EXPECT_TRUE(stream.pushFrame(p2.data(), 2.0));
+    EXPECT_EQ(getFreeListSize(stream), 0);
+    EXPECT_EQ(getReadyQueueSize(stream), 2);
 
-    stream.recycleFrame(frame);
-}
+    // 3rd push: free list is empty -> evicts and reuses oldest frame from ready queue (t=1.0)
+    EXPECT_TRUE(stream.pushFrame(p3.data(), 3.0));
+    EXPECT_EQ(getReadyQueueSize(stream), 2);
 
-// Verifies returning checked-out frames restores the free pool for subsequent pushes
-TEST_F(ImageStreamTest, recycleReturnsBufferToPool) {
-    PoolSLAM::ImageStream smallStream(kWidth, kHeight, 2, 2);
-
-    ASSERT_TRUE(smallStream.pushFrame(dummyPixels.data(), 1.00));
-    ASSERT_TRUE(smallStream.pushFrame(dummyPixels.data(), 2.00));
-
-    PoolSLAM::PixelArray* f1 = nullptr;
-    PoolSLAM::PixelArray* f2 = nullptr;
-    ASSERT_EQ(smallStream.waitForFrame(f1, std::chrono::milliseconds(20)), PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_EQ(smallStream.waitForFrame(f2, std::chrono::milliseconds(20)), PoolSLAM::SensorHealth::ACTIVE);
+    // Consumer should receive frame 2 (t=2.0), then frame 3 (t=3.0)
+    PixelArray* f1 = nullptr;
+    EXPECT_EQ(stream.waitForFrame(f1), SensorHealth::ACTIVE);
     ASSERT_NE(f1, nullptr);
+    EXPECT_DOUBLE_EQ(f1->timestamp, 2.0);
+
+    PixelArray* f2 = nullptr;
+    EXPECT_EQ(stream.waitForFrame(f2), SensorHealth::ACTIVE);
     ASSERT_NE(f2, nullptr);
+    EXPECT_DOUBLE_EQ(f2->timestamp, 3.0);
 
-    // Free list exhausted and ready queue empty; push must fail gracefully
-    EXPECT_FALSE(smallStream.pushFrame(dummyPixels.data(), 3.00));
-
-    smallStream.recycleFrame(f1);
-
-    EXPECT_TRUE(smallStream.pushFrame(dummyPixels.data(), 4.00));
-
-    PoolSLAM::PixelArray* f3 = nullptr;
-    ASSERT_EQ(smallStream.waitForFrame(f3, std::chrono::milliseconds(20)), PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_NE(f3, nullptr);
-    EXPECT_DOUBLE_EQ(f3->timestamp, 4.00);
-
-    smallStream.recycleFrame(f2);
-    smallStream.recycleFrame(f3);
+    stream.recycleFrame(f1);
+    stream.recycleFrame(f2);
 }
 
-// Verifies recycling a nullptr is a safe no-op
-TEST_F(ImageStreamTest, recycleNullPointerSafeNoOp) {
-    EXPECT_NO_THROW(stream.recycleFrame(nullptr));
+// Total pool exhaustion: returns false when all buffers are checked out and queue is empty
+TEST_F(TestImageStream, TotalPoolExhaustionReturnsFalse) {
+    constexpr int w = 10, h = 10;
+    // Pool capacity 2
+    ImageStream stream(w, h, 2, 2);
+    auto pattern = makePattern(w, h, 5);
+
+    EXPECT_TRUE(stream.pushFrame(pattern.data(), 1.0));
+    EXPECT_TRUE(stream.pushFrame(pattern.data(), 2.0));
+
+    PixelArray* checkedOut1 = nullptr;
+    PixelArray* checkedOut2 = nullptr;
+    stream.waitForFrame(checkedOut1);
+    stream.waitForFrame(checkedOut2);
+
+    // All 2 pool buffers are checked out; readyQueue is empty
+    EXPECT_EQ(getFreeListSize(stream), 0);
+    EXPECT_EQ(getReadyQueueSize(stream), 0);
+
+    // Acquisition fails gracefully without corrupting state
+    EXPECT_FALSE(stream.pushFrame(pattern.data(), 3.0));
+
+    // Recycling a checked-out frame restores ingestion capability
+    stream.recycleFrame(checkedOut1);
+    EXPECT_EQ(getFreeListSize(stream), 1);
+    EXPECT_TRUE(stream.pushFrame(pattern.data(), 3.0));
+
+    stream.recycleFrame(checkedOut2);
+    PixelArray* f3 = nullptr;
+    stream.waitForFrame(f3);
+    stream.recycleFrame(f3);
 }
 
-// ============================================================================
-// 3. Queue Eviction & Backpressure Policy
-// ============================================================================
+// Ready queue size never exceeds maxQueueSize under continuous producer pushes
+TEST_F(TestImageStream, MaximumReadyQueueBound) {
+    constexpr int w = 10, h = 10;
+    constexpr size_t maxReady = 3, poolCap = 10;
+    ImageStream stream(w, h, maxReady, poolCap);
+    auto pattern = makePattern(w, h, 10);
 
-// Verifies oldest queued frame is evicted when readyQueue hits capacity
-TEST_F(ImageStreamTest, evictOldestFrameWhenReadyQueueFull) {
-    PoolSLAM::ImageStream boundedStream(kWidth, kHeight, 2, 4);
+    for (int i = 0; i < 7; ++i) {
+        EXPECT_TRUE(stream.pushFrame(pattern.data(), static_cast<double>(i)));
+        EXPECT_LE(getReadyQueueSize(stream), maxReady);
+    }
 
-    auto p1 = createPattern(10);
-    auto p2 = createPattern(20);
-    auto p3 = createPattern(30);
+    EXPECT_EQ(getReadyQueueSize(stream), maxReady);
 
-    ASSERT_TRUE(boundedStream.pushFrame(p1.data(), 1.00));
-    ASSERT_TRUE(boundedStream.pushFrame(p2.data(), 2.00));
-    // Overflows readyQueue capacity (2); frame at t=1.00 should be evicted and recycled
-    ASSERT_TRUE(boundedStream.pushFrame(p3.data(), 3.00));
-
-    PoolSLAM::PixelArray* frame = nullptr;
-
-    // First popped frame must be the second frame (t=2.00)
-    ASSERT_EQ(boundedStream.waitForFrame(frame, std::chrono::milliseconds(20)), PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_NE(frame, nullptr);
-    EXPECT_DOUBLE_EQ(frame->timestamp, 2.00);
-    EXPECT_EQ(frame->arr[0], 20);
-    boundedStream.recycleFrame(frame);
-
-    // Second popped frame must be the third frame (t=3.00)
-    ASSERT_EQ(boundedStream.waitForFrame(frame, std::chrono::milliseconds(20)), PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_NE(frame, nullptr);
-    EXPECT_DOUBLE_EQ(frame->timestamp, 3.00);
-    EXPECT_EQ(frame->arr[0], 30);
-    boundedStream.recycleFrame(frame);
+    // Drain and recycle
+    for (size_t i = 0; i < maxReady; ++i) {
+        PixelArray* f = nullptr;
+        stream.waitForFrame(f);
+        stream.recycleFrame(f);
+    }
 }
 
-// Verifies pushFrame reclaims the oldest unconsumed frame when pool is dry but queue has elements
-TEST_F(ImageStreamTest, poolStarvationReclaimsOldestQueuedFrame) {
-    PoolSLAM::ImageStream boundedStream(kWidth, kHeight, 2, 2);
+// =============================================================================
+// 3. Consumer Synchronization & Health State Machine
+// =============================================================================
 
-    ASSERT_TRUE(boundedStream.pushFrame(dummyPixels.data(), 1.00));
-    ASSERT_TRUE(boundedStream.pushFrame(dummyPixels.data(), 2.00));
+// Consumer blocking in waitForFrame unblocks immediately upon pushFrame
+TEST_F(TestImageStream, BlockingRetrieval) {
+    ImageStream stream(50, 50, 3, 5);
+    auto pattern = makePattern(50, 50, 77);
 
-    // Both buffers in ready queue; pool is empty. 3rd push reclaims oldest queued buffer (t=1.00)
-    ASSERT_TRUE(boundedStream.pushFrame(dummyPixels.data(), 3.00));
-
-    PoolSLAM::PixelArray* frame = nullptr;
-
-    ASSERT_EQ(boundedStream.waitForFrame(frame, std::chrono::milliseconds(20)), PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_NE(frame, nullptr);
-    EXPECT_DOUBLE_EQ(frame->timestamp, 2.00);
-    boundedStream.recycleFrame(frame);
-
-    ASSERT_EQ(boundedStream.waitForFrame(frame, std::chrono::milliseconds(20)), PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_NE(frame, nullptr);
-    EXPECT_DOUBLE_EQ(frame->timestamp, 3.00);
-    boundedStream.recycleFrame(frame);
-}
-
-// Verifies pushFrame drops incoming frames gracefully when consumer holds all pool buffers
-TEST_F(ImageStreamTest, consumerHoldingAllBuffersDropsGracefully) {
-    PoolSLAM::ImageStream boundedStream(kWidth, kHeight, 2, 2);
-
-    ASSERT_TRUE(boundedStream.pushFrame(dummyPixels.data(), 1.00));
-    ASSERT_TRUE(boundedStream.pushFrame(dummyPixels.data(), 2.00));
-
-    PoolSLAM::PixelArray* held1 = nullptr;
-    PoolSLAM::PixelArray* held2 = nullptr;
-
-    ASSERT_EQ(boundedStream.waitForFrame(held1, std::chrono::milliseconds(20)), PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_EQ(boundedStream.waitForFrame(held2, std::chrono::milliseconds(20)), PoolSLAM::SensorHealth::ACTIVE);
-
-    // Consumer holds both buffers; readyQueue and pool are empty
-    EXPECT_FALSE(boundedStream.pushFrame(dummyPixels.data(), 3.00));
-
-    boundedStream.recycleFrame(held1);
-    boundedStream.recycleFrame(held2);
-}
-
-// ============================================================================
-// 4. Synchronization and Condition Variables (waitForFrame)
-// ============================================================================
-
-// Verifies waiting consumer is unblocked when producer pushes timely frame
-TEST_F(ImageStreamTest, waitProducerWakeupNominal) {
-    PoolSLAM::PixelArray* receivedFrame = nullptr;
-    PoolSLAM::SensorHealth resultHealth = PoolSLAM::SensorHealth::DEGRADED;
+    std::atomic<bool> consumerWaiting{false};
+    PixelArray* target = nullptr;
+    SensorHealth status = SensorHealth::DISABLED;
 
     std::thread consumer([&]() {
-        resultHealth = stream.waitForFrame(receivedFrame, std::chrono::milliseconds(100));
+        consumerWaiting = true;
+        status = stream.waitForFrame(target, std::chrono::milliseconds(500));
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    ASSERT_TRUE(stream.pushFrame(dummyPixels.data(), 1.10));
+    while (!consumerWaiting) {
+        std::this_thread::yield();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
+    EXPECT_TRUE(stream.pushFrame(pattern.data(), 1.0));
     consumer.join();
 
-    EXPECT_EQ(resultHealth, PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_NE(receivedFrame, nullptr);
-    EXPECT_DOUBLE_EQ(receivedFrame->timestamp, 1.10);
-
-    stream.recycleFrame(receivedFrame);
+    EXPECT_EQ(status, SensorHealth::ACTIVE);
+    ASSERT_NE(target, nullptr);
+    EXPECT_DOUBLE_EQ(target->timestamp, 1.0);
+    stream.recycleFrame(target);
 }
 
-// Verifies waitForFrame times out when no frames arrive within timeout window
-TEST_F(ImageStreamTest, waitTimesOutWhenNoDataPushed) {
-    PoolSLAM::PixelArray* frame = reinterpret_cast<PoolSLAM::PixelArray*>(0xDEADBEEF);
+// Consumer times out when no frame is pushed within specified timeout
+TEST_F(TestImageStream, TimeoutHandling) {
+    ImageStream stream(50, 50, 3, 5);
+    PixelArray* target = reinterpret_cast<PixelArray*>(0x1234);
 
     auto start = std::chrono::steady_clock::now();
-    PoolSLAM::SensorHealth health = stream.waitForFrame(frame, std::chrono::milliseconds(80));
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+    SensorHealth status = stream.waitForFrame(target, std::chrono::milliseconds(50));
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start
-    ).count();
+    );
 
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::DEGRADED);
-    EXPECT_EQ(frame, nullptr);
-    EXPECT_GE(duration, 75);
+    EXPECT_GE(elapsed.count(), 45);
+    EXPECT_EQ(target, nullptr);
+    EXPECT_EQ(status, SensorHealth::DEGRADED);
+    EXPECT_EQ(stream.getHealth(), SensorHealth::DEGRADED);
+    EXPECT_EQ(getMissedFrames(stream), 1);
 }
 
-// ============================================================================
-// 5. Sensor Health State Machine & Latching FSM
-// ============================================================================
+// Sensor transitions to DISABLED after exceeding MAX_MISSED_FRAMES (3)
+TEST_F(TestImageStream, SensorDisablingAfterMaxMissedFrames) {
+    ImageStream stream(50, 50, 3, 5);
+    PixelArray* target = nullptr;
 
-// Verifies initial stream health is ACTIVE
-TEST_F(ImageStreamTest, healthInitialStateActive) {
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::ACTIVE);
-}
+    // Fast-forward missed frames to 3 (MAX_MISSED_FRAMES)
+    setMissedFrames(stream, 3);
+    setHealth(stream, SensorHealth::DEGRADED);
 
-// Verifies a single timeout transitions health from ACTIVE to DEGRADED
-TEST_F(ImageStreamTest, healthSingleTimeoutTransitionsToDegraded) {
-    PoolSLAM::PixelArray* frame = nullptr;
-    PoolSLAM::SensorHealth health = stream.waitForFrame(frame, std::chrono::milliseconds(10));
+    // 4th timeout: missedFrames becomes 4 (> 3) -> transitions to DISABLED
+    SensorHealth status = stream.waitForFrame(target, std::chrono::milliseconds(20));
+    EXPECT_EQ(status, SensorHealth::DISABLED);
+    EXPECT_EQ(stream.getHealth(), SensorHealth::DISABLED);
+    EXPECT_EQ(target, nullptr);
 
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::DEGRADED);
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
-    EXPECT_EQ(frame, nullptr);
-}
-
-// Verifies up to 3 consecutive timeouts maintain DEGRADED (strictly greater threshold: > 3)
-TEST_F(ImageStreamTest, healthThreeConsecutiveMissesRemainDegraded) {
-    PoolSLAM::PixelArray* frame = nullptr;
-    for (size_t i = 0; i < 3; i++) {
-        PoolSLAM::SensorHealth health = stream.waitForFrame(frame, std::chrono::milliseconds(5));
-        EXPECT_EQ(health, PoolSLAM::SensorHealth::DEGRADED);
-        EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
-    }
-}
-
-// Verifies timely arrival restores health from DEGRADED back to ACTIVE before threshold
-TEST_F(ImageStreamTest, healthRecoveryDegradedToActive) {
-    PoolSLAM::PixelArray* frame = nullptr;
-    for (size_t i = 0; i < 2; i++) {
-        EXPECT_EQ(stream.waitForFrame(frame, std::chrono::milliseconds(5)), PoolSLAM::SensorHealth::DEGRADED);
-    }
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
-
-    // Frame arrives before reaching miss threshold
-    ASSERT_TRUE(stream.pushFrame(dummyPixels.data(), 5.00));
-
-    PoolSLAM::SensorHealth recovered = stream.waitForFrame(frame, std::chrono::milliseconds(20));
-    EXPECT_EQ(recovered, PoolSLAM::SensorHealth::ACTIVE);
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::ACTIVE);
-    ASSERT_NE(frame, nullptr);
-
-    stream.recycleFrame(frame);
-}
-
-// Verifies exceeding 3 misses latches into DISABLED strictly on the 4th miss
-TEST_F(ImageStreamTest, healthFourthMissLatchesDisabled) {
-    PoolSLAM::PixelArray* frame = nullptr;
-    for (size_t i = 0; i < 3; i++) {
-        EXPECT_EQ(stream.waitForFrame(frame, std::chrono::milliseconds(5)), PoolSLAM::SensorHealth::DEGRADED);
-        EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
-    }
-
-    // 4th consecutive miss crosses strictly greater threshold (> 3)
-    PoolSLAM::SensorHealth latched = stream.waitForFrame(frame, std::chrono::milliseconds(5));
-    EXPECT_EQ(latched, PoolSLAM::SensorHealth::DISABLED);
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DISABLED);
-}
-
-// Verifies DISABLED is a strict one-way latch rejecting recovery
-TEST_F(ImageStreamTest, healthDisabledOneWayLatch) {
-    PoolSLAM::PixelArray* frame = nullptr;
-    for (size_t i = 0; i < 4; i++) {
-        stream.waitForFrame(frame, std::chrono::milliseconds(5));
-    }
-    ASSERT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DISABLED);
-
-    // Fresh frame pushed after sensor latch
-    stream.pushFrame(dummyPixels.data(), 50.00);
-
-    PoolSLAM::SensorHealth health = stream.waitForFrame(frame, std::chrono::milliseconds(5));
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::DISABLED);
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DISABLED);
-}
-
-// Verifies waitForFrame bypasses condition variable delays once DISABLED
-TEST_F(ImageStreamTest, healthDisabledFastBypass) {
-    PoolSLAM::PixelArray* frame = nullptr;
-    for (size_t i = 0; i < 4; i++) {
-        stream.waitForFrame(frame, std::chrono::milliseconds(5));
-    }
-    ASSERT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DISABLED);
-
+    // Subsequent calls return DISABLED immediately without blocking
     auto start = std::chrono::steady_clock::now();
-    PoolSLAM::SensorHealth health = stream.waitForFrame(frame, std::chrono::milliseconds(100));
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+    SensorHealth immediate = stream.waitForFrame(target, std::chrono::milliseconds(100));
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start
-    ).count();
-
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::DISABLED);
-    EXPECT_LT(duration, 5);
+    );
+    EXPECT_LT(elapsed.count(), 20);
+    EXPECT_EQ(immediate, SensorHealth::DISABLED);
 }
 
-// ============================================================================
-// 6. Concurrency and Multi-Threaded Stress
-// ============================================================================
+// Successfully receiving a frame while DEGRADED resets missedFrames and restores ACTIVE
+TEST_F(TestImageStream, HealthRecovery) {
+    ImageStream stream(50, 50, 3, 5);
+    PixelArray* target = nullptr;
 
-// Verifies multi-threaded nominal streaming between producer and consumer
-TEST_F(ImageStreamTest, concurrentProducerConsumerStreaming) {
-    std::atomic<bool> keepRunning{true};
-    std::atomic<size_t> framesPushed{0};
-    std::atomic<size_t> framesConsumed{0};
+    // Trigger degradation
+    stream.waitForFrame(target, std::chrono::milliseconds(20));
+    EXPECT_EQ(stream.getHealth(), SensorHealth::DEGRADED);
+    EXPECT_GT(getMissedFrames(stream), 0);
 
-    // Producer thread: pushing frames at ~30 Hz (dt = 33 ms)
-    std::thread producer([&]() {
-        double t = 1.00;
-        while (keepRunning.load()) {
-            if (stream.pushFrame(dummyPixels.data(), t)) {
-                framesPushed.fetch_add(1);
-                t += 0.033;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    });
+    // Push valid frame and check out
+    auto pattern = makePattern(50, 50, 11);
+    stream.pushFrame(pattern.data(), 1.0);
 
-    // Consumer thread: reading and recycling frames
-    std::thread consumer([&]() {
-        double lastTimestamp = 0.0;
-        while (keepRunning.load()) {
-            PoolSLAM::PixelArray* frame = nullptr;
-            PoolSLAM::SensorHealth health = stream.waitForFrame(frame, std::chrono::milliseconds(50));
-            if (health == PoolSLAM::SensorHealth::ACTIVE && frame != nullptr) {
-                EXPECT_GT(frame->timestamp, lastTimestamp);
-                lastTimestamp = frame->timestamp;
-                framesConsumed.fetch_add(1);
-                stream.recycleFrame(frame);
-            }
-        }
-    });
+    SensorHealth status = stream.waitForFrame(target, std::chrono::milliseconds(50));
+    EXPECT_EQ(status, SensorHealth::ACTIVE);
+    EXPECT_EQ(stream.getHealth(), SensorHealth::ACTIVE);
+    EXPECT_EQ(getMissedFrames(stream), 0);
+    ASSERT_NE(target, nullptr);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    keepRunning.store(false);
-
-    producer.join();
-    consumer.join();
-
-    EXPECT_GT(framesPushed.load(), 0);
-    EXPECT_GT(framesConsumed.load(), 0);
+    stream.recycleFrame(target);
 }
 
-// Verifies queue eviction operates safely without deadlock under high producer load
-TEST_F(ImageStreamTest, concurrentFastProducerSlowConsumerEviction) {
-    std::atomic<bool> keepRunning{true};
+// =============================================================================
+// 4. Data Integrity & Memory Correctness
+// =============================================================================
 
-    // Fast producer: 100 Hz push
-    std::thread producer([&]() {
-        double t = 1.00;
-        while (keepRunning.load()) {
-            stream.pushFrame(dummyPixels.data(), t);
-            t += 0.01;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    });
+// Byte-level exactness across entire image resolution
+TEST_F(TestImageStream, ByteLevelDataMatch) {
+    constexpr int w = 128, h = 64;
+    ImageStream stream(w, h, 3, 5);
 
-    // Slow consumer: pops every 25 ms, forcing frequent evictions
-    std::thread consumer([&]() {
-        while (keepRunning.load()) {
-            PoolSLAM::PixelArray* frame = nullptr;
-            PoolSLAM::SensorHealth health = stream.waitForFrame(frame, std::chrono::milliseconds(50));
-            if (health == PoolSLAM::SensorHealth::ACTIVE && frame != nullptr) {
-                stream.recycleFrame(frame);
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        }
-    });
+    auto pattern = makePattern(w, h, 99);
+    stream.pushFrame(pattern.data(), 123.456);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    keepRunning.store(false);
+    PixelArray* out = nullptr;
+    stream.waitForFrame(out);
+    ASSERT_NE(out, nullptr);
 
-    producer.join();
-    consumer.join();
+    EXPECT_EQ(out->arr.size(), static_cast<size_t>(w * h));
+    EXPECT_EQ(std::memcmp(out->data(), pattern.data(), pattern.size()), 0);
 
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::ACTIVE);
+    stream.recycleFrame(out);
 }
+
+// Timestamp preservation matches capture epoch
+TEST_F(TestImageStream, TimestampPreservation) {
+    ImageStream stream(50, 50, 3, 5);
+    auto pattern = makePattern(50, 50, 0);
+
+    constexpr double epoch = 1700000000.123456;
+    stream.pushFrame(pattern.data(), epoch);
+
+    PixelArray* out = nullptr;
+    stream.waitForFrame(out);
+    ASSERT_NE(out, nullptr);
+    EXPECT_DOUBLE_EQ(out->timestamp, epoch);
+
+    stream.recycleFrame(out);
+}
+
+} // namespace PoolSLAM

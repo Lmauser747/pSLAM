@@ -36,8 +36,6 @@ struct TrackedFeature{
     std::array<uint8_t, NUM_PIXELS> patch; // Patch of pixels for IC-LK
     std::array<int, NUM_PIXELS> xGrad, yGrad; // Gradient in x and y directions 
 
-    uint32_t Mad = 0.0; // Mean absolute difference between last two patches
-
     Eigen::Matrix2f HInv{{0.0, 0.0}, {0.0, 0.0}};
 };
 

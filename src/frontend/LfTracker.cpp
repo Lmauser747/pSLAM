@@ -20,9 +20,8 @@
 #include <gtsam/linear/LossFunctions.h>
 
 #include "frontend/LfTracker.hpp"
-#include "descriptor/Qov.hpp"
 #include "CoreTypes.hpp"
-#include "descriptor/BinaryBow.hpp"
+#include "descriptor/Qov.hpp"
 
 namespace PoolSLAM{
 

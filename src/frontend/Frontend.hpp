@@ -12,7 +12,6 @@
 
 #include <eigen3/Eigen/Dense>
 #include <gtsam/navigation/ImuBias.h>
-#include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/navigation/PreintegrationParams.h>
 
 #include "CoreTypes.hpp"
@@ -66,7 +65,7 @@ class Frontend{
     // Function to run in frontendThread
     void processPacket(); 
 
-    friend class FrontendTest;
+    friend class TestFrontend;
 public:
     Frontend(const FrontendConfig &configuration, Synchronizer &syncronizer, const std::string &vocabPath) : config(configuration), sync(syncronizer), hf(config.w, config.h, config.K, config.dist), lf(config.lfConfig, vocabPath){}
 

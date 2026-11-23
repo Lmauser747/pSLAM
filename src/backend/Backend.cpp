@@ -20,7 +20,6 @@
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/geometry/Cal3_S2.h>
 #include <gtsam/slam/SmartProjectionPoseFactor.h>
-#include <gtsam/geometry/Cal3.h>
 #include <gtsam/geometry/Point3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/geometry/Quaternion.h>
@@ -37,11 +36,9 @@
 #include "frontend/LfTracker.hpp"
 #include "pool_slam/SystemTypes.hpp"
 
-
 namespace PoolSLAM{
 
 using gtsam::symbol_shorthand::B;
-using gtsam::symbol_shorthand::L;
 using gtsam::symbol_shorthand::V;
 using gtsam::symbol_shorthand::X;
 

@@ -1,699 +1,385 @@
-#include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <thread>
+#include <atomic>
 #include <vector>
+#include <optional>
 
 #include <gtest/gtest.h>
+#include <eigen3/Eigen/Core>
 
+#include "HalTestHelpers.hpp"
 #include "pool_slam/Hal.hpp"
 #include "pool_slam/HalTypes.hpp"
 
-namespace {
-constexpr double kEps = 1e-6;
-}
+namespace PoolSLAM {
 
-class ImuStreamTest : public ::testing::Test {
-protected:
-    PoolSLAM::ImuStream stream;
+// =============================================================================
+// 1. Ingestion & Buffer Mechanics
+// =============================================================================
 
-    static PoolSLAM::Imu createImu(double t, double val = 0.0) {
-        PoolSLAM::Imu sample{};
-        sample.timestamp = t;
-        sample.a = {val, 0.0, 0.0};
-        sample.w = {0.0, val, 0.0};
-        sample.t = static_cast<float>(val);
-        return sample;
+// Verifies monotonic sequential ingestion into the IMU buffer
+TEST_F(TestImuStream, MonotonicSequentialIngestion) {
+    ImuStream stream(100);
+
+    for (int i = 1; i <= 5; ++i) {
+        double t = static_cast<double>(i) * 0.01;
+        EXPECT_TRUE(stream.pushImu(makeImu(t, Eigen::Vector3d(0, 0, 9.81), Eigen::Vector3d::Zero())));
     }
 
-    static constexpr int MAX_MISSES = 3;
-};
-
-// ============================================================================
-// 1. Ingestion and Buffer Mechanics (pushImu)
-// ============================================================================
-
-// Verifies nominal ingestion of a single IMU sample
-TEST_F(ImuStreamTest, pushSingleSampleNominal) {
-    EXPECT_NO_THROW(stream.pushImu(createImu(1.00, 2.5)));
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::ACTIVE);
+    EXPECT_EQ(getBufferSize(stream), 5);
+    const auto& buf = getBuffer(stream);
+    EXPECT_DOUBLE_EQ(buf.front().timestamp, 0.01);
+    EXPECT_DOUBLE_EQ(buf.back().timestamp, 0.05);
 }
 
-// Verifies fast-path chronological push under monotonic timestamps
-TEST_F(ImuStreamTest, pushMonotonicSequenceFastPath) {
-    for (size_t i = 0; i < 50; i++) {
-        double t = 1.00 + (static_cast<double>(i) * 0.05);
-        double val = 10.0 + static_cast<double>(i);
-        EXPECT_NO_THROW(stream.pushImu(createImu(t, val)));
+// Verifies rejection of samples older than the active logical head
+TEST_F(TestImuStream, RejectionOfStaleSamples) {
+    ImuStream stream(100);
+    stream.pushImu(makeImu(1.0, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()));
+    stream.pushImu(makeImu(1.1, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()));
+
+    // Stale sample with timestamp older than head (1.0)
+    EXPECT_FALSE(stream.pushImu(makeImu(0.95, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero())));
+    EXPECT_EQ(getBufferSize(stream), 2);
+}
+
+// Verifies out-of-order in-window sample insertion maintains sorted order
+TEST_F(TestImuStream, SortedInsertionOutOfOrderWithinWindow) {
+    ImuStream stream(100);
+    stream.pushImu(makeImu(1.0, Eigen::Vector3d(1, 0, 0), Eigen::Vector3d::Zero()));
+    stream.pushImu(makeImu(1.2, Eigen::Vector3d(3, 0, 0), Eigen::Vector3d::Zero()));
+
+    // Out-of-order sample within window [1.0, 1.2)
+    EXPECT_TRUE(stream.pushImu(makeImu(1.1, Eigen::Vector3d(2, 0, 0), Eigen::Vector3d::Zero())));
+    EXPECT_EQ(getBufferSize(stream), 3);
+
+    const auto& buf = getBuffer(stream);
+    EXPECT_DOUBLE_EQ(buf[0].timestamp, 1.0);
+    EXPECT_DOUBLE_EQ(buf[1].timestamp, 1.1);
+    EXPECT_DOUBLE_EQ(buf[2].timestamp, 1.2);
+    EXPECT_DOUBLE_EQ(buf[1].a.x(), 2.0);
+}
+
+// Verifies immediate rejection when sensor health is DISABLED
+TEST_F(TestImuStream, RejectionWhenDisabled) {
+    ImuStream stream(100);
+    setHealth(stream, SensorHealth::DISABLED);
+
+    EXPECT_FALSE(stream.pushImu(makeImu(1.0, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero())));
+    EXPECT_EQ(getBufferSize(stream), 0);
+}
+
+// =============================================================================
+// 2. Range Extraction & Interpolation
+// =============================================================================
+
+// Extraction fails if target end time is strictly before start time
+TEST_F(TestImuStream, ExtractionFailsWhenEndBeforeStart) {
+    ImuStream stream(100);
+    populateMonotonic(stream, 10, 1.0, 0.05);
+
+    std::vector<Imu> extracted;
+    EXPECT_FALSE(stream.extractRange(1.3, 1.1, extracted));
+    EXPECT_TRUE(extracted.empty());
+}
+
+// Extraction fails if buffer contains fewer than 2 active samples
+TEST_F(TestImuStream, ExtractionFailsWhenInsufficientSamples) {
+    ImuStream stream(100);
+    std::vector<Imu> extracted;
+
+    // 0 samples
+    EXPECT_FALSE(stream.extractRange(1.0, 2.0, extracted));
+
+    // 1 sample
+    stream.pushImu(makeImu(1.0, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()));
+    EXPECT_FALSE(stream.extractRange(1.0, 2.0, extracted));
+}
+
+// Extraction fails when requested range extends outside available buffer span
+TEST_F(TestImuStream, ExtractionFailsOnUnderRunOrOverRun) {
+    ImuStream stream(100);
+    // Span: [1.0, 1.5]
+    populateMonotonic(stream, 6, 1.0, 0.1);
+
+    std::vector<Imu> extracted;
+    // Under-run: tStart (0.8) < oldest (1.0)
+    EXPECT_FALSE(stream.extractRange(0.8, 1.3, extracted));
+
+    // Over-run: tEnd (1.8) > newest (1.5)
+    EXPECT_FALSE(stream.extractRange(1.1, 1.8, extracted));
+}
+
+// Exact boundary match within DB_EPSILON (1e-5s) uses boundary samples directly
+TEST_F(TestImuStream, ExactBoundaryMatchWithinEpsilon) {
+    ImuStream stream(100);
+    stream.pushImu(makeImu(1.000000, Eigen::Vector3d(1, 0, 0), Eigen::Vector3d::Zero()));
+    stream.pushImu(makeImu(1.050000, Eigen::Vector3d(2, 0, 0), Eigen::Vector3d::Zero()));
+    stream.pushImu(makeImu(1.100000, Eigen::Vector3d(3, 0, 0), Eigen::Vector3d::Zero()));
+
+    std::vector<Imu> extracted;
+    // Query within 1e-6 (< DB_EPSILON = 1e-5) of boundaries
+    EXPECT_TRUE(stream.extractRange(1.000002, 1.099998, extracted));
+    ASSERT_GE(extracted.size(), 2);
+
+    EXPECT_DOUBLE_EQ(extracted.front().timestamp, 1.000002);
+    EXPECT_NEAR(extracted.front().a.x(), 1.0, 1e-4);
+    EXPECT_DOUBLE_EQ(extracted.back().timestamp, 1.099998);
+    EXPECT_NEAR(extracted.back().a.x(), 3.0, 1e-4);
+}
+
+// Boundary interpolation creates synthetic endpoint samples between raw samples
+TEST_F(TestImuStream, BoundaryInterpolationWhenBetweenSamples) {
+    ImuStream stream(100);
+    stream.pushImu(makeImu(1.0, Eigen::Vector3d(10, 0, 0), Eigen::Vector3d::Zero()));
+    stream.pushImu(makeImu(1.1, Eigen::Vector3d(20, 0, 0), Eigen::Vector3d::Zero()));
+    stream.pushImu(makeImu(1.2, Eigen::Vector3d(30, 0, 0), Eigen::Vector3d::Zero()));
+    stream.pushImu(makeImu(1.3, Eigen::Vector3d(40, 0, 0), Eigen::Vector3d::Zero()));
+
+    std::vector<Imu> extracted;
+    // Extract [1.05, 1.25]
+    EXPECT_TRUE(stream.extractRange(1.05, 1.25, extracted));
+    ASSERT_EQ(extracted.size(), 4);
+
+    // Index 0: interpolated at t=1.05 -> a.x = 15.0
+    EXPECT_DOUBLE_EQ(extracted[0].timestamp, 1.05);
+    EXPECT_NEAR(extracted[0].a.x(), 15.0, 1e-6);
+
+    // Index 1: raw sample at t=1.1
+    EXPECT_DOUBLE_EQ(extracted[1].timestamp, 1.1);
+    EXPECT_DOUBLE_EQ(extracted[1].a.x(), 20.0);
+
+    // Index 2: raw sample at t=1.2
+    EXPECT_DOUBLE_EQ(extracted[2].timestamp, 1.2);
+    EXPECT_DOUBLE_EQ(extracted[2].a.x(), 30.0);
+
+    // Index 3: interpolated at t=1.25 -> a.x = 35.0
+    EXPECT_DOUBLE_EQ(extracted[3].timestamp, 1.25);
+    EXPECT_NEAR(extracted[3].a.x(), 35.0, 1e-6);
+}
+
+// Linear interpolation accuracy across acceleration, angular velocity, and temperature
+TEST_F(TestImuStream, InterpolationAccuracyVectorAndScalar) {
+    ImuStream stream(10);
+    Imu first = makeImu(1.0, Eigen::Vector3d(2, 4, 6), Eigen::Vector3d(0.2, 0.4, 0.6), 20.0f);
+    Imu second = makeImu(2.0, Eigen::Vector3d(6, 12, 18), Eigen::Vector3d(0.6, 1.2, 1.8), 30.0f);
+
+    // Midpoint interpolation (alpha = 0.5)
+    Imu mid = callLinInter(stream, first, second, 1.5);
+    EXPECT_DOUBLE_EQ(mid.timestamp, 1.5);
+    EXPECT_TRUE(mid.a.isApprox(Eigen::Vector3d(4, 8, 12)));
+    EXPECT_TRUE(mid.w.isApprox(Eigen::Vector3d(0.4, 0.8, 1.2)));
+    EXPECT_NEAR(mid.t, 25.0f, 1e-5);
+}
+
+// Fallback to first sample when temporal interval is below MIN_DIFF (1e-6s)
+TEST_F(TestImuStream, InterpolationFallbackWhenDeltaBelowMinDiff) {
+    ImuStream stream(10);
+    Imu first = makeImu(1.0, Eigen::Vector3d(1, 2, 3), Eigen::Vector3d(0.1, 0.2, 0.3), 20.0f);
+    Imu second = makeImu(1.0 + 5e-7, Eigen::Vector3d(5, 5, 5), Eigen::Vector3d(1, 1, 1), 40.0f);
+
+    // dt < 1e-6 -> returns copy of first with target timestamp
+    Imu result = callLinInter(stream, first, second, 1.0 + 2e-7);
+    EXPECT_DOUBLE_EQ(result.timestamp, 1.0 + 2e-7);
+    EXPECT_TRUE(result.a.isApprox(first.a));
+    EXPECT_TRUE(result.w.isApprox(first.w));
+    EXPECT_FLOAT_EQ(result.t, first.t);
+}
+
+// =============================================================================
+// 3. Windowed Acceleration & Angular Velocity Averaging
+// =============================================================================
+
+// Averaging on an empty buffer returns std::nullopt
+TEST_F(TestImuStream, AverageOnEmptyBufferReturnsNullopt) {
+    ImuStream stream(100);
+    EXPECT_FALSE(stream.getAverageAcceleration(1.0).has_value());
+    EXPECT_FALSE(stream.getAverageAngularVelocity(1.0).has_value());
+}
+
+// Windowed averaging computes exact arithmetic mean over the requested horizon
+TEST_F(TestImuStream, UniformWindowAveraging) {
+    ImuStream stream(100);
+    // Push 5 samples over span [0.8, 1.0] with constant acceleration & gyro
+    for (int i = 0; i < 5; ++i) {
+        double t = 0.8 + static_cast<double>(i) * 0.05;
+        stream.pushImu(makeImu(t, Eigen::Vector3d(0, 0, 9.8), Eigen::Vector3d(0.1, 0.2, 0.3)));
     }
 
-    std::vector<PoolSLAM::Imu> batch;
-    ASSERT_TRUE(stream.extractRange(1.50, 1.55, batch));
-    ASSERT_GE(batch.size(), 2);
-    EXPECT_NEAR(batch.front().timestamp, 1.50, kEps);
-    EXPECT_NEAR(batch.front().a.x(), 20.0, kEps);
-    EXPECT_NEAR(batch.back().timestamp, 1.55, kEps);
-    EXPECT_NEAR(batch.back().a.x(), 21.0, kEps);
+    auto avgAccel = stream.getAverageAcceleration(1.0, 0.2);
+    ASSERT_TRUE(avgAccel.has_value());
+    EXPECT_TRUE(avgAccel->isApprox(Eigen::Vector3d(0, 0, 9.8), 1e-5));
+
+    auto avgGyro = stream.getAverageAngularVelocity(1.0, 0.2);
+    ASSERT_TRUE(avgGyro.has_value());
+    EXPECT_TRUE(avgGyro->isApprox(Eigen::Vector3d(0.1, 0.2, 0.3), 1e-5));
 }
 
-// Verifies out-of-order delayed packets are sorted chronologically
-TEST_F(ImuStreamTest, pushOutOfOrderSortedInsertion) {
-    stream.pushImu(createImu(1.00, 10.0));
-    stream.pushImu(createImu(1.10, 30.0));
-    stream.pushImu(createImu(1.20, 50.0));
+// Sparse fallback returns the single most recent historical sample
+TEST_F(TestImuStream, SparseWindowFallback) {
+    ImuStream stream(100);
+    // Samples at t=0.1, 0.2
+    stream.pushImu(makeImu(0.1, Eigen::Vector3d(1, 0, 0), Eigen::Vector3d::Zero()));
+    stream.pushImu(makeImu(0.2, Eigen::Vector3d(5, 0, 0), Eigen::Vector3d(0, 1, 0)));
 
-    // Delayed packet arrivals strictly greater than head
-    stream.pushImu(createImu(1.05, 20.0));
-    stream.pushImu(createImu(1.15, 40.0));
+    // Window [0.8, 1.0] is empty -> fallback finds sample at t=0.2
+    auto avgAccel = stream.getAverageAcceleration(1.0, 0.2);
+    ASSERT_TRUE(avgAccel.has_value());
+    EXPECT_DOUBLE_EQ(avgAccel->x(), 5.0);
 
-    std::vector<PoolSLAM::Imu> batchA;
-    ASSERT_TRUE(stream.extractRange(1.00, 1.10, batchA));
-    ASSERT_EQ(batchA.size(), 3);
-    EXPECT_NEAR(batchA[1].timestamp, 1.05, kEps);
-    EXPECT_NEAR(batchA[1].a.x(), 20.0, kEps);
-
-    std::vector<PoolSLAM::Imu> batchB;
-    ASSERT_TRUE(stream.extractRange(1.10, 1.20, batchB));
-    ASSERT_EQ(batchB.size(), 3);
-    EXPECT_NEAR(batchB[1].timestamp, 1.15, kEps);
-    EXPECT_NEAR(batchB[1].a.x(), 40.0, kEps);
+    auto avgGyro = stream.getAverageAngularVelocity(1.0, 0.2);
+    ASSERT_TRUE(avgGyro.has_value());
+    EXPECT_DOUBLE_EQ(avgGyro->y(), 1.0);
 }
 
-// Verifies out-of-order insertion strictly into the middle of existing samples
-TEST_F(ImuStreamTest, pushOutOfOrderMiddleInsertion) {
-    stream.pushImu(createImu(1.00, 10.0));
-    stream.pushImu(createImu(1.10, 20.0));
-    stream.pushImu(createImu(1.20, 30.0));
+// Averaging returns std::nullopt if all available samples lie in the future
+TEST_F(TestImuStream, FailureWhenAllSamplesInFuture) {
+    ImuStream stream(100);
+    stream.pushImu(makeImu(2.0, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()));
+    stream.pushImu(makeImu(2.1, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()));
 
-    // Insert sample into the middle (strictly after the head sample)
-    stream.pushImu(createImu(1.05, 15.0));
-
-    std::vector<PoolSLAM::Imu> batch;
-    ASSERT_TRUE(stream.extractRange(1.025, 1.075, batch));
-    ASSERT_GE(batch.size(), 2);
-    EXPECT_NEAR(batch.front().timestamp, 1.025, kEps);
-    EXPECT_NEAR(batch.front().a.x(), 12.5, kEps);
-    EXPECT_NEAR(batch.back().timestamp, 1.075, kEps);
-    EXPECT_NEAR(batch.back().a.x(), 17.5, kEps);
+    EXPECT_FALSE(stream.getAverageAcceleration(1.0, 0.2).has_value());
+    EXPECT_FALSE(stream.getAverageAngularVelocity(1.0, 0.2).has_value());
 }
 
-// Verifies the internal buffer dynamically grows to accommodate new data without evicting history
-TEST_F(ImuStreamTest, pushDynamicExpansionRetainsHistoricalData) {
-    constexpr size_t numSamples = 500;
-    for (size_t i = 0; i < numSamples; ++i) {
-        double t = 1.00 + (static_cast<double>(i) * 0.01);
-        stream.pushImu(createImu(t, static_cast<double>(i)));
+// =============================================================================
+// 4. Synchronization & Health Monitoring
+// =============================================================================
+
+// Producer wakes waiting consumer immediately upon arrival of a newer sample
+TEST_F(TestImuStream, ProducerConsumerUnblocksOnPush) {
+    ImuStream stream(100);
+    std::atomic<bool> consumerReady{false};
+    SensorHealth result = SensorHealth::DISABLED;
+
+    std::thread consumer([&]() {
+        consumerReady = true;
+        result = stream.waitUntil(1.0);
+    });
+
+    while (!consumerReady) {
+        std::this_thread::yield();
     }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    // Verify earliest history is preserved and not evicted
-    std::vector<PoolSLAM::Imu> earlyBatch;
-    ASSERT_TRUE(stream.extractRange(1.01, 1.05, earlyBatch));
-    ASSERT_GE(earlyBatch.size(), 2);
-    EXPECT_NEAR(earlyBatch.front().timestamp, 1.01, kEps);
-    EXPECT_NEAR(earlyBatch.front().a.x(), 1.0, kEps);
+    EXPECT_TRUE(stream.pushImu(makeImu(1.05, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero())));
+    consumer.join();
 
-    // Verify latest data is preserved
-    std::vector<PoolSLAM::Imu> lateBatch;
-    ASSERT_TRUE(stream.extractRange(5.90, 5.95, lateBatch));
-    ASSERT_GE(lateBatch.size(), 2);
-    EXPECT_NEAR(lateBatch.front().timestamp, 5.90, kEps);
+    EXPECT_EQ(result, SensorHealth::ACTIVE);
+    EXPECT_EQ(stream.getHealth(), SensorHealth::ACTIVE);
 }
 
-// Verifies out-of-order insertion dynamically accommodates elements without dropping early history
-TEST_F(ImuStreamTest, pushOutOfOrderDynamicExpansionPreservesAll) {
-    for (size_t i = 0; i < 50; ++i) {
-        double t = 1.00 + (static_cast<double>(i) * 0.10);
-        stream.pushImu(createImu(t, static_cast<double>(i) * 10.0));
+// Consumer times out after WAIT_TIMEOUT (100ms) on lack of data
+TEST_F(TestImuStream, ConsumerTimesOutOnLackOfData) {
+    ImuStream stream(100);
+    auto start = std::chrono::steady_clock::now();
+    SensorHealth status = stream.waitUntil(1.0);
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start
+    );
+
+    EXPECT_GE(elapsed.count(), 90);
+    EXPECT_EQ(status, SensorHealth::DEGRADED);
+    EXPECT_EQ(stream.getHealth(), SensorHealth::DEGRADED);
+    EXPECT_EQ(getMissedFrames(stream), 1);
+}
+
+// Disability transition after 4 consecutive timeouts (> MAX_MISSED_FRAMES = 3)
+TEST_F(TestImuStream, DisabilityTransitionAfterMaxMissedFrames) {
+    ImuStream stream(100);
+
+    // Fast-forward missed frames to 3 (MAX_MISSED_FRAMES)
+    setMissedFrames(stream, 3);
+    setHealth(stream, SensorHealth::DEGRADED);
+
+    // 4th timeout: missedFrames becomes 4 (> 3) -> transitions to DISABLED
+    SensorHealth status = stream.waitUntil(1.0);
+    EXPECT_EQ(status, SensorHealth::DISABLED);
+    EXPECT_EQ(stream.getHealth(), SensorHealth::DISABLED);
+
+    // Subsequent calls return DISABLED immediately
+    auto start = std::chrono::steady_clock::now();
+    SensorHealth immediate = stream.waitUntil(2.0);
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start
+    );
+    EXPECT_LT(elapsed.count(), 20);
+    EXPECT_EQ(immediate, SensorHealth::DISABLED);
+}
+
+// Sensor recovers to ACTIVE upon valid data ingestion following degradation
+TEST_F(TestImuStream, SensorRecovery) {
+    ImuStream stream(100);
+    stream.waitUntil(1.0); // Degrades stream
+    EXPECT_EQ(stream.getHealth(), SensorHealth::DEGRADED);
+
+    stream.pushImu(makeImu(2.0, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()));
+    SensorHealth status = stream.waitUntil(1.5);
+
+    EXPECT_EQ(status, SensorHealth::ACTIVE);
+    EXPECT_EQ(stream.getHealth(), SensorHealth::ACTIVE);
+    EXPECT_EQ(getMissedFrames(stream), 0);
+}
+
+// =============================================================================
+// 5. Pruning, Compaction, & Memory Management
+// =============================================================================
+
+// Pruning preserves at least one historical sample prior to the horizon
+TEST_F(TestImuStream, PruningPreservesOneHistoricalSample) {
+    ImuStream stream(100);
+    for (int i = 0; i < 5; ++i) {
+        stream.pushImu(makeImu(1.0 + static_cast<double>(i) * 0.1, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()));
     }
+    // Samples: 1.0, 1.1, 1.2, 1.3, 1.4
 
-    // Insert multiple out-of-order samples into the sequence
-    stream.pushImu(createImu(1.25, 25.0));
-    stream.pushImu(createImu(2.35, 135.0));
-    stream.pushImu(createImu(3.45, 245.0));
-
-    // Earliest samples must remain intact
-    std::vector<PoolSLAM::Imu> headBatch;
-    ASSERT_TRUE(stream.extractRange(1.00, 1.10, headBatch));
-    ASSERT_GE(headBatch.size(), 2);
-    EXPECT_NEAR(headBatch.front().timestamp, 1.00, kEps);
-
-    // Out-of-order sample at 1.25 must be queryable
-    std::vector<PoolSLAM::Imu> midBatch;
-    ASSERT_TRUE(stream.extractRange(1.20, 1.30, midBatch));
-    ASSERT_EQ(midBatch.size(), 3);
-    EXPECT_NEAR(midBatch[1].timestamp, 1.25, kEps);
-    EXPECT_NEAR(midBatch[1].a.x(), 25.0, kEps);
-}
-
-// Verifies handling of non-positive timestamps without internal numeric corruption
-TEST_F(ImuStreamTest, pushTimestampNegativeOrZero) {
-    stream.pushImu(createImu(-0.10, 5.0));
-    stream.pushImu(createImu(-0.05, 10.0));
-    stream.pushImu(createImu(0.00, 15.0));
-    stream.pushImu(createImu(0.05, 20.0));
-
-    std::vector<PoolSLAM::Imu> batch;
-    ASSERT_TRUE(stream.extractRange(-0.075, -0.025, batch));
-    ASSERT_GE(batch.size(), 2);
-    EXPECT_NEAR(batch.front().timestamp, -0.075, kEps);
-    EXPECT_NEAR(batch.front().a.x(), 7.5, kEps);
-    EXPECT_NEAR(batch.back().timestamp, -0.025, kEps);
-    EXPECT_NEAR(batch.back().a.x(), 12.5, kEps);
-}
-
-// ============================================================================
-// 2. Temporal Retrieval and Range Extraction (extractRange)
-// ============================================================================
-
-// Verifies query against an empty buffer returns false
-TEST_F(ImuStreamTest, extractEmptyBufferReturnsFalse) {
-    std::vector<PoolSLAM::Imu> batch;
-    EXPECT_FALSE(stream.extractRange(1.00, 1.10, batch));
-}
-
-// Verifies query with a single sample returns false due to insufficient bounding bracket
-TEST_F(ImuStreamTest, extractSingleSampleReturnsFalse) {
-    stream.pushImu(createImu(1.00, 5.0));
-    std::vector<PoolSLAM::Imu> batch;
-    EXPECT_FALSE(stream.extractRange(1.00, 1.00, batch));
-    EXPECT_FALSE(stream.extractRange(1.00, 1.10, batch));
-}
-
-// Verifies reverse temporal queries (tStart > tEnd) are rejected
-TEST_F(ImuStreamTest, extractReverseTimeQueryRejection) {
-    stream.pushImu(createImu(1.00, 10.0));
-    stream.pushImu(createImu(1.10, 20.0));
-
-    std::vector<PoolSLAM::Imu> batch;
-    EXPECT_FALSE(stream.extractRange(1.10, 1.00, batch));
-}
-
-// Verifies exact match on left and right boundaries captures exact samples without duplication
-TEST_F(ImuStreamTest, extractExactMatchBoundaries) {
-    stream.pushImu(createImu(1.00, 2.0));
-    stream.pushImu(createImu(1.10, 4.0));
-
-    std::vector<PoolSLAM::Imu> batch;
-    ASSERT_TRUE(stream.extractRange(1.00, 1.10, batch));
-    ASSERT_EQ(batch.size(), 2);
-    EXPECT_NEAR(batch.front().timestamp, 1.00, kEps);
-    EXPECT_NEAR(batch.front().a.x(), 2.0, kEps);
-    EXPECT_NEAR(batch.back().timestamp, 1.10, kEps);
-    EXPECT_NEAR(batch.back().a.x(), 4.0, kEps);
-}
-
-// Verifies linear midpoint math on extracted boundaries
-TEST_F(ImuStreamTest, extractMidpointLinearMath) {
-    stream.pushImu(createImu(1.00, 10.0));
-    stream.pushImu(createImu(1.10, 20.0));
-
-    std::vector<PoolSLAM::Imu> batch;
-    ASSERT_TRUE(stream.extractRange(1.025, 1.075, batch));
-    ASSERT_EQ(batch.size(), 2);
-    EXPECT_NEAR(batch.front().timestamp, 1.025, kEps);
-    EXPECT_NEAR(batch.front().a.x(), 12.5, kEps);
-    EXPECT_NEAR(batch.back().timestamp, 1.075, kEps);
-    EXPECT_NEAR(batch.back().a.x(), 17.5, kEps);
-}
-
-// Verifies floating-point interpolation accuracy on non-trivial fractions
-TEST_F(ImuStreamTest, extractArbitraryFractionPrecision) {
-    stream.pushImu(createImu(1.00, 10.0));
-    stream.pushImu(createImu(1.10, 20.0));
-
-    std::vector<PoolSLAM::Imu> batch;
-    ASSERT_TRUE(stream.extractRange(1.0333, 1.0667, batch));
-    ASSERT_EQ(batch.size(), 2);
-    EXPECT_NEAR(batch.front().timestamp, 1.0333, kEps);
-    EXPECT_NEAR(batch.front().a.x(), 13.330, kEps);
-    EXPECT_NEAR(batch.back().timestamp, 1.0667, kEps);
-    EXPECT_NEAR(batch.back().a.x(), 16.670, kEps);
-}
-
-// Verifies bracket identification across multiple elements
-TEST_F(ImuStreamTest, extractMultiElementCorrectBracketLookup) {
-    stream.pushImu(createImu(1.00, 1.0));
-    stream.pushImu(createImu(1.10, 2.0));
-    stream.pushImu(createImu(1.20, 3.0));
-    stream.pushImu(createImu(1.30, 4.0));
-
-    std::vector<PoolSLAM::Imu> batch;
-    ASSERT_TRUE(stream.extractRange(1.05, 1.25, batch));
-
-    ASSERT_EQ(batch.size(), 4);
-    EXPECT_NEAR(batch[0].timestamp, 1.05, kEps);
-    EXPECT_NEAR(batch[0].a.x(), 1.5, kEps);
-    EXPECT_NEAR(batch[1].timestamp, 1.10, kEps);
-    EXPECT_NEAR(batch[1].a.x(), 2.0, kEps);
-    EXPECT_NEAR(batch[2].timestamp, 1.20, kEps);
-    EXPECT_NEAR(batch[2].a.x(), 3.0, kEps);
-    EXPECT_NEAR(batch[3].timestamp, 1.25, kEps);
-    EXPECT_NEAR(batch[3].a.x(), 3.5, kEps);
-}
-
-// Verifies query timestamps strictly prior to head return false
-TEST_F(ImuStreamTest, extractPastHeadUnderflowProtection) {
-    stream.pushImu(createImu(1.00, 5.0));
-    stream.pushImu(createImu(1.10, 10.0));
-
-    std::vector<PoolSLAM::Imu> batch;
-    EXPECT_FALSE(stream.extractRange(0.999999, 1.05, batch));
-}
-
-// Verifies query timestamps strictly past tail return false
-TEST_F(ImuStreamTest, extractFutureTailOverflowProtection) {
-    stream.pushImu(createImu(1.00, 5.0));
-    stream.pushImu(createImu(1.10, 10.0));
-
-    std::vector<PoolSLAM::Imu> batch;
-    EXPECT_FALSE(stream.extractRange(1.05, 1.100001, batch));
-}
-
-// Verifies identical duplicate timestamps protect against division by zero
-TEST_F(ImuStreamTest, extractDuplicateTimestampsZeroDtSafety) {
-    stream.pushImu(createImu(1.00, 5.0));
-    stream.pushImu(createImu(1.00, 6.0));
-    stream.pushImu(createImu(1.10, 10.0));
-
-    std::vector<PoolSLAM::Imu> batch;
-    if (stream.extractRange(1.00, 1.05, batch)) {
-        for (const auto& sample : batch) {
-            EXPECT_FALSE(std::isnan(sample.a.x()));
-            EXPECT_FALSE(std::isinf(sample.a.x()));
-        }
-    }
-}
-
-// ============================================================================
-// 3. Pruning and Memory Eviction (pruneUntil, flush)
-// ============================================================================
-
-// Verifies pruning an empty buffer is a safe no-op
-TEST_F(ImuStreamTest, pruneEmptyBufferSafeNoOp) {
-    EXPECT_NO_THROW(stream.pruneUntil(10.0));
-}
-
-// Verifies horizon older than head leaves all buffer elements intact
-TEST_F(ImuStreamTest, pruneUntilHeadPreservesAll) {
-    stream.pushImu(createImu(1.00, 10.0));
-    stream.pushImu(createImu(1.10, 20.0));
-    stream.pushImu(createImu(1.20, 30.0));
-
-    stream.pruneUntil(0.90);
-
-    std::vector<PoolSLAM::Imu> batch;
-    ASSERT_TRUE(stream.extractRange(1.00, 1.15, batch));
-    ASSERT_GE(batch.size(), 2);
-    EXPECT_NEAR(batch.front().timestamp, 1.00, kEps);
-    EXPECT_NEAR(batch.front().a.x(), 10.0, kEps);
-}
-
-// Verifies pruning at exact head boundary retains valid brackets
-TEST_F(ImuStreamTest, pruneExactMatchHead) {
-    stream.pushImu(createImu(1.00, 10.0));
-    stream.pushImu(createImu(1.10, 20.0));
-    stream.pushImu(createImu(1.20, 30.0));
-
-    stream.pruneUntil(1.00);
-
-    std::vector<PoolSLAM::Imu> batch;
-    ASSERT_TRUE(stream.extractRange(1.05, 1.15, batch));
-    ASSERT_GE(batch.size(), 2);
-    EXPECT_NEAR(batch.front().timestamp, 1.05, kEps);
-    EXPECT_NEAR(batch.front().a.x(), 15.0, kEps);
-}
-
-// Verifies pruning intermediate horizon drops stale samples only
-TEST_F(ImuStreamTest, pruneIntermediateHorizonDropsStaleOnly) {
-    stream.pushImu(createImu(1.00, 10.0));
-    stream.pushImu(createImu(1.10, 20.0));
-    stream.pushImu(createImu(1.20, 30.0));
-    stream.pushImu(createImu(1.30, 40.0));
-    stream.pushImu(createImu(1.40, 50.0));
-
+    // Prune up to horizon 1.25: first sample > 1.25 is 1.3; head should point to 1.2
     stream.pruneUntil(1.25);
+    size_t head = getHead(stream);
+    const auto& buf = getBuffer(stream);
 
-    std::vector<PoolSLAM::Imu> staleBatch;
-    EXPECT_FALSE(stream.extractRange(1.05, 1.15, staleBatch));
-
-    std::vector<PoolSLAM::Imu> freshBatch;
-    ASSERT_TRUE(stream.extractRange(1.30, 1.40, freshBatch));
-    ASSERT_GE(freshBatch.size(), 2);
-    EXPECT_NEAR(freshBatch.front().timestamp, 1.30, kEps);
-    EXPECT_NEAR(freshBatch.front().a.x(), 40.0, kEps);
+    EXPECT_DOUBLE_EQ(buf[head].timestamp, 1.2);
 }
 
-// Verifies pruning beyond tail clears active elements
-TEST_F(ImuStreamTest, pruneBeyondTailEmptiesBuffer) {
-    stream.pushImu(createImu(1.00, 10.0));
-    stream.pushImu(createImu(1.10, 20.0));
-    stream.pushImu(createImu(1.20, 30.0));
+// In-place vector compaction triggers when head exceeds compactThreshold
+TEST_F(TestImuStream, CompactionTriggerWhenHeadExceedsThreshold) {
+    // initSize = 10 -> compactThreshold = 5
+    ImuStream stream(10);
+    EXPECT_EQ(getCompactThreshold(stream), 5);
 
-    stream.pruneUntil(2.00);
-
-    std::vector<PoolSLAM::Imu> batch;
-    EXPECT_FALSE(stream.extractRange(1.05, 1.15, batch));
-}
-
-// Verifies subsequent range queries succeed after selective prune
-TEST_F(ImuStreamTest, pruneSubsequentQueryValidation) {
-    stream.pushImu(createImu(1.00, 1.0));
-    stream.pushImu(createImu(1.10, 2.0));
-    stream.pushImu(createImu(1.20, 3.0));
-    stream.pushImu(createImu(1.30, 4.0));
-
-    stream.pruneUntil(1.15);
-
-    std::vector<PoolSLAM::Imu> staleBatch;
-    EXPECT_FALSE(stream.extractRange(1.05, 1.10, staleBatch));
-
-    std::vector<PoolSLAM::Imu> validBatch;
-    ASSERT_TRUE(stream.extractRange(1.20, 1.30, validBatch));
-    ASSERT_EQ(validBatch.size(), 2);
-    EXPECT_NEAR(validBatch.front().timestamp, 1.20, kEps);
-    EXPECT_NEAR(validBatch.front().a.x(), 3.0, kEps);
-    EXPECT_NEAR(validBatch.back().timestamp, 1.30, kEps);
-    EXPECT_NEAR(validBatch.back().a.x(), 4.0, kEps);
-}
-
-// Verifies flush resets buffer and offsets
-TEST_F(ImuStreamTest, flushResetsBuffer) {
-    for (size_t i = 0; i < 100; i++) {
-        stream.pushImu(createImu(1.00 + (static_cast<double>(i) * 0.05), static_cast<double>(i)));
+    // Push 10 samples: t = 1.0 to 1.9
+    for (int i = 0; i < 10; ++i) {
+        stream.pushImu(makeImu(1.0 + static_cast<double>(i) * 0.1, Eigen::Vector3d(i, 0, 0), Eigen::Vector3d::Zero()));
     }
+    EXPECT_EQ(getBufferSize(stream), 10);
+    EXPECT_EQ(getHead(stream), 0);
+
+    // Prune to 1.65: first sample > 1.65 is 1.7 (index 7).
+    // Head would advance to index 6. Since 6 > compactThreshold (5), compaction triggers!
+    stream.pruneUntil(1.65);
+
+    // After compaction: elements [6, 9] (count 4) shifted to [0, 3], head reset to 0
+    EXPECT_EQ(getHead(stream), 0);
+    EXPECT_EQ(getBufferSize(stream), 4);
+
+    const auto& buf = getBuffer(stream);
+    EXPECT_DOUBLE_EQ(buf[0].timestamp, 1.6);
+    EXPECT_DOUBLE_EQ(buf[0].a.x(), 6.0);
+    EXPECT_DOUBLE_EQ(buf[3].timestamp, 1.9);
+    EXPECT_DOUBLE_EQ(buf[3].a.x(), 9.0);
+}
+
+// Flush clears the buffer and resets head to zero
+TEST_F(TestImuStream, FlushClearsBufferAndResetsHead) {
+    ImuStream stream(100);
+    populateMonotonic(stream, 5, 1.0, 0.05);
+    EXPECT_EQ(getBufferSize(stream), 5);
 
     stream.flush();
-
-    std::vector<PoolSLAM::Imu> batch;
-    EXPECT_FALSE(stream.extractRange(1.50, 2.00, batch));
+    EXPECT_EQ(getBufferSize(stream), 0);
+    EXPECT_EQ(getHead(stream), 0);
+    EXPECT_FALSE(stream.getAverageAcceleration(1.0).has_value());
 }
 
-// ============================================================================
-// 4. Synchronization and Condition Variables (waitUntil)
-// ============================================================================
-
-// Verifies waitUntil returns immediately when data strictly newer than target already exists
-TEST_F(ImuStreamTest, waitPredicateAlreadySatisfiedZeroDelay) {
-    // Latest sample (1.10) is strictly newer than target (1.05)
-    stream.pushImu(createImu(1.10, 10.0));
-
-    auto start = std::chrono::steady_clock::now();
-    PoolSLAM::SensorHealth health = stream.waitUntil(1.05);
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start
-    ).count();
-
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::ACTIVE);
-    EXPECT_LT(duration, 15);
-}
-
-// Verifies sample at exact target timestamp does not satisfy waitUntil; data strictly newer is required
-TEST_F(ImuStreamTest, waitExactTimestampRequiresStrictlyNewerData) {
-    // Pushing sample exactly at target timestamp (1.10)
-    stream.pushImu(createImu(1.10, 5.0));
-
-    std::atomic<bool> unblocked{false};
-    PoolSLAM::SensorHealth resultHealth = PoolSLAM::SensorHealth::DEGRADED;
-
-    std::thread waiter([&]() {
-        resultHealth = stream.waitUntil(1.10);
-        unblocked.store(true);
-    });
-
-    // Sample exactly at 1.10 must not unblock the waiter
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    EXPECT_FALSE(unblocked.load());
-
-    // Pushing sample strictly newer than target (1.15 > 1.10) unblocks consumer
-    stream.pushImu(createImu(1.15, 10.0));
-    waiter.join();
-
-    EXPECT_TRUE(unblocked.load());
-    EXPECT_EQ(resultHealth, PoolSLAM::SensorHealth::ACTIVE);
-}
-
-// Verifies producer unblocks waiting consumer thread upon timely push of strictly newer data
-TEST_F(ImuStreamTest, waitProducerWakeupNominal) {
-    stream.pushImu(createImu(1.00, 5.0));
-
-    std::thread producer([&]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        // Push sample strictly newer than target 1.10
-        stream.pushImu(createImu(1.15, 10.0));
-    });
-
-    auto start = std::chrono::steady_clock::now();
-    PoolSLAM::SensorHealth health = stream.waitUntil(1.10);
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start
-    ).count();
-
-    producer.join();
-
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::ACTIVE);
-    EXPECT_GE(duration, 15);
-    EXPECT_LT(duration, 90);
-}
-
-// Verifies waitUntil times out and returns DEGRADED when data does not arrive
-TEST_F(ImuStreamTest, waitInsufficientDataTimesOut) {
-    stream.pushImu(createImu(1.00, 5.0));
-
-    auto start = std::chrono::steady_clock::now();
-    PoolSLAM::SensorHealth health = stream.waitUntil(1.50);
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start
-    ).count();
-
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::DEGRADED);
-    EXPECT_GE(duration, 85);
-}
-
-// Verifies partial arrival notifies CV without prematurely unblocking wait predicate
-TEST_F(ImuStreamTest, waitSpuriousWakeupProtection) {
-    stream.pushImu(createImu(1.00, 10.0));
-    std::atomic<bool> finishedWait{false};
-    PoolSLAM::SensorHealth resultHealth = PoolSLAM::SensorHealth::ACTIVE;
-
-    std::thread waiter([&]() {
-        resultHealth = stream.waitUntil(1.15);
-        finishedWait.store(true);
-    });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-    // Push sample that advances time but is not newer than target (1.08 < 1.15)
-    stream.pushImu(createImu(1.08, 12.0));
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-    EXPECT_FALSE(finishedWait.load());
-
-    // Push sample strictly newer than target (1.16 > 1.15)
-    stream.pushImu(createImu(1.16, 15.0));
-    waiter.join();
-
-    EXPECT_TRUE(finishedWait.load());
-    EXPECT_EQ(resultHealth, PoolSLAM::SensorHealth::ACTIVE);
-}
-
-// ============================================================================
-// 5. Sensor Health State Machine & Latching FSM
-// ============================================================================
-
-// Verifies initial health state is ACTIVE
-TEST_F(ImuStreamTest, healthInitialStateActive) {
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::ACTIVE);
-}
-
-// Verifies a single timeout transitions health from ACTIVE to DEGRADED
-TEST_F(ImuStreamTest, healthSingleTimeoutTransitionsToDegraded) {
-    PoolSLAM::SensorHealth health = stream.waitUntil(10.0);
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::DEGRADED);
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
-}
-
-// Verifies up to 10 consecutive timeouts maintain DEGRADED (strictly greater threshold)
-TEST_F(ImuStreamTest, healthConsecutiveMissesAccumulate) {
-    for (size_t i = 0; i < MAX_MISSES; i++) {
-        PoolSLAM::SensorHealth health = stream.waitUntil(10.0 + (static_cast<double>(i) * 0.05));
-        EXPECT_EQ(health, PoolSLAM::SensorHealth::DEGRADED);
-        EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
-    }
-}
-
-// Verifies timely arrival of strictly newer data restores health from DEGRADED back to ACTIVE
-TEST_F(ImuStreamTest, healthRecoveryDegradedToActive) {
-    for (size_t i = 0; i < MAX_MISSES - 1; i++) {
-        EXPECT_EQ(stream.waitUntil(10.0 + (static_cast<double>(i) * 0.05)), PoolSLAM::SensorHealth::DEGRADED);
-    }
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
-
-    // Timely packet arrives strictly newer than wait target 20.00 (20.05 > 20.00)
-    stream.pushImu(createImu(20.05, 5.0));
-    PoolSLAM::SensorHealth recovered = stream.waitUntil(20.00);
-
-    EXPECT_EQ(recovered, PoolSLAM::SensorHealth::ACTIVE);
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::ACTIVE);
-}
-
-// Verifies exceeding 10 misses latches into DISABLED strictly on the 11th miss
-TEST_F(ImuStreamTest, healthMaxMissThresholdLatchesDisabled) {
-    for (size_t i = 0; i < MAX_MISSES; i++) {
-        EXPECT_EQ(stream.waitUntil(1.00 + (static_cast<double>(i) * 0.05)), PoolSLAM::SensorHealth::DEGRADED);
-        EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DEGRADED);
-    }
-
-    // 11th miss crosses strictly greater threshold (> 10)
-    PoolSLAM::SensorHealth latched = stream.waitUntil(10.00);
-    EXPECT_EQ(latched, PoolSLAM::SensorHealth::DISABLED);
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DISABLED);
-}
-
-// Verifies DISABLED is a strict one-way latch that rejects recovery despite arrival of newer data
-TEST_F(ImuStreamTest, healthDisabledOneWayLatch) {
-    for (size_t i = 0; i < MAX_MISSES + 1; i++) {
-        stream.waitUntil(1.00 + (static_cast<double>(i) * 0.05));
-    }
-    ASSERT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DISABLED);
-
-    // Push valid, strictly newer data (50.05 > 50.00)
-    stream.pushImu(createImu(50.05, 10.0));
-    PoolSLAM::SensorHealth health = stream.waitUntil(50.00);
-
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::DISABLED);
-    EXPECT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DISABLED);
-}
-
-// Verifies waitUntil bypasses condition variable delays once DISABLED
-TEST_F(ImuStreamTest, healthDisabledFastBypass) {
-    for (size_t i = 0; i < MAX_MISSES + 1; i++) {
-        stream.waitUntil(1.00 + (static_cast<double>(i) * 0.05));
-    }
-    ASSERT_EQ(stream.getHealth(), PoolSLAM::SensorHealth::DISABLED);
-
-    auto start = std::chrono::steady_clock::now();
-    PoolSLAM::SensorHealth health = stream.waitUntil(100.00);
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start
-    ).count();
-
-    EXPECT_EQ(health, PoolSLAM::SensorHealth::DISABLED);
-    EXPECT_LT(duration, 5);
-}
-
-// ============================================================================
-// 6. Concurrency and Multi-Threaded Stress
-// ============================================================================
-
-// Verifies thread safety during simultaneous ingestion and range extraction queries
-TEST_F(ImuStreamTest, concurrentPushAndExtractRangeDataRace) {
-    std::atomic<bool> keepRunning{true};
-
-    // Producer thread: 200 Hz push (dt = 0.005s)
-    std::thread producer([&]() {
-        double t = 1.00;
-        double aVal = 5.0;
-        while (keepRunning.load()) {
-            stream.pushImu(createImu(t, aVal));
-            t += 0.005;
-            aVal += 0.01;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    });
-
-    // Consumer thread: extract trailing intervals
-    std::thread consumer([&]() {
-        double queryTime = 1.05;
-        std::vector<PoolSLAM::Imu> batch;
-        while (keepRunning.load()) {
-            if (stream.extractRange(queryTime - 0.02, queryTime, batch)) {
-                for (const auto& sample : batch) {
-                    EXPECT_FALSE(std::isnan(sample.a.x()));
-                }
-                queryTime += 0.005;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    keepRunning.store(false);
-
-    producer.join();
-    consumer.join();
-}
-
-// Verifies buffer integrity under simultaneous pushing, pruning, and querying
-TEST_F(ImuStreamTest, concurrentPushAndPruneHorizonIntegrity) {
-    std::atomic<bool> keepRunning{true};
-
-    // Producer thread: monotonic and out-of-order pushes (dt = 0.005s)
-    std::thread producer([&]() {
-        double t = 1.00;
-        while (keepRunning.load()) {
-            stream.pushImu(createImu(t, t * 2.0));
-            if (std::fmod(t, 0.05) < 0.005) {
-                // Delayed packet within middle boundary
-                stream.pushImu(createImu(t - 0.002, (t - 0.002) * 2.0));
-            }
-            t += 0.005;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    });
-
-    // Pruner thread: advancing horizon
-    std::thread pruner([&]() {
-        double horizon = 1.00;
-        while (keepRunning.load()) {
-            stream.pruneUntil(horizon);
-            horizon += 0.01;
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-    });
-
-    // Consumer thread: querying extracted ranges
-    std::thread consumer([&]() {
-        double queryTime = 1.05;
-        std::vector<PoolSLAM::Imu> batch;
-        while (keepRunning.load()) {
-            if (stream.extractRange(queryTime - 0.01, queryTime, batch)) {
-                for (const auto& sample : batch) {
-                    EXPECT_NEAR(sample.a.x(), sample.timestamp * 2.0, 1e-4);
-                }
-                queryTime += 0.005;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    keepRunning.store(false);
-
-    producer.join();
-    pruner.join();
-    consumer.join();
-}
-
-// Verifies multiple consumer threads safely wake up when strictly newer data arrives
-TEST_F(ImuStreamTest, concurrentWaitUntilAndPushRaceCondition) {
-    constexpr size_t numWaiters = 4;
-    std::vector<std::thread> waiterThreads;
-    std::vector<PoolSLAM::SensorHealth> results(numWaiters, PoolSLAM::SensorHealth::DEGRADED);
-
-    stream.pushImu(createImu(1.00, 5.0));
-
-    for (size_t i = 0; i < numWaiters; i++) {
-        waiterThreads.emplace_back([&, i]() {
-            results[i] = stream.waitUntil(1.10);
-        });
-    }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    // Push sample strictly newer than target 1.10 (1.15 > 1.10)
-    stream.pushImu(createImu(1.15, 10.0));
-
-    for (size_t i = 0; i < numWaiters; i++) {
-        waiterThreads[i].join();
-        EXPECT_EQ(results[i], PoolSLAM::SensorHealth::ACTIVE);
-    }
-}
+} // namespace PoolSLAM

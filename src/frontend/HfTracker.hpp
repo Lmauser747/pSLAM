@@ -11,7 +11,7 @@
 
 #include <eigen3/Eigen/Dense>
 
-#include <CoreTypes.hpp>
+#include "CoreTypes.hpp"
 
 
 // idgaf about MSVC
@@ -41,8 +41,6 @@ struct EpipolarData{
     Eigen::Matrix3Xf prevRays; // Rays from the previous frame
 
     Eigen::Matrix3Xf scratch; // Scratch space to hold intermediate values
-
-    Eigen::VectorXf residual; // Residual for inliear/outlier checking
 };
 
 
@@ -52,7 +50,6 @@ private:
     static constexpr size_t MIN_MARGIN = 16; // Minimum bucket margin in pixels
     static constexpr size_t NUM_FEATURES_TARGET_DEFAULT = 200; // Target number of features
     static constexpr int ICLK_ITERS = 20; // Number of ICLK iterations
-    static constexpr float ICLK_CONVERGENCE_THRESHOLD = 0.0f; // ICLK convergence threashold
     static constexpr uint32_t ICLK_MAD_THRESHOLD = 5 * (TrackedFeature<RADIUS>::PATCH_SIZE) * (TrackedFeature<RADIUS>::PATCH_SIZE);
     static constexpr int UNDISTORT_ITERS = 5; // Number of times to undistort each point
     static constexpr int RANSAC_ITERS = 20; // Number of random samples to inspect in RANSAC
@@ -63,7 +60,6 @@ private:
     static constexpr uint8_t FAST_THRESHOLD = 20; // Threshold for FAST keypoint detection
     static constexpr float ST_THRESHOLD = 500.0f; // Minimum Shi-Tomasi score of canidate feature
     static constexpr int ST_PATCH_SIZE = 7; // Width and height of patch for Shi-Tomasi gradient computation
-    static constexpr float MIN_BUCKET_OCCUPANCY = 0.5f; // Minimum number of buckets occupied after replesshment before an error
     static constexpr float HESSIAN_STABILITY_THRESHOLD = 0.1f; // Minimum absolute value of the determinant of the Hessian
 
     const size_t wImage, hImage; // Image pixel array height and width
@@ -80,8 +76,6 @@ private:
     Distortion dist; // Disortion coefficients
 
     EpipolarData epi; // Normalized rays to be used in RANSAC and Epipolar geometry calcs
-
-    float displacement; // Sum of the differences between undistorted tracked pixel coordinates
 
     std::vector<TrackedFeature<RADIUS>> activeFeatures; // Stores all active features
     std::vector<GridBucket> gridOccupancy; // Stores the age of the oldest frame in the grid
@@ -137,8 +131,8 @@ private:
     bool addKp(const uint8_t *curBuffer, Eigen::Vector2i &kp);
 
     // Make the unit test class a friend for testing
-    friend class HfTrackerTest;
-    friend class HfTrackerReplenishTest;
+    friend class TestTrackHfFeatures;
+    friend class TestReplenishHfFeatures;
 
 public:
     HfTracker(size_t w, size_t h, const Eigen::Matrix3f &K_, const Distortion &dist_, size_t nFeaturesTarget = NUM_FEATURES_TARGET_DEFAULT) : 
@@ -177,7 +171,6 @@ public:
         epi.currRays.resize(3, static_cast<Eigen::Index>(maxFeatures));
         epi.prevRays.resize(3, static_cast<Eigen::Index>(maxFeatures));
         epi.scratch.resize(3, static_cast<Eigen::Index>(maxFeatures));
-        epi.residual.resize(static_cast<Eigen::Index>(maxFeatures));
 
         epi.xCurr.reserve(maxFeatures);
         epi.yCurr.reserve(maxFeatures);

@@ -2,11 +2,9 @@
 #include <algorithm>
 #include <cstddef>
 
-#include <Eigen/Core>
 #include <Eigen/Dense>
-#include <gtsam/geometry/Pose3.h>
 
-#include "LfTracker.hpp"
+#include "frontend/LfTracker.hpp"
 
 // Use the Levenberg–Marquardt algorithm to find the optimal pose tranformation
 namespace PoolSLAM {

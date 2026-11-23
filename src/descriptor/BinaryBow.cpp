@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <ios>
 
-#include "BinaryBow.hpp"
+#include "descriptor/BinaryBow.hpp"
 #include "descriptor/Qov.hpp"
 
 namespace PoolSLAM{

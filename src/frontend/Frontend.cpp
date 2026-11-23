@@ -1,13 +1,11 @@
 #include <atomic>
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
-#include <memory>
-#include <utility>
 #include <thread>
-#include <iostream>
+#include <utility>
 
 #include <gtsam/navigation/ImuBias.h>
 #include <gtsam/navigation/ImuFactor.h>
@@ -35,17 +33,19 @@ void Frontend::processPacket(){
         }
 
         std::unique_ptr<gtsam::PreintegratedImuMeasurements> imuDelta = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, imuBias);
-
-        auto tPrev = syncPkt.imu.front().timestamp;
-        for(size_t i = 0; i < syncPkt.imu.size(); i++){
-            auto tCurr = syncPkt.imu[i].timestamp;
-            auto dt = tCurr - tPrev;
-            if(dt <= 0.0){
-                continue;
+        if(!syncPkt.imu.empty()){
+            auto tPrev = syncPkt.imu.front().timestamp;
+            for(size_t i = 0; i < syncPkt.imu.size(); i++){
+                auto tCurr = syncPkt.imu[i].timestamp;
+                auto dt = tCurr - tPrev;
+                if(dt <= 0.0){
+                    continue;
+                }
+                imuDelta->integrateMeasurement(syncPkt.imu[i].a, syncPkt.imu[i].w, dt);
+                tPrev = tCurr;
             }
-            imuDelta->integrateMeasurement(syncPkt.imu[i].a, syncPkt.imu[i].w, dt);
-            tPrev = tCurr;
         }
+            
 
         std::unique_ptr<BackendHfPacket> hfPkt = std::make_unique<BackendHfPacket>();
 

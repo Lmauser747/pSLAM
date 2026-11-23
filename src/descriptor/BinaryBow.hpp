@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdio>
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -72,12 +71,6 @@ public:
 
     // Matches descriptor to word and updates the database. Returns the word ID
     uint32_t matchWord(const QovDescriptor& des, float frequency, uint32_t keyframe, BowDatabase& db) const;
-
-    // Gets the word metadata at the given index
-    FORCE_INLINE const WordData& getWord(uint32_t idx) const;
-
-    // Gets the parent node of the leaf
-    FORCE_INLINE uint32_t getParent(uint32_t leaf) const;
 };
 
 // Standalone inverted index database for place recognition
@@ -115,14 +108,6 @@ public:
         return invertedIndex[wordId];
     }
 };
-
-FORCE_INLINE const WordData& BinaryBowTree::getWord(uint32_t idx) const{
-    return vocabulary[idx];
-}
-
-FORCE_INLINE uint32_t BinaryBowTree::getParent(uint32_t leaf) const{
-    return vocabulary[leaf].parent;
-}
 
 }
 

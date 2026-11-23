@@ -13,10 +13,12 @@
 
 #include <Eigen/Core>
 
-#include <gtsam/geometry/Point2.h>
+#include <gtsam/base/Vector.h>
+#include <gtsam/base/types.h>
+#include <gtsam/geometry/Cal3_S2.h>
 #include <gtsam/geometry/Point3.h>
 #include <gtsam/geometry/Pose3.h>
-#include <gtsam/inference/Symbol.h>
+#include <gtsam/inference/Factor.h>
 #include <gtsam/linear/NoiseModel.h>
 #include <gtsam/navigation/ImuBias.h>
 #include <gtsam/navigation/ImuFactor.h>
@@ -25,14 +27,7 @@
 #include <gtsam/nonlinear/NoiseModelFactorN.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
-#include <gtsam/nonlinear/PriorFactor.h>
 #include <gtsam/nonlinear/Values.h>
-#include <gtsam/slam/BetweenFactor.h>
-#include <gtsam/base/Vector.h>
-#include <gtsam/base/types.h>
-#include <gtsam/geometry/Cal3.h>
-#include <gtsam/geometry/Cal3_S2.h>
-#include <gtsam/inference/Factor.h>
 #include <gtsam/slam/SmartProjectionPoseFactor.h>
 
 #include "CoreTypes.hpp"
@@ -98,11 +93,7 @@ struct TrackedKeyframe{
 class Backend{
     friend class BackendTest;
 
-    struct PendingKfRecord{
-        uint32_t frameId = 0;
-        std::vector<uint32_t> featureIds;
-        size_t lastLandmarkCount = 0;
-    };
+    using PendingKfRecord = TrackedKeyframe;
 
     Frontend &fe; // Reference to frontend
     LfTracker &lf; // Reference to low-frequency tracker

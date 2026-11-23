@@ -1,200 +1,175 @@
 #pragma once
 
-#include <algorithm>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <fstream>
-#include <memory>
-#include <string>
+#include <gtest/gtest.h>
 #include <vector>
-#include <ios>
-
-#include <eigen3/Eigen/Dense>
-
-#include <gtsam/navigation/ImuBias.h>
-#include <gtsam/navigation/PreintegrationParams.h>
+#include <memory>
+#include <chrono>
+#include <future>
+#include <string>
+#include <fstream>
+#include <cmath>
 
 #include "CoreTypes.hpp"
-#include "descriptor/BinaryBow.hpp"
-#include "descriptor/Qov.hpp"
 #include "frontend/Frontend.hpp"
-#include "pool_slam/Hal.hpp"
-#include "pool_slam/HalTypes.hpp"
+#include "hal/Synchronizer.hpp"
+#include "../unit/HalTestHelpers.hpp"
 
 namespace PoolSLAM {
-namespace test_helpers {
 
-constexpr size_t kDefaultWidth = 640;
-constexpr size_t kDefaultHeight = 480;
-constexpr uint8_t kDefaultBg = 128;
-constexpr uint8_t kDarkVal = 25;
-constexpr uint8_t kBrightVal = 230;
-constexpr int kCornerRadius = 14;
+class TestFrontend : public ::testing::Test {
+protected:
+    static constexpr int W = 640;
+    static constexpr int H = 480;
 
-// Writes a valid binary vocabulary file matching BinaryBowTree::readVocabFile layout
-inline std::string writeTempVocabFile(const std::string &filename = "test_frontend_vocab.bin") {
-    std::ofstream out(filename, std::ios::binary | std::ios::trunc);
-    descriptor::QovDescriptor node;
-    for (size_t i = 0; i < descriptor::BinaryBowTree::TREE_SIZE; i++) {
-        node.bits = {i * 0x01010101ULL, ~i, i ^ 0x55555555ULL, i + 17ULL};
-        out.write(reinterpret_cast<const char *>(node.bits.data()), sizeof(node.bits));
+    static Imu makeImu(double t, const Eigen::Vector3d& a, const Eigen::Vector3d& w, float temp = 0.0f) {
+        Imu sample;
+        sample.timestamp = t;
+        sample.a = a;
+        sample.w = w;
+        sample.t = temp;
+        return sample;
     }
 
-    const float defaultIdf = 1.0f;
-    for (size_t w = 0; w < descriptor::BinaryBowTree::VOCAB_SIZE; w++) {
-        node.bits = {w * 0xABCDEF01ULL, ~(w * 3ULL), w ^ 0xF0F0F0F0ULL, w + 99ULL};
-        out.write(reinterpret_cast<const char *>(node.bits.data()), sizeof(node.bits));
-        out.write(reinterpret_cast<const char *>(&defaultIdf), sizeof(defaultIdf));
-    }
-    out.close();
-    return filename;
-}
-
-// Constructs a default camera calibration matrix
-inline Eigen::Matrix3f makeDefaultK() {
-    Eigen::Matrix3f K = Eigen::Matrix3f::Identity();
-    K(0, 0) = 525.0f;
-    K(1, 1) = 525.0f;
-    K(0, 2) = 320.0f;
-    K(1, 2) = 240.0f;
-    return K;
-}
-
-// Constructs a default FrontendConfig with valid GTSAM PreintegrationParams
-inline FrontendConfig makeFrontendConfig(size_t width = kDefaultWidth,
-                                         size_t height = kDefaultHeight,
-                                         double maxTimeBetweenKf = 1.0,
-                                         float droppedFeatureThreshold = 0.5f,
-                                         size_t hfQueueSize = 10) {
-    FrontendConfig cfg{};
-    cfg.w = width;
-    cfg.h = height;
-    cfg.K = makeDefaultK();
-    cfg.dist = Distortion{};
-
-    cfg.preintParams = gtsam::PreintegrationParams::MakeSharedU(9.81);
-    cfg.preintParams->accelerometerCovariance = Eigen::Matrix3d::Identity() * 1e-3;
-    cfg.preintParams->gyroscopeCovariance = Eigen::Matrix3d::Identity() * 1e-4;
-    cfg.preintParams->integrationCovariance = Eigen::Matrix3d::Identity() * 1e-5;
-
-    cfg.droppedFeatureThreshold = droppedFeatureThreshold;
-    cfg.maxTimeBetweenKf = maxTimeBetweenKf;
-    cfg.hfQueueSize = hfQueueSize;
-
-    cfg.lfConfig.w = width;
-    cfg.lfConfig.h = height;
-    cfg.lfConfig.K = cfg.K;
-    cfg.lfConfig.dist = cfg.dist;
-    return cfg;
-}
-
-// Creates a timestamped HAL IMU sample
-inline Imu createImuSample(double t,
-                           const Eigen::Vector3d &accel = Eigen::Vector3d(0.0, 0.0, -9.81),
-                           const Eigen::Vector3d &omega = Eigen::Vector3d::Zero()) {
-    Imu sample;
-    sample.timestamp = t;
-    sample.a = accel;
-    sample.w = omega;
-    sample.t = 25.0f;
-    return sample;
-}
-
-// Pushes dense 200 Hz IMU and 20 Hz Depth samples across [tStart, tEnd]
-// Ensures samples strictly newer than target frames exist to satisfy HAL waitUntil() predicates
-inline void pushInertialAndDepthWindow(ImuStream &imuStream,
-                                       DepthStream &depthStream,
-                                       double tStart,
-                                       double tEnd,
-                                       double depthZ = 5.0,
-                                       const Eigen::Vector3d &accel = Eigen::Vector3d(0.0, 0.0, -9.81),
-                                       const Eigen::Vector3d &omega = Eigen::Vector3d::Zero()) {
-    const double imuDt = 0.005;   // 200 Hz
-    const double depthDt = 0.050; // 20 Hz (< 0.2s MAX_GAP)
-
-    const size_t imuSteps = static_cast<size_t>(std::ceil((tEnd - tStart) / imuDt)) + 2;
-    for (size_t i = 0; i <= imuSteps; i++) {
-        const double t = tStart + static_cast<double>(i) * imuDt;
-        imuStream.pushImu(createImuSample(t, accel, omega));
+    static Depth makeDepth(double t, double z) {
+        Depth sample;
+        sample.timestamp = t;
+        sample.z = z;
+        return sample;
     }
 
-    const size_t depthSteps = static_cast<size_t>(std::ceil((tEnd - tStart) / depthDt)) + 2;
-    for (size_t i = 0; i <= depthSteps; i++) {
-        const double t = tStart + static_cast<double>(i) * depthDt;
-        depthStream.pushDepth({t, depthZ});
+    static size_t getImageFreeListSize(const ImageStream& stream) {
+        return TestImageStream::getFreeListSize(stream);
     }
-}
 
-// Renders a smooth 2D corner with a bilinear ramp profile for FAST + Shi-Tomasi + IC-LK
-inline void drawSmoothCorner(std::vector<uint8_t> &buffer,
-                             size_t width,
-                             size_t height,
-                             float cx,
-                             float cy,
-                             int radius = kCornerRadius,
-                             uint8_t darkVal = kDarkVal,
-                             uint8_t brightVal = kBrightVal,
-                             float rampWidth = 2.0f) {
-    const float midVal = 0.5f * (static_cast<float>(darkVal) + static_cast<float>(brightVal));
-    const float halfRange = 0.5f * (static_cast<float>(brightVal) - static_cast<float>(darkVal));
-
-    const int minX = std::max(0, static_cast<int>(cx) - radius);
-    const int maxX = std::min(static_cast<int>(width) - 1, static_cast<int>(cx) + radius);
-    const int minY = std::max(0, static_cast<int>(cy) - radius);
-    const int maxY = std::min(static_cast<int>(height) - 1, static_cast<int>(cy) + radius);
-
-    for (int y = minY; y <= maxY; y++) {
-        const float dy = (static_cast<float>(y) - cy) / rampWidth;
-        const float wy = std::clamp(dy, -1.0f, 1.0f);
-        for (int x = minX; x <= maxX; x++) {
-            const float dx = (static_cast<float>(x) - cx) / rampWidth;
-            const float wx = std::clamp(dx, -1.0f, 1.0f);
-            const float intensity = midVal + halfRange * (wx * wy);
-            buffer[static_cast<size_t>(y * static_cast<int>(width) + x)] =
-                static_cast<uint8_t>(std::clamp(intensity, 0.0f, 255.0f));
+    static void pushInertialAndDepthWindow(ImuStream& imuStream,
+                                           DepthStream& depthStream,
+                                           double tStart,
+                                           double tEnd,
+                                           double depthZ = 5.0,
+                                           const Eigen::Vector3d& accel = Eigen::Vector3d(0.0, 0.0, -9.81),
+                                           const Eigen::Vector3d& omega = Eigen::Vector3d::Zero()) {
+        const double imuDt = 0.005;   // 200 Hz
+        const double depthDt = 0.050; // 20 Hz
+        const size_t imuSteps = static_cast<size_t>(std::ceil((tEnd - tStart) / imuDt)) + 2;
+        for (size_t i = 0; i <= imuSteps; ++i) {
+            double t = tStart + static_cast<double>(i) * imuDt;
+            imuStream.pushImu(makeImu(t, accel, omega));
+        }
+        const size_t depthSteps = static_cast<size_t>(std::ceil((tEnd - tStart) / depthDt)) + 2;
+        for (size_t i = 0; i <= depthSteps; ++i) {
+            double t = tStart + static_cast<double>(i) * depthDt;
+            depthStream.pushDepth(makeDepth(t, depthZ));
         }
     }
-}
 
-// Generates a 3D landmark grid in front of the camera and renders projected corners into an image
-inline std::vector<uint8_t> renderProjectedGridScene(size_t width,
-                                                     size_t height,
-                                                     const Eigen::Matrix3f &K,
-                                                     const Eigen::Matrix3f &R = Eigen::Matrix3f::Identity(),
-                                                     const Eigen::Vector3f &t = Eigen::Vector3f::Zero(),
-                                                     size_t cols = 6,
-                                                     size_t rows = 5,
-                                                     float depthMeters = 3.0f) {
-    std::vector<uint8_t> img(width * height, kDefaultBg);
-    const Eigen::Matrix3f KInv = K.inverse();
-
-    const float startX = 90.0f;
-    const float endX = static_cast<float>(width) - 90.0f;
-    const float startY = 80.0f;
-    const float endY = static_cast<float>(height) - 80.0f;
-
-    const float stepX = (cols > 1) ? (endX - startX) / static_cast<float>(cols - 1) : 0.0f;
-    const float stepY = (rows > 1) ? (endY - startY) / static_cast<float>(rows - 1) : 0.0f;
-
-    for (size_t r = 0; r < rows; r++) {
-        for (size_t c = 0; c < cols; c++) {
-            const float u0 = startX + static_cast<float>(c) * stepX;
-            const float v0 = startY + static_cast<float>(r) * stepY;
-
-            const Eigen::Vector3f ray0 = KInv * Eigen::Vector3f(u0, v0, 1.0f);
-            const Eigen::Vector3f pt3d = ray0 * depthMeters;
-            const Eigen::Vector3f ptCam = R * pt3d + t;
-
-            if (ptCam.z() > 0.1f) {
-                const Eigen::Vector2f uv = (K * ptCam).hnormalized();
-                drawSmoothCorner(img, width, height, uv.x(), uv.y());
+    static std::string findVocabPath() {
+        const std::vector<std::string> candidatePaths = {
+            "benchmarks/accuracy/vocab.bin",
+            "../benchmarks/accuracy/vocab.bin",
+            "../../benchmarks/accuracy/vocab.bin",
+            "../../../benchmarks/accuracy/vocab.bin"
+        };
+        for (const auto& path : candidatePaths) {
+            std::ifstream f(path);
+            if (f.good()) {
+                return path;
             }
         }
+        return "";
     }
-    return img;
-}
 
-} // namespace test_helpers
+    static FrontendConfig makeConfig() {
+        FrontendConfig cfg;
+        cfg.w = W;
+        cfg.h = H;
+        cfg.K << 400.0f, 0.0f, 320.0f,
+                 0.0f, 400.0f, 240.0f,
+                 0.0f, 0.0f, 1.0f;
+        cfg.dist = Distortion{0.0f, 0.0f, 0.0f, 0.0f};
+        cfg.droppedFeatureThreshold = 0.5f;
+        cfg.meanDisplacementThreshold = 15.0f;
+        cfg.maxTimeBetweenKf = 1.0;
+        cfg.hfQueueSize = 10;
+        cfg.bodyToCameraRot = Eigen::Matrix3d::Identity();
+
+        cfg.lfConfig.w = W;
+        cfg.lfConfig.h = H;
+        cfg.lfConfig.dist = cfg.dist;
+        cfg.lfConfig.numBuckets = 50;
+        cfg.lfConfig.K = cfg.K;
+        cfg.lfConfig.minTfIdfScore = 0.05f;
+        cfg.lfConfig.excludedFrames = 20;
+
+        return cfg;
+    }
+
+    // Helper to generate a textured image with high-contrast corners for FAST
+    static std::vector<uint8_t> makeTexturedImage(int offsetX = 0, int offsetY = 0) {
+        std::vector<uint8_t> img(W * H, 50);
+        // Draw grid of corners spaced by 40 pixels
+        for (int y = 40; y < static_cast<int>(H) - 40; y += 40) {
+            for (int x = 40; x < static_cast<int>(W) - 40; x += 40) {
+                int cx = x + offsetX;
+                int cy = y + offsetY;
+                for (int dy = -5; dy <= 5; ++dy) {
+                    for (int dx = -5; dx <= 5; ++dx) {
+                        int px = cx + dx;
+                        int py = cy + dy;
+                        if (px >= 0 && px < static_cast<int>(W) && py >= 0 && py < static_cast<int>(H)) {
+                            if (dx >= 0 && dy >= 0) {
+                                img[static_cast<size_t>(py) * W + static_cast<size_t>(px)] = 220;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return img;
+    }
+
+    // Safe packet pop with timeout (using std::promise to prevent future destructor deadlock)
+    static std::unique_ptr<BackendHfPacket> popHfPacketWithTimeout(Frontend& fe, std::chrono::milliseconds timeout = std::chrono::milliseconds(400)) {
+        auto prom = std::make_shared<std::promise<std::unique_ptr<BackendHfPacket>>>();
+        auto fut = prom->get_future();
+        std::thread([&fe, prom]() {
+            try {
+                prom->set_value(fe.getHfPacket());
+            } catch (...) {
+                prom->set_value(nullptr);
+            }
+        }).detach();
+        if (fut.wait_for(timeout) == std::future_status::ready) {
+            return fut.get();
+        }
+        return nullptr;
+    }
+
+    // Accessors for private members
+    static bool getRunFrontend(const Frontend& fe) {
+        return fe.runFrontend.load();
+    }
+
+    static uint32_t getFrameId(const Frontend& fe) {
+        return fe.frameId;
+    }
+
+    static size_t getHfQueueSize(Frontend& fe) {
+        std::lock_guard<std::mutex> lock(fe.m_hfQueue);
+        return fe.hfQueue.size();
+    }
+
+    static gtsam::imuBias::ConstantBias getImuBias(Frontend& fe) {
+        std::lock_guard<std::mutex> lock(fe.m_imuBias);
+        return fe.imuBias;
+    }
+
+    static HfTracker& getHfTracker(Frontend& fe) {
+        return fe.hf;
+    }
+
+    static LfTracker& getLfTracker(Frontend& fe) {
+        return fe.lf;
+    }
+};
+
 } // namespace PoolSLAM

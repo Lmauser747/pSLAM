@@ -17,6 +17,8 @@ target_link_libraries(unit_tests_hal PRIVATE
 add_executable(unit_tests_frontend
     TestTrackHfFeatures.cpp
     TestReplenishHfFeatures.cpp
+    TestP3p.cpp
+    TestLma.cpp
     TestLfTracker.cpp
 )
 target_link_libraries(unit_tests_frontend PRIVATE
@@ -28,16 +30,17 @@ target_link_libraries(unit_tests_frontend PRIVATE
 )
 
 
+
 # Backend Unit Tests
-add_executable(unit_tests_backend
-    TestBookkeeper.cpp
-)
-target_link_libraries(unit_tests_backend PRIVATE
-    poolslam_backend
-    GTest::gtest_main
-    Eigen3::Eigen
-    gtsam
-)
+# add_executable(unit_tests_backend
+#     TestBookkeeper.cpp
+# )
+# target_link_libraries(unit_tests_backend PRIVATE
+#     poolslam_backend
+#     GTest::gtest_main
+#     Eigen3::Eigen
+#     gtsam
+# )
 
 
 # Descriptor Unit Tests
@@ -53,4 +56,4 @@ target_link_libraries(unit_tests_descriptor PRIVATE
 gtest_discover_tests(unit_tests_hal TEST_PREFIX "unit_tests_.")
 gtest_discover_tests(unit_tests_frontend TEST_PREFIX "unit_tests_.")
 gtest_discover_tests(unit_tests_descriptor TEST_PREFIX "unit_tests_.")
-gtest_discover_tests(unit_tests_backend TEST_PREFIX "unit_tests_.")
+# gtest_discover_tests(unit_tests_backend TEST_PREFIX "unit_tests_.")

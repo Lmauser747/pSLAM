@@ -83,3 +83,6 @@ benchmarks/accuracy/runs
 benchmarks/accuracy/__*
 
 ARCH*
+
+tests/*.md
+benchmarks/*.md

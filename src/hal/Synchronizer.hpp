@@ -10,6 +10,8 @@
 #include <atomic>
 #include <cstddef>
 
+#include <eigen3/Eigen/Core>
+
 #include "pool_slam/Hal.hpp"
 #include "pool_slam/HalTypes.hpp"
 #include "pool_slam/SystemTypes.hpp"
@@ -63,6 +65,8 @@ private:
 
     // Trigger a synchronizer based fatal shutdown and nreturn checked out frame to the image stream queue
     void syncFatalShutdown(SyncStatus reason, PixelArray *checkedOutFrame); 
+
+    friend class TestSynchronizer;
 public:
     Synchronizer(ImuStream &imu, DepthStream &depth, ImageStream &image, size_t queueSize = DEFAULT_MAX_OUTPUT_QUEUE_SIZE) : 
     imuStream(imu), depthStream(depth), imageStream(image), maxOutputQueueSize(queueSize){}

@@ -36,6 +36,8 @@ private:
     int missedFrames = 0; // Number of consecutive frames the stream failed to provide data for
     
     bool fastPush(const Depth &depth); // Function to quickly move data into the ring buffer   
+
+    friend class TestDepthStream;
 public:
     DepthStream(size_t bufferSize = DEFAULT_DEPTH_BUFFER_SIZE) : maxSize(bufferSize){}
 
@@ -69,6 +71,7 @@ private:
     bool fastPush(const Imu &imu); // Quickly moves IMU data into the flat buffer
     Imu linInter(const Imu &first, const Imu &second, double target); // Linearly interpolate between two IMU measurements
     
+    friend class TestImuStream;
 public:
     ImuStream(size_t bufferSize = DEFAULT_IMU_BUFFER_SIZE) : initSize(bufferSize){
         compactThreshold = initSize / 2;
@@ -107,6 +110,7 @@ private:
     std::atomic<SensorHealth> health{SensorHealth::ACTIVE};
     int missedFrames = 0;
 
+    friend class TestImageStream;
 public:
     ImageStream(int w, int h, size_t maxReadyQueueSize = DEFAULT_MAX_QUEUE_SIZE, size_t poolCap = DEFAULT_POOL_CAPACITY) : 
     maxQueueSize(maxReadyQueueSize), poolCapacity(poolCap), imW(w), imH(h){

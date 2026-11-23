@@ -2,13 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <simde/arm/neon/max.h>
-#include <simde/arm/neon/reinterpret.h>
 #include <utility>
 #include <vector>
 #include <array>
 
-#include <eigen3/Eigen/Dense>
+#include <eigen3/Eigen/Core>
 #include <simde/arm/neon/ld1.h>
 #include <simde/arm/neon/st1.h>
 #include <simde/arm/neon/dup_n.h>
@@ -20,10 +18,9 @@
 #include <simde/arm/neon/orr.h>
 #include <simde/arm/neon/and.h>
 #include <simde/arm/neon/maxv.h>
-#include <simde/arm/neon/get_lane.h>
 #include <simde/arm/neon/reinterpret.h>
 
-#include <simd/Utils.hpp>
+#include "simd/Utils.hpp"
 
 namespace PoolSLAM{
 

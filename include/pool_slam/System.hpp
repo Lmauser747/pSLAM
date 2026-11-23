@@ -32,6 +32,8 @@ private:
 
     // Pimpl
     std::unique_ptr<Core> core;
+
+    friend class TestSystem;
 public:
     explicit System(SystemConfig sysConfig);
     ~System();
