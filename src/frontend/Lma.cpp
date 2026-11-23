@@ -154,7 +154,7 @@ bool LfTracker::refinePoseLM(size_t numInliers, const Eigen::Matrix3d& K_cam, Ei
 
     Tcand = T.block<3, 4>(0, 0);
 
-    Eigen::Matrix<double, 6, 6> HFinal = Eigen::Matrix<double, 6, 6>::Identity() * 1e-6;
+    Eigen::Matrix<double, 6, 6> HFinal = Eigen::Matrix<double, 6, 6>::Zero();
     const Eigen::Matrix3d R = T.block<3, 3>(0, 0);
     const Eigen::Vector3d t = T.block<3, 1>(0, 3);
 
@@ -179,7 +179,7 @@ bool LfTracker::refinePoseLM(size_t numInliers, const Eigen::Matrix3d& K_cam, Ei
         return false;
     }
     Eigen::LDLT<Eigen::Matrix<double, 6, 6>> ldlt(HFinal);
-    if(ldlt.info() != Eigen::Success || !ldlt.isPositive()){
+    if(ldlt.info() != Eigen::Success || !ldlt.isPositive() || ldlt.vectorD().minCoeff() <= 1e-7){
         return false;
     }
     outCovariance = ldlt.solve(Eigen::Matrix<double, 6, 6>::Identity());

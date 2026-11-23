@@ -1,4 +1,4 @@
-#include "P3pTestHelpers.hpp"
+#include "TestP3pHelpers.hpp"
 
 namespace PoolSLAM {
 

@@ -31,16 +31,16 @@ target_link_libraries(unit_tests_frontend PRIVATE
 
 
 
-# Backend Unit Tests
-# add_executable(unit_tests_backend
-#     TestBookkeeper.cpp
-# )
-# target_link_libraries(unit_tests_backend PRIVATE
-#     poolslam_backend
-#     GTest::gtest_main
-#     Eigen3::Eigen
-#     gtsam
-# )
+# DepthFactor Unit Tests
+add_executable(unit_tests_depth_factor
+    TestDepthFactor.cpp
+)
+target_link_libraries(unit_tests_depth_factor PRIVATE
+    poolslam_backend
+    GTest::gtest_main
+    Eigen3::Eigen
+    gtsam
+)
 
 
 # Descriptor Unit Tests
@@ -56,4 +56,4 @@ target_link_libraries(unit_tests_descriptor PRIVATE
 gtest_discover_tests(unit_tests_hal TEST_PREFIX "unit_tests_.")
 gtest_discover_tests(unit_tests_frontend TEST_PREFIX "unit_tests_.")
 gtest_discover_tests(unit_tests_descriptor TEST_PREFIX "unit_tests_.")
-# gtest_discover_tests(unit_tests_backend TEST_PREFIX "unit_tests_.")
+gtest_discover_tests(unit_tests_depth_factor TEST_PREFIX "unit_tests_.")

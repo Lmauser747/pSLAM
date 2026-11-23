@@ -1,4 +1,4 @@
-#include "DescriptorTestHelpers.hpp"
+#include "TestDescriptorHelpers.hpp"
 
 namespace PoolSLAM {
 namespace descriptor {

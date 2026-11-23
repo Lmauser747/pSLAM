@@ -1,4 +1,4 @@
-#include "LmaTestHelpers.hpp"
+#include "TestLmaHelpers.hpp"
 
 namespace PoolSLAM {
 

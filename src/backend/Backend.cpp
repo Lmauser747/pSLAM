@@ -204,8 +204,8 @@ void Backend::processKeyframe(const BackendHfPacket &pkt){
                 removeIndices.push_back(slotIt->second);
             }
 
-            // Ad to staging graph
-            stagingGraph.push_back(factor);
+            // Add to staging graph
+            stagingGraph.emplace_shared<SmartFactor>(*it->second);
             stagedFeatureIds.push_back(feat.featureId);
         }
     }
