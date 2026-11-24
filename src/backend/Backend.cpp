@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <gtsam/nonlinear/FixedLagSmoother.h>
+#include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
 #include <iostream>
 #include <memory>
 #include <thread>
@@ -29,6 +31,7 @@
 #include <gtsam/navigation/NavState.h>
 #include <gtsam/nonlinear/ISAM2Result.h>
 #include <gtsam/nonlinear/PriorFactor.h>
+#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 
 #include "backend/Backend.hpp"
 #include "CoreTypes.hpp"
@@ -47,11 +50,11 @@ Backend::Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &
       lf(lfTracker),
       config(cfg),
       Kptr(std::make_shared<gtsam::Cal3_S2>(1.0, 1.0, 0.0, 0.0, 0.0)){
-    gtsam::ISAM2Params isamParams;
-    isamParams.relinearizeThreshold = config.relinearizeThreshold;
-    isamParams.relinearizeSkip = config.relinearizeSkip;
-    isamParams.factorization = gtsam::ISAM2Params::QR;
-    isam = gtsam::ISAM2(isamParams);
+    gtsam::ISAM2Params smootherParams;
+    smootherParams.relinearizeThreshold = config.relinearizeThreshold;
+    smootherParams.relinearizeSkip = config.relinearizeSkip;
+    smootherParams.factorization = gtsam::ISAM2Params::QR;
+    smoother = gtsam::IncrementalFixedLagSmoother(config.smootherLag, smootherParams);
     
     // Initial noise models
     gtsam::Vector6 initBiasSigmas;
@@ -64,6 +67,11 @@ Backend::Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &
     gtsam::Vector3 initVelSigmas;
     initVelSigmas << config.initVelSigma, config.initVelSigma, config.initVelSigma;
     initVelNoise = gtsam::noiseModel::Diagonal::Sigmas(initVelSigmas);
+
+    // Odometry noise model for global pose graph
+    gtsam::Vector6 odomSigmas;
+    odomSigmas << 0.05, 0.05, 0.05, 0.01, 0.01, 0.01;
+    odomNoise = gtsam::noiseModel::Diagonal::Sigmas(odomSigmas);
 
     auto baseDepthNoise = gtsam::noiseModel::Isotropic::Sigma(1, config.depthSigma);
     depthNoise = gtsam::noiseModel::Robust::Create(
@@ -133,23 +141,27 @@ void Backend::backendTask(){
 
         // Propogate state with Imu data for high frequency navigation tasks
         if(hfPkt->imuDelta != nullptr && hfPkt->imuDelta->deltaTij() > 0.0){
-            prevNavState = hfPkt->imuDelta->predict(prevNavState, prevBias);
+            prevNavState = hfPkt->imuDelta->predict(lastCommittedNavState, prevBias);
         }
         publishPose(prevNavState.pose(), prevNavState.velocity(), hfPkt->timestamp);
 
-        // Do the factor graph solve if the packet is a keyframe
-        if(hfPkt->isKeyframe){
-           processKeyframe(*hfPkt);
-        }
+        // Solve smoother graph
+        processFrame(*hfPkt);
         
         prevFrameId = hfPkt->frameId;
         prevTimestamp = hfPkt->timestamp;
     }
 }
 
-void Backend::processKeyframe(const BackendHfPacket &pkt){
+void Backend::processFrame(const BackendHfPacket &pkt){
     double dt = pkt.timestamp - lastCommittedTimestamp;
     dt = std::max(1e-4, dt);
+    double imuDt = pkt.imuDelta ? pkt.imuDelta->deltaTij() : 0.0;
+    if(std::abs(dt - imuDt) > 0.05){
+        std::cerr << "[Backend DIAG] Keyframe " << pkt.frameId
+                  << " dt mismatch: dataset dt=" << dt
+                  << "s, imuDelta dt=" << imuDt << "s" << std::endl;
+    }
     
     // Insert values
     stagingValues.insert(X(pkt.frameId), prevNavState.pose());
@@ -174,73 +186,119 @@ void Backend::processKeyframe(const BackendHfPacket &pkt){
          stagingGraph.emplace_shared<DepthFactor>(X(pkt.frameId), pkt.depth.value(), depthNoise, config.bodyToDepthSensor);
     }
 
-    // Drain lfPacket queue
-    BackendLfPacket lfPkt;
-    bool loopClosed = false;
-    while(lf.getMatch(lfPkt)){
-        processLfPacket(lfPkt);
-        loopClosed = true;
-    }
-
     // Update features found from the hfTracker and modify their smartProjectionFactor
     gtsam::FactorIndices removeIndices;
     stagedFeatureIds.clear();
-    
-    for(auto &feat : pkt.visualFeatures){
-        auto it = smartFactors.find(feat.featureId);
 
-        if(feat.isNewTrack || it == smartFactors.end()){
+    const auto &smootherTimestamps = smoother.timestamps();
+    const double minAllowedTime = pkt.timestamp - config.smootherLag + 1e-4;
+
+    for(const auto &feat : pkt.visualFeatures){
+        if(feat.isNewTrack){
+            activeFeatureTracks[feat.featureId].clear();
+            smartFactorSlots.erase(feat.featureId);
+        }
+
+        auto &track = activeFeatureTracks[feat.featureId];
+        track.emplace_back(feat.pt, X(pkt.frameId));
+
+        // Prune observations outside the smoother lag window
+        track.erase(std::remove_if(track.begin(), track.end(), [&](const auto &obs){
+            if(obs.second == X(pkt.frameId)){
+                return false;
+            }
+            auto it = smootherTimestamps.find(obs.second);
+            if(it == smootherTimestamps.end()){
+                return true;
+            }
+            return it->second < minAllowedTime;
+        }), track.end());
+
+        // If track has at least 2 views in the sliding window, create/replace factor
+        if(track.size() >= 2){
             auto factor = std::make_shared<SmartFactor>(visualNoise, Kptr, config.bodyToCameraFrame);
-            factor->add(feat.pt, X(pkt.frameId));
+            for(const auto &obs : track){
+                factor->add(obs.first, obs.second);
+            }
             smartFactors[feat.featureId] = factor;
-        }else{
-            auto factor = it->second;
-            factor->add(feat.pt, X(pkt.frameId));
 
+            // If a factor for this feature already exists in the smoother, mark it for removal
             auto slotIt = smartFactorSlots.find(feat.featureId);
-
-            // If this is the third track, add it to the list of indices to be removed
             if(slotIt != smartFactorSlots.end()){
                 removeIndices.push_back(slotIt->second);
             }
 
-            // Add to staging graph
-            stagingGraph.emplace_shared<SmartFactor>(*it->second);
+            stagingGraph.push_back(factor);
             stagedFeatureIds.push_back(feat.featureId);
+        }else{
+            // Track no longer has >= 2 views in the window; remove existing factor if any
+            auto slotIt = smartFactorSlots.find(feat.featureId);
+            if(slotIt != smartFactorSlots.end()){
+                removeIndices.push_back(slotIt->second);
+                smartFactorSlots.erase(slotIt);
+                smartFactors.erase(feat.featureId);
+            }
         }
     }
 
-    if(solveGraph(pkt.frameId, removeIndices)){
+    if(solveSmoother(pkt.frameId, pkt.timestamp, removeIndices)){
+
+        bool loopClosed = false;
+        // Deal with global graph if this is a keyframe
+        if(pkt.isKeyframe){
+            // Add odometry factor to global graph
+            auto relPose = lastCommittedKeyframeNavState.pose().between(prevNavState.pose());
+            globalPoseGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lastCommittedKeyframeId), X(pkt.frameId), relPose, odomNoise);
+            globalPoseValues.insert(X(pkt.frameId), prevNavState.pose());
+
+            // Drain lfPacket queue
+            BackendLfPacket lfPkt;
+            while(lf.getMatch(lfPkt)){
+                processLfPacket(lfPkt);
+                loopClosed = true;
+            }
+
+            solveGlobal(pkt.frameId);
+
+            // Add the keyframe to the tracked keyframes
+            TrackedKeyframe kf;
+            kf.frameId = pkt.frameId;
+            kf.featureIds.reserve(pkt.visualFeatures.size());
+            for(auto &feat : pkt.visualFeatures){
+                kf.featureIds.push_back(feat.featureId);
+            }
+
+            if(trackedKeyframes.size() >= config.keyframeWindowSize){
+                trackedKeyframes.pop_front();
+            }
+            trackedKeyframes.push_back(kf);
+            
+            lastCommittedKeyframeId = pkt.frameId;
+            lastCommittedKeyframeNavState = prevNavState;
+        }
+    
         lastCommittedFrameId = pkt.frameId;
         lastCommittedTimestamp = pkt.timestamp;
-
-        // Add the keyframe to the tracked keyframes
-        TrackedKeyframe kf;
-        kf.frameId = pkt.frameId;
-        kf.featureIds.reserve(pkt.visualFeatures.size());
-        for(auto &feat : pkt.visualFeatures){
-            kf.featureIds.push_back(feat.featureId);
-        }
-
-        if(trackedKeyframes.size() >= config.keyframeWindowSize){
-            trackedKeyframes.pop_front();
-        }
-        trackedKeyframes.push_back(kf);
+        lastCommittedNavState = prevNavState;
 
         publishPose(prevNavState.pose(), prevNavState.velocity(), pkt.timestamp);
         syncLfTracker(loopClosed);
+    }else{
+        for(const auto &feat : pkt.visualFeatures){
+            activeFeatureTracks[feat.featureId].pop_back();
+        }
     }
 }
 
 void Backend::processLfPacket(const BackendLfPacket &lfPkt){
     // make sure all of the keys exist
-    bool curKeyValid = stagingValues.exists(X(lfPkt.currentFrameId)) || isam.valueExists(X(lfPkt.currentFrameId));
-    bool matchKeyValid = stagingValues.exists(X(lfPkt.matchedFrameId)) || isam.valueExists(X(lfPkt.matchedFrameId));
+    bool curKeyValid = globalPoseValues.exists(X(lfPkt.currentFrameId)); 
+    bool matchKeyValid = globalPoseValues.exists(X(lfPkt.matchedFrameId));
 
     if(curKeyValid && matchKeyValid){
         auto betweenPose = config.bodyToCameraFrame * lfPkt.relativePose.inverse() * config.bodyToCameraFrame.inverse();
         if(lfPkt.noiseModel != nullptr){
-            stagingGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lfPkt.matchedFrameId), X(lfPkt.currentFrameId), betweenPose, lfPkt.noiseModel);
+            globalPoseGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lfPkt.matchedFrameId), X(lfPkt.currentFrameId), betweenPose, lfPkt.noiseModel);
         }else{ 
             // Fallback if noiseModel is null for soem reason
             gtsam::Vector6 sigmas;
@@ -249,61 +307,133 @@ void Backend::processLfPacket(const BackendLfPacket &lfPkt){
             auto fallbackNoise = gtsam::noiseModel::Robust::Create(
                 gtsam::noiseModel::mEstimator::Huber::Create(1.345), baseGaussian
             );
-            stagingGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lfPkt.matchedFrameId), X(lfPkt.currentFrameId), betweenPose, fallbackNoise);
+            globalPoseGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lfPkt.matchedFrameId), X(lfPkt.currentFrameId), betweenPose, fallbackNoise);
         }
     }else{
         return;
     }
 }
 
-bool Backend::solveGraph(uint32_t currentFrameId, const gtsam::FactorIndices &removeIndices){
-    gtsam::ISAM2Result result;
-    try{
-        // Solve the ISAM2 graph
-        result = isam.update(stagingGraph, stagingValues, removeIndices);
+bool Backend::solveSmoother(uint32_t currentFrameId, double timestamp, const gtsam::FactorIndices &removeIndices){
+    auto keyToTimestamp = gtsam::IncrementalFixedLagSmoother::KeyTimestampMap();
+    for(const auto& value : stagingValues){
+        keyToTimestamp[value.key] = timestamp;
     }
 
-    // Check for execptions
+    // Solve the smoother graph
+    gtsam::FixedLagSmootherResult result;    
+    try{
+        result = smoother.update(stagingGraph, stagingValues, keyToTimestamp, removeIndices);
+    }
+
     catch(const gtsam::IndeterminantLinearSystemException &e){
-        std::cerr << "WARNING: GTSAM IndeterminantLinearSystemException at frame: " << currentFrameId;
+        std::cerr << "WARNING: GTSAM IndeterminantLinearSystemException at frame: " << currentFrameId
+                  << ", nearby variable: " << gtsam::DefaultKeyFormatter(e.nearbyVariable()) << std::endl;
         stagingGraph.resize(0);
         stagingValues.clear();
+        stagedFeatureIds.clear();
         return false;
     }
 
     catch(const std::exception &e){
-        std::cerr << "WARNING: Exception in PoolSLAM::solveGraph at frame: " << currentFrameId;
+        std::cerr << "WARNING: Exception in solveSmoother at frame: " << currentFrameId
+                  << ": " << e.what() << std::endl;
         stagingGraph.resize(0);
         stagingValues.clear();
+        stagedFeatureIds.clear();
         return false;
     }
 
-    isamEstimate = isam.calculateEstimate();
-    
-    // Make sure the desried psoe exists
-    if(!isamEstimate.exists(X(currentFrameId))){
-        stagingValues.clear();
+
+    smootherEstimate = smoother.calculateEstimate();
+
+    // Makse sure the smoother estimate contains the current frame
+    if(smootherEstimate.find(X(currentFrameId)) == smootherEstimate.end()){
         stagingGraph.resize(0);
+        stagingValues.clear();
+        stagedFeatureIds.clear();
         return false;
     }
 
-    auto newFactors = result.getNewFactorsIndices();
-    
-    // Update slots of remvoed factors
-    auto startingOffset = newFactors.size() - stagedFeatureIds.size();
-    for(size_t i = 0; i < stagedFeatureIds.size(); i++){
-        smartFactorSlots[stagedFeatureIds[i]] = newFactors[i + startingOffset];
+    // Remove marginalized tracks
+    auto deletedKeys = result.getKeysOfDeletedNodes();
+
+    if(!deletedKeys.empty()){
+        for(auto trackIt = activeFeatureTracks.begin(); trackIt != activeFeatureTracks.end(); ){
+            auto &track = trackIt->second;
+            
+            track.erase(std::remove_if(track.begin(), track.end(), [&deletedKeys](const auto &obs){
+                return deletedKeys.find(obs.second) != deletedKeys.end();
+            }), track.end());
+
+            if(track.size() < 2){
+                smartFactors.erase(trackIt->first);
+                smartFactorSlots.erase(trackIt->first);
+                if(track.empty()){
+                    trackIt = activeFeatureTracks.erase(trackIt);
+                }else{
+                    trackIt++;
+                }
+            }else{
+                trackIt++;
+            }
+        }
     }
 
-    // Update state
-    prevNavState = gtsam::NavState(isamEstimate.at<gtsam::Pose3>(X(currentFrameId)), isamEstimate.at<gtsam::Vector3>(V(currentFrameId)));
-    prevBias = isamEstimate.at<gtsam::imuBias::ConstantBias>(B(currentFrameId));
+    // Remove marginalized factors
+    auto deletedFactors = result.getDeletedFactorIndices();
+    if(!deletedFactors.empty()){
+        for(auto factorIt = smartFactorSlots.begin(); factorIt != smartFactorSlots.end(); ){
+            if(std::find(deletedFactors.begin(), deletedFactors.end(), factorIt->second) != deletedFactors.end()){
+                smartFactors.erase(factorIt->first);
+                factorIt = smartFactorSlots.erase(factorIt);
+            }else{
+                factorIt++;
+            }
+        }
+    }
 
-    // Pass IMU bias to Frontend
+    // Get new factors
+    auto newFactors = smoother.getISAM2Result().newFactorsIndices;
+    if(newFactors.size() >= stagedFeatureIds.size()){
+        auto newFactorOffset = newFactors.size() - stagedFeatureIds.size();
+        for(size_t i = 0; i < stagedFeatureIds.size(); i++){
+            smartFactorSlots[stagedFeatureIds[i]] = newFactors[i + newFactorOffset];
+        }
+    }
+
+    prevNavState = gtsam::NavState(smootherEstimate.at<gtsam::Pose3>(X(currentFrameId)), smootherEstimate.at<gtsam::Vector3>(V(currentFrameId)));
+    prevBias = smootherEstimate.at<gtsam::imuBias::ConstantBias>(B(currentFrameId));
+
     fe.setBias(prevBias);
 
-    stagingValues.clear();
     stagingGraph.resize(0);
+    stagingValues.clear();
+    stagedFeatureIds.clear();
+
+    return true;
+}
+
+bool Backend::solveGlobal(uint32_t currentFrameId){
+    auto opt = gtsam::LevenbergMarquardtOptimizer(globalPoseGraph, globalPoseValues);
+    gtsam::Values newValues;
+    try{
+        newValues = opt.optimize();
+    }
+
+    catch(const gtsam::IndeterminantLinearSystemException &e){
+        std::cerr << "WARNING: GTSAM IndeterminantLinearSystemException at frame: " << currentFrameId
+                  << ", nearby variable: " << gtsam::DefaultKeyFormatter(e.nearbyVariable()) << std::endl;
+        return false;
+    }
+
+    catch(const std::exception &e){
+        std::cerr << "WARNING: Exception in solveGlobal at frame: " << currentFrameId
+                  << ": " << e.what() << std::endl;
+        return false;
+    }
+
+    globalPoseValues = newValues;
 
     return true;
 }
@@ -334,6 +464,8 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
         prevNavState = gtsam::NavState(gtsam::Pose3(attitude, position), gtsam::Vector3(0, 0, 0));
     }
 
+    publishPose(prevNavState.pose(), prevNavState.velocity(), pkt.timestamp);
+
     // Intialize biases
     if(pkt.initialGyro.has_value()){
         prevBias = gtsam::imuBias::ConstantBias(gtsam::Vector3(0, 0, 0), *pkt.initialGyro);
@@ -341,25 +473,46 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
         prevBias = gtsam::imuBias::ConstantBias();
     }
 
-    // Emplace initial factors
+    // Emplace initial factors for smoother
     stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(pkt.frameId), prevNavState.pose(), initPoseNoise);
     stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Vector3>>(V(pkt.frameId), prevNavState.velocity(), initVelNoise);
     stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::imuBias::ConstantBias>>(B(pkt.frameId), prevBias, initBiasNoise);
 
-    // Add initial values
+    // Add initial values to smoother
     stagingValues.insert(X(pkt.frameId), prevNavState.pose());
     stagingValues.insert(V(pkt.frameId), prevNavState.velocity());
     stagingValues.insert(B(pkt.frameId), prevBias);
 
-    // Do initial solve
-    if(!solveGraph(pkt.frameId)){
+    // Seed activeFeatureTracks 
+    for(const auto &feat : pkt.visualFeatures){
+        activeFeatureTracks[feat.featureId].emplace_back(feat.pt, X(pkt.frameId));
+    }
+
+    // Do initial solve of smoother
+    if(!solveSmoother(pkt.frameId, pkt.timestamp)){
+        activeFeatureTracks.clear();
         return;
     }
 
+    // Add prior and initial pose to the global graph
+    globalPoseGraph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(pkt.frameId), prevNavState.pose(), initPoseNoise);
+    globalPoseValues.insert(X(pkt.frameId), prevNavState.pose());
+
+    TrackedKeyframe kf;
+    kf.frameId = pkt.frameId;
+    kf.lastLandmarkCount = 0;
+    for(const auto &feat : pkt.visualFeatures){
+        kf.featureIds.push_back(feat.featureId);
+    }
+    trackedKeyframes.push_back(kf);
+    
     isInitialized = true;
 
     lastCommittedFrameId = pkt.frameId;
+    lastCommittedKeyframeId = pkt.frameId; 
     lastCommittedTimestamp = pkt.timestamp;
+    lastCommittedNavState = prevNavState;
+    lastCommittedKeyframeNavState = prevNavState;
     prevFrameId = pkt.frameId;
     prevTimestamp = pkt.timestamp;
 }
@@ -368,10 +521,10 @@ void Backend::syncLfTracker(bool forceAll){
     for(auto &kf : trackedKeyframes){
         BackendKeyframeUpdate update;
         update.id = kf.frameId;
-        if(!isamEstimate.exists(X(kf.frameId))){
+        if(!globalPoseValues.exists(X(kf.frameId))){
             continue;
         }
-        update.pose = isamEstimate.at<gtsam::Pose3>(X(kf.frameId)) * config.bodyToCameraFrame;
+        update.pose = globalPoseValues.at<gtsam::Pose3>(X(kf.frameId)) * config.bodyToCameraFrame;
         update.landmarks.reserve(kf.lastLandmarkCount);
         size_t count = 0;
         for(auto featId : kf.featureIds){
@@ -379,15 +532,31 @@ void Backend::syncLfTracker(bool forceAll){
             if(sfIt == smartFactors.end() || sfIt->second == nullptr){
                 continue;
             }
-            auto tri = sfIt->second->point(isamEstimate);
-            if(tri.has_value()){
-                auto ptCam = update.pose.transformTo(tri.value());
-                if(ptCam.z() <= 0.0){
-                    continue;
+
+            bool allKeysExist = true;
+            for(gtsam::Key k : sfIt->second->keys()){
+                if(!smootherEstimate.exists(k)){
+                    allKeysExist = false;
+                    break;
                 }
-                update.landmarks.push_back({ptCam, featId});
-                count++;
-            } 
+            }
+            if(!allKeysExist){
+                continue;
+            }
+
+            try{
+                auto tri = sfIt->second->point(smootherEstimate);
+                if(tri.has_value()){
+                    auto ptCam = update.pose.transformTo(tri.value());
+                    if(ptCam.z() <= 0.0){
+                        continue;
+                    }
+                    update.landmarks.push_back({ptCam, featId});
+                    count++;
+                }
+            }catch(const std::exception &){
+                continue;
+            }
         }
         if(count > kf.lastLandmarkCount || forceAll){
             kf.lastLandmarkCount = count;

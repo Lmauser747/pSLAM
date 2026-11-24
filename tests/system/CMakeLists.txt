@@ -40,3 +40,22 @@ target_link_libraries(system_tests_backend PRIVATE
 )
 
 gtest_discover_tests(system_tests_backend TEST_PREFIX "system_tests_.")
+
+add_executable(system_tests_system
+    TestSystem.cpp
+)
+
+target_link_libraries(system_tests_system PRIVATE
+    poolslam_core
+    poolslam_backend
+    poolslam_frontend
+    poolslam_hal
+    poolslam_descriptor
+    yaml-cpp
+    GTest::gtest_main
+    Eigen3::Eigen
+    gtsam
+    Threads::Threads
+)
+
+gtest_discover_tests(system_tests_system TEST_PREFIX "system_tests_.")

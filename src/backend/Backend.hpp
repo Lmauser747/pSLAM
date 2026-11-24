@@ -24,6 +24,7 @@
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/navigation/NavState.h>
 #include <gtsam/nonlinear/ISAM2.h>
+#include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
 #include <gtsam/nonlinear/NoiseModelFactorN.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
@@ -67,6 +68,7 @@ struct BackendConfig{
     double depthHuberK = 1.345;
 
     size_t keyframeWindowSize = 20; // Number of keyframes to keep in trackedKeyframes
+    double smootherLag = 2.0; // Lag for fixed-lag smoother in seconds
 };
 
 class DepthFactor : public gtsam::NoiseModelFactorN<gtsam::Pose3>{
@@ -100,11 +102,16 @@ class Backend{
 
     BackendConfig config;
 
-    gtsam::ISAM2 isam;
+    gtsam::IncrementalFixedLagSmoother smoother; // Fixed-lag smoother for local VIO
     gtsam::NonlinearFactorGraph stagingGraph; 
     gtsam::Values stagingValues;
     std::vector<uint32_t> stagedFeatureIds;
-    gtsam::Values isamEstimate;
+    gtsam::Values smootherEstimate;
+
+    // Global pose graph for loop closures
+    gtsam::NonlinearFactorGraph globalPoseGraph;
+    gtsam::Values globalPoseValues;
+    gtsam::SharedNoiseModel odomNoise;
 
     // Pre-allocated noise models for priors and depth factors
     gtsam::SharedNoiseModel initPoseNoise;
@@ -122,12 +129,16 @@ class Backend{
     double prevTimestamp = 0.0;
     uint32_t lastCommittedFrameId = 0;
     double lastCommittedTimestamp = 0.0;
+    uint32_t lastCommittedKeyframeId = 0;
     gtsam::NavState prevNavState;
+    gtsam::NavState lastCommittedNavState;
+    gtsam::NavState lastCommittedKeyframeNavState;
     gtsam::imuBias::ConstantBias prevBias;
 
     // Smart factor storage
     std::unordered_map<uint32_t, std::shared_ptr<SmartFactor>> smartFactors;
     std::unordered_map<uint32_t, gtsam::FactorIndex> smartFactorSlots;
+    std::unordered_map<uint32_t, std::vector<std::pair<gtsam::Point2, gtsam::Key>>> activeFeatureTracks; // Active visual tracks in smoother window
 
     // Queue of recent keyframes and their associated features
     std::deque<TrackedKeyframe> trackedKeyframes;
@@ -145,7 +156,7 @@ class Backend{
     void initializeSystem(const BackendHfPacket &pkt);
 
     // Process keyframe data coming from HfTracker
-    void processKeyframe(const BackendHfPacket &pkt);
+    void processFrame(const BackendHfPacket &pkt);
 
     // Process lf packets for loop closure
     void processLfPacket(const BackendLfPacket &pkt);
@@ -156,8 +167,11 @@ class Backend{
     // Published pose to the buffer
     void publishPose(const gtsam::Pose3 &pose, const gtsam::Vector3 &velocity, double timestamp);
 
-    // Solve the factor graph
-    bool solveGraph(uint32_t currentFrameId, const gtsam::FactorIndices &removeIndices = {});
+    // Solve the smoother factor graph
+    bool solveSmoother(uint32_t currentFrameId, double timestamp, const gtsam::FactorIndices &removeIndices = {});
+
+    // Solve the global factor graph
+    bool solveGlobal(uint32_t currentFrameId);
 
 public:
     Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &cfg);

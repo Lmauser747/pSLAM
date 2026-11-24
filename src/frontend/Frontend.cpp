@@ -32,25 +32,29 @@ void Frontend::processPacket(){
             }
         }
 
-        std::unique_ptr<gtsam::PreintegratedImuMeasurements> imuDelta = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, imuBias);
+        std::unique_ptr<gtsam::PreintegratedImuMeasurements> frameImuDelta;
+        {
+            std::lock_guard<std::mutex> lock(m_imuBias);
+            frameImuDelta = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, imuBias);
+        }
         if(!syncPkt.imu.empty()){
-            auto tPrev = syncPkt.imu.front().timestamp;
+            double tPrev = (lastImuTimestamp > 0.0) ? lastImuTimestamp : syncPkt.imu.front().timestamp;
             for(size_t i = 0; i < syncPkt.imu.size(); i++){
-                auto tCurr = syncPkt.imu[i].timestamp;
-                auto dt = tCurr - tPrev;
-                if(dt <= 0.0){
-                    continue;
+                double tCurr = syncPkt.imu[i].timestamp;
+                double dt = tCurr - tPrev;
+                if(dt > 0.0){
+                    frameImuDelta->integrateMeasurement(syncPkt.imu[i].a, syncPkt.imu[i].w, dt);
+                    tPrev = tCurr;
                 }
-                imuDelta->integrateMeasurement(syncPkt.imu[i].a, syncPkt.imu[i].w, dt);
-                tPrev = tCurr;
             }
+            lastImuTimestamp = tPrev;
         }
             
 
         std::unique_ptr<BackendHfPacket> hfPkt = std::make_unique<BackendHfPacket>();
 
         // Get the IMU estimate of the rotation between frames
-        auto Rcam = config.bodyToCameraRot.transpose() * imuDelta->deltaRij().matrix() * config.bodyToCameraRot; // Frame to frame relative camera rotation
+        auto Rcam = config.bodyToCameraRot.transpose() * frameImuDelta->deltaRij().matrix() * config.bodyToCameraRot; // Frame to frame relative camera rotation
         
         // Track the existing features using IC-LK
         auto meanDisplacement = hf.trackExistingFeatures(syncPkt.image->arr.data(), Rcam.cast<float>()); 
@@ -75,7 +79,7 @@ void Frontend::processPacket(){
         }
 
         // Fill packet
-        hfPkt->imuDelta = std::move(imuDelta);
+        hfPkt->imuDelta = std::move(frameImuDelta);
         if(syncPkt.depth.has_value()){
             hfPkt->depth = syncPkt.depth->z;
         }
@@ -145,6 +149,11 @@ void Frontend::start(){
             hfQueue.pop();
         }
         frameId = 0;
+        lastImuTimestamp = -1.0;
+        {
+            std::lock_guard<std::mutex> biasLock(m_imuBias);
+            keyframeImuDelta = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, imuBias);
+        }
         runFrontend.store(true, std::memory_order_release);
     }
     lf.start();

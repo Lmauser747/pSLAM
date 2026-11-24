@@ -51,6 +51,8 @@ class Frontend{
 
     std::queue<std::unique_ptr<BackendHfPacket>> hfQueue; // Queue for hf packets to be sent to backend
     gtsam::imuBias::ConstantBias imuBias; // IMU bias data from the backend
+    std::unique_ptr<gtsam::PreintegratedImuMeasurements> keyframeImuDelta; // Accumulated across keyframes
+    double lastImuTimestamp = -1.0;
 
     uint32_t frameId = 0;
 

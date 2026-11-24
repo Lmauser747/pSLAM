@@ -102,9 +102,9 @@ TEST_F(BackendTest, BootstrappingDepthLeverArmCompensation) {
     callInitializeSystem(harness.backend, pkt0);
 
     EXPECT_TRUE(isInitialized(harness.backend));
-    ASSERT_TRUE(getIsamEstimate(harness.backend).exists(X(0)));
+    ASSERT_TRUE(getSmootherEstimate(harness.backend).exists(X(0)));
 
-    const Pose3 pose0 = getIsamEstimate(harness.backend).at<Pose3>(X(0));
+    const Pose3 pose0 = getSmootherEstimate(harness.backend).at<Pose3>(X(0));
     // Lever arm compensation: z_0 = z_meas - l_z = 12.7 - 0.7 = 12.0 m
     EXPECT_NEAR(pose0.z(), 12.0, 1e-2);
 }
@@ -122,12 +122,12 @@ TEST_F(BackendTest, BootstrappingGravityAlignment) {
     callInitializeSystem(harness.backend, pkt0);
     EXPECT_TRUE(isInitialized(harness.backend));
 
-    const Pose3 pose0 = getIsamEstimate(harness.backend).at<Pose3>(X(0));
+    const Pose3 pose0 = getSmootherEstimate(harness.backend).at<Pose3>(X(0));
     EXPECT_NEAR(pose0.z(), 5.0, 1e-2);
 
     // Initial velocity must be zero
-    ASSERT_TRUE(getIsamEstimate(harness.backend).exists(V(0)));
-    const Vector3 v0 = getIsamEstimate(harness.backend).at<Vector3>(V(0));
+    ASSERT_TRUE(getSmootherEstimate(harness.backend).exists(V(0)));
+    const Vector3 v0 = getSmootherEstimate(harness.backend).at<Vector3>(V(0));
     EXPECT_NEAR(v0.norm(), 0.0, 1e-6);
 }
 
@@ -144,7 +144,7 @@ TEST_F(BackendTest, BootstrappingSmallAccelDefaultsToIdentityAttitude) {
     callInitializeSystem(harness.backend, pkt0);
     EXPECT_TRUE(isInitialized(harness.backend));
 
-    const Pose3 pose0 = getIsamEstimate(harness.backend).at<Pose3>(X(0));
+    const Pose3 pose0 = getSmootherEstimate(harness.backend).at<Pose3>(X(0));
     EXPECT_LT((pose0.rotation().matrix() - Rot3::Identity().matrix()).cwiseAbs().maxCoeff(), 1e-4);
 }
 
@@ -160,8 +160,8 @@ TEST_F(BackendTest, BootstrappingGyroBiasInitialization) {
     callInitializeSystem(harness.backend, pkt0);
     EXPECT_TRUE(isInitialized(harness.backend));
 
-    ASSERT_TRUE(getIsamEstimate(harness.backend).exists(B(0)));
-    const auto bias0 = getIsamEstimate(harness.backend).at<gtsam::imuBias::ConstantBias>(B(0));
+    ASSERT_TRUE(getSmootherEstimate(harness.backend).exists(B(0)));
+    const auto bias0 = getSmootherEstimate(harness.backend).at<gtsam::imuBias::ConstantBias>(B(0));
 
     EXPECT_NEAR(bias0.gyroscope().x(), 0.02, 1e-4);
     EXPECT_NEAR(bias0.gyroscope().y(), -0.015, 1e-4);
@@ -180,7 +180,7 @@ TEST_F(BackendTest, BootstrappingMissingDepthFallback) {
     callInitializeSystem(harness.backend, pkt0);
     EXPECT_TRUE(isInitialized(harness.backend));
 
-    const Pose3 pose0 = getIsamEstimate(harness.backend).at<Pose3>(X(0));
+    const Pose3 pose0 = getSmootherEstimate(harness.backend).at<Pose3>(X(0));
     EXPECT_NEAR(pose0.z(), 0.0, 1e-2);
 }
 
@@ -264,15 +264,15 @@ TEST_F(BackendTest, KeyframeFactorGraphAssembly) {
     pkt1.depth = 5.2;
     pkt1.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.5);
 
-    callProcessKeyframe(harness.backend, pkt1);
+    callProcessFrame(harness.backend, pkt1);
 
     // Verify X(1), V(1), B(1) are added to estimate
-    EXPECT_TRUE(getIsamEstimate(harness.backend).exists(X(1)));
-    EXPECT_TRUE(getIsamEstimate(harness.backend).exists(V(1)));
-    EXPECT_TRUE(getIsamEstimate(harness.backend).exists(B(1)));
+    EXPECT_TRUE(getSmootherEstimate(harness.backend).exists(X(1)));
+    EXPECT_TRUE(getSmootherEstimate(harness.backend).exists(V(1)));
+    EXPECT_TRUE(getSmootherEstimate(harness.backend).exists(B(1)));
 
     // Verify depth converged near measured depth
-    const Pose3 pose1 = getIsamEstimate(harness.backend).at<Pose3>(X(1));
+    const Pose3 pose1 = getSmootherEstimate(harness.backend).at<Pose3>(X(1));
     EXPECT_NEAR(pose1.z(), 5.2, 0.2);
 }
 
@@ -314,10 +314,11 @@ TEST_F(BackendTest, SmartProjectionFactorSingleViewDeferred) {
     pkt1.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.5);
     pkt1.visualFeatures.emplace_back(101, Point2(0.1, 0.2), true);
 
-    callProcessKeyframe(harness.backend, pkt1);
+    callProcessFrame(harness.backend, pkt1);
 
-    // Smart factor registered but not yet added to iSAM2 (single view)
-    EXPECT_EQ(getSmartFactors(harness.backend).count(101), 1u);
+    // Visual track registered in activeFeatureTracks but factor deferred (needs >= 2 views)
+    EXPECT_EQ(getActiveFeatureTracks(harness.backend).count(101), 1u);
+    EXPECT_EQ(getActiveFeatureTracks(harness.backend).at(101).size(), 1u);
     EXPECT_EQ(getSmartFactorSlots(harness.backend).count(101), 0u);
 }
 
@@ -338,10 +339,10 @@ TEST_F(BackendTest, SmartProjectionFactorMultiViewUpdateAndSlotReplacement) {
     pkt1.depth = 5.0;
     pkt1.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.5);
     pkt1.visualFeatures.emplace_back(101, Point2(0.1, 0.2), true);
-    callProcessKeyframe(harness.backend, pkt1);
+    callProcessFrame(harness.backend, pkt1);
     EXPECT_EQ(getSmartFactorSlots(harness.backend).count(101), 0u);
 
-    // View 2 (Keyframe 2) - triggers addition to iSAM2
+    // View 2 (Keyframe 2) - triggers addition to smoother
     BackendHfPacket pkt2;
     pkt2.frameId = 2;
     pkt2.timestamp = 1.0;
@@ -349,7 +350,7 @@ TEST_F(BackendTest, SmartProjectionFactorMultiViewUpdateAndSlotReplacement) {
     pkt2.depth = 5.0;
     pkt2.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.5);
     pkt2.visualFeatures.emplace_back(101, Point2(0.08, 0.2), false);
-    callProcessKeyframe(harness.backend, pkt2);
+    callProcessFrame(harness.backend, pkt2);
     EXPECT_EQ(getSmartFactorSlots(harness.backend).count(101), 1u);
 
     // View 3 (Keyframe 3) - triggers slot replacement
@@ -360,10 +361,10 @@ TEST_F(BackendTest, SmartProjectionFactorMultiViewUpdateAndSlotReplacement) {
     pkt3.depth = 5.0;
     pkt3.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.5);
     pkt3.visualFeatures.emplace_back(101, Point2(0.06, 0.2), false);
-    callProcessKeyframe(harness.backend, pkt3);
+    callProcessFrame(harness.backend, pkt3);
 
     EXPECT_EQ(getSmartFactorSlots(harness.backend).count(101), 1u);
-    EXPECT_TRUE(getIsamEstimate(harness.backend).exists(X(3)));
+    EXPECT_TRUE(getSmootherEstimate(harness.backend).exists(X(3)));
 }
 
 // =========================================================================
@@ -388,7 +389,7 @@ TEST_F(BackendTest, LoopClosureBetweenFactorTransformation) {
     pkt1.isKeyframe = true;
     pkt1.depth = 5.0;
     pkt1.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 1.0);
-    callProcessKeyframe(harness.backend, pkt1);
+    callProcessFrame(harness.backend, pkt1);
 
     BackendHfPacket pkt2;
     pkt2.frameId = 2;
@@ -396,7 +397,7 @@ TEST_F(BackendTest, LoopClosureBetweenFactorTransformation) {
     pkt2.isKeyframe = true;
     pkt2.depth = 5.0;
     pkt2.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 1.0);
-    callProcessKeyframe(harness.backend, pkt2);
+    callProcessFrame(harness.backend, pkt2);
 
     // Create loop closure match between frame 1 and frame 2
     BackendLfPacket lfPkt;
@@ -407,8 +408,8 @@ TEST_F(BackendTest, LoopClosureBetweenFactorTransformation) {
 
     callProcessLfPacket(harness.backend, lfPkt);
 
-    // Verify BetweenFactor was inserted into staging graph
-    const auto& graph = getStagingGraph(harness.backend);
+    // Verify BetweenFactor was inserted into global pose graph
+    const auto& graph = getGlobalPoseGraph(harness.backend);
     bool foundLoopFactor = false;
     for (const auto& factor : graph) {
         if (auto bf = std::dynamic_pointer_cast<gtsam::BetweenFactor<Pose3>>(factor)) {
@@ -440,7 +441,7 @@ TEST_F(BackendTest, LandmarkSyncPushesToLfTracker) {
     pkt1.isKeyframe = true;
     pkt1.depth = 5.0;
     pkt1.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.5);
-    callProcessKeyframe(harness.backend, pkt1);
+    callProcessFrame(harness.backend, pkt1);
 
     // Call sync without throwing
     EXPECT_NO_THROW(callSyncLfTracker(harness.backend, true));
@@ -463,7 +464,7 @@ TEST_F(BackendTest, TrackedKeyframesSlidingWindowCapacity) {
         pkt.isKeyframe = true;
         pkt.depth = 5.0;
         pkt.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.5);
-        callProcessKeyframe(harness.backend, pkt);
+        callProcessFrame(harness.backend, pkt);
     }
 
     // Capacity must not exceed keyframeWindowSize (20)
@@ -489,8 +490,8 @@ TEST_F(BackendTest, IndeterminantLinearSystemExceptionHandling) {
     getStagingGraph(harness.backend).emplace_shared<gtsam::BetweenFactor<Pose3>>(
         X(100), X(101), Pose3::Identity(), gtsam::noiseModel::Isotropic::Sigma(6, 1.0));
 
-    // Solving graph must catch IndeterminantLinearSystemException, clear staging, and return false
-    const bool success = callSolveGraph(harness.backend, 0);
+    // Solving smoother must catch IndeterminantLinearSystemException, clear staging, and return false
+    const bool success = callSolveSmoother(harness.backend, 100, 1.0);
     EXPECT_FALSE(success);
     EXPECT_TRUE(getStagingGraph(harness.backend).empty());
     EXPECT_TRUE(getStagingValues(harness.backend).empty());

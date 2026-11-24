@@ -23,6 +23,7 @@
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/Values.h>
 #include <gtsam/nonlinear/ISAM2.h>
+#include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
 #include <gtsam/slam/PriorFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
 
@@ -151,10 +152,18 @@ protected:
     static const gtsam::Values& getStagingValues(const Backend& b) { return b.stagingValues; }
     static gtsam::Values& getStagingValues(Backend& b) { return b.stagingValues; }
 
-    static const gtsam::ISAM2& getIsam(const Backend& b) { return b.isam; }
-    static gtsam::ISAM2& getIsam(Backend& b) { return b.isam; }
+    static const gtsam::IncrementalFixedLagSmoother& getSmoother(const Backend& b) { return b.smoother; }
+    static gtsam::IncrementalFixedLagSmoother& getSmoother(Backend& b) { return b.smoother; }
 
-    static const gtsam::Values& getIsamEstimate(const Backend& b) { return b.isamEstimate; }
+    static const gtsam::Values& getSmootherEstimate(const Backend& b) { return b.smootherEstimate; }
+
+    static const gtsam::NonlinearFactorGraph& getGlobalPoseGraph(const Backend& b) { return b.globalPoseGraph; }
+    static const gtsam::Values& getGlobalPoseValues(const Backend& b) { return b.globalPoseValues; }
+
+    static const std::unordered_map<uint32_t, std::vector<std::pair<gtsam::Point2, gtsam::Key>>>&
+    getActiveFeatureTracks(const Backend& b) {
+        return b.activeFeatureTracks;
+    }
 
     static const std::unordered_map<uint32_t, std::shared_ptr<SmartFactor>>& getSmartFactors(const Backend& b) {
         return b.smartFactors;
@@ -179,8 +188,8 @@ protected:
         b.initializeSystem(pkt);
     }
 
-    static void callProcessKeyframe(Backend& b, const BackendHfPacket& pkt) {
-        b.processKeyframe(pkt);
+    static void callProcessFrame(Backend& b, const BackendHfPacket& pkt) {
+        b.processFrame(pkt);
     }
 
     static void callProcessLfPacket(Backend& b, const BackendLfPacket& pkt) {
@@ -195,8 +204,12 @@ protected:
         b.publishPose(pose, velocity, timestamp);
     }
 
-    static bool callSolveGraph(Backend& b, uint32_t currentFrameId, const gtsam::FactorIndices& removeIndices = {}) {
-        return b.solveGraph(currentFrameId, removeIndices);
+    static bool callSolveSmoother(Backend& b, uint32_t currentFrameId, double timestamp = 0.0, const gtsam::FactorIndices& removeIndices = {}) {
+        return b.solveSmoother(currentFrameId, timestamp, removeIndices);
+    }
+
+    static bool callSolveGlobal(Backend& b, uint32_t currentFrameId) {
+        return b.solveGlobal(currentFrameId);
     }
 };
 

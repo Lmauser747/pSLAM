@@ -646,17 +646,7 @@ def run_accuracy_benchmark(
             system.push_depth(pool_slam.Depth(timestamp=t_d, z=z_d))
             depth_idx += 1
 
-        # 3. Read image and push frame with backpressure wait
-        with Image.open(frame_path) as img:
-            frame_arr = np.array(img.convert("L"), dtype=np.uint8)
-        pushed = False
-        for _ in range(200):
-            if system.push_frame(frame_arr, t_frame):
-                pushed = True
-                break
-            time.sleep(0.005)
-
-        # Optional real-time playback throttling
+        # 3. Ingestion pacing & throttling before pushing frame (Section 4.3)
         if realtime and frame_idx > 0:
             dt_dataset = t_frame - dataset.frame_records[frame_idx - 1][0]
             target_sleep = dt_dataset / max(0.01, playback_speed)
@@ -664,11 +654,22 @@ def run_accuracy_benchmark(
             if target_sleep > elapsed_frame_time:
                 time.sleep(target_sleep - elapsed_frame_time)
             last_frame_wall_time = time.time()
-        else:
-            # Non-realtime mode: throttle ingestion if Backend falls behind to prevent queue overflow and frame drops
+        elif not realtime and frame_idx > 0:
+            # Fast-forward mode:
+            # 1. Ensure smooth frame spacing floor to avoid flooding buffer pool
+            # 2. Throttle ingestion if Backend lags (> 0.15s) to avoid un-synchronized frame drops
+            # Invariant: Total gap between frame pushes must NEVER exceed 250ms
+            # to strictly prevent starving Hal ImageStream (400ms timeout) into FATALCAM.
+            elapsed_since_push = time.time() - last_frame_wall_time
+            max_safe_pause = max(0.0, 0.25 - elapsed_since_push)
+
+            if elapsed_since_push < 0.06:
+                sleep_needed = min(0.06 - elapsed_since_push, max_safe_pause)
+                time.sleep(sleep_needed)
+
             t_throttle_start = time.time()
-            pose = system.get_pose()
-            while pose.timestamp > 0.0 and (t_frame - pose.timestamp) > 0.15 and (time.time() - t_throttle_start) < 0.25:
+            rem_avail = max(0.0, 0.25 - (time.time() - last_frame_wall_time))
+            while (t_frame - system.get_pose().timestamp) > 0.15 and (time.time() - t_throttle_start) < min(0.10, rem_avail):
                 while imu_idx < total_imu and dataset.imu_samples[imu_idx][0] <= t_frame + 0.500:
                     t_imu, a, w = dataset.imu_samples[imu_idx]
                     system.push_imu(pool_slam.Imu(timestamp=t_imu, a=a, w=w, t=20.0))
@@ -678,15 +679,26 @@ def run_accuracy_benchmark(
                     system.push_depth(pool_slam.Depth(timestamp=t_d, z=z_d))
                     depth_idx += 1
                 time.sleep(0.002)
-                pose = system.get_pose()
 
-        # 4. Check if current dataset time hits or passes next evaluation interval
+        # 4. Read image and push frame with backpressure wait (Section 4.2)
+        with Image.open(frame_path) as img:
+            frame_arr = np.array(img.convert("L"), dtype=np.uint8)
+        pushed = False
+        for _ in range(50):
+            if system.push_frame(frame_arr, t_frame):
+                pushed = True
+                break
+            time.sleep(0.005)
+        last_frame_wall_time = time.time()
+
+        # 5. Check if current dataset time hits or passes next evaluation interval (Section 4.4)
         if t_frame >= next_eval_time:
             # Synchronize with backend worker thread so pose matches evaluation time
-            # Limit blocking wait to 250ms (strictly < Hal 400ms timeout) so ImageStream is never starved into FATALCAM
+            # Limit blocking wait strictly < Hal 400ms timeout so ImageStream is never starved into FATALCAM
+            rem_eval = max(0.0, 0.15 - (time.time() - last_frame_wall_time))
             t_wait_start = time.time()
             pose = system.get_pose()
-            while pose.timestamp < t_frame - 1e-4 and (time.time() - t_wait_start) < 0.25:
+            while pose.timestamp < next_eval_time - 1e-4 and (time.time() - t_wait_start) < min(0.10, rem_eval):
                 while imu_idx < total_imu and dataset.imu_samples[imu_idx][0] <= t_frame + 0.500:
                     t_imu, a, w = dataset.imu_samples[imu_idx]
                     system.push_imu(pool_slam.Imu(timestamp=t_imu, a=a, w=w, t=20.0))
@@ -744,7 +756,7 @@ def run_accuracy_benchmark(
 
             next_eval_time += eval_interval_sec
 
-    # Drain remaining processing
+    # Drain remaining leading IMU/depth processing and cleanly stop pipeline
     while imu_idx < total_imu:
         t_imu, a, w = dataset.imu_samples[imu_idx]
         system.push_imu(pool_slam.Imu(timestamp=t_imu, a=a, w=w, t=20.0))
@@ -754,8 +766,8 @@ def run_accuracy_benchmark(
         system.push_depth(pool_slam.Depth(timestamp=t_d, z=z_d))
         depth_idx += 1
     t_drain_start = time.time()
-    while system.get_pose().timestamp < dataset.duration - 0.10 and (time.time() - t_drain_start) < 0.30:
-        time.sleep(0.01)
+    while system.get_pose().timestamp < dataset.duration - 0.10 and (time.time() - t_drain_start) < 0.15:
+        time.sleep(0.005)
     system.stop()
     total_wall_time = time.time() - start_wall_time
 
