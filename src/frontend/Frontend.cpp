@@ -38,7 +38,7 @@ void Frontend::processPacket(){
             frameImuDelta = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, imuBias);
         }
         if(!syncPkt.imu.empty()){
-            double tPrev = (lastImuTimestamp > 0.0) ? lastImuTimestamp : syncPkt.imu.front().timestamp;
+            double tPrev = (lastImuTimestamp >= 0.0) ? lastImuTimestamp : syncPkt.imu.front().timestamp;
             for(size_t i = 0; i < syncPkt.imu.size(); i++){
                 double tCurr = syncPkt.imu[i].timestamp;
                 double dt = tCurr - tPrev;
@@ -62,9 +62,10 @@ void Frontend::processPacket(){
         auto featureCount = hf.getActiveFeatures().size();
 
         // Determine if keyframe
-        auto percentRetainedFeatures = static_cast<float>(featureCount) / static_cast<float>(lastKfCount);
+        auto percentRetainedFeatures = (lastKfCount > 0) ? (static_cast<float>(featureCount) / static_cast<float>(lastKfCount)) : 0.0f;
         if(frameId == 0 || 
             meanDisplacement > config.meanDisplacementThreshold || 
+            lastKfCount == 0 ||
             percentRetainedFeatures < config.droppedFeatureThreshold ||
             (syncPkt.timestamp - lastKfTimestamp > config.maxTimeBetweenKf)
         ){

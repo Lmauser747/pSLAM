@@ -56,19 +56,16 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
     const double ptUpperX = static_cast<double>(wImage) - RADIUS - 2;
     const double ptUpperY = static_cast<double>(hImage) - RADIUS - 2;
 
-    // Converged is set to true for now because we eliminated the coinvergence early exit. 
-    // Bring back later if we have performance issues
-    bool converged = true;
-    uint32_t madError = 0;
+    float madError = 0.0f;
 
     for(int iter = 0; iter < ICLK_ITERS; iter++){
-        madError = 0;
+        madError = 0.0f;
         if((ptEst.x() < ptLower) || (ptEst.y() < ptLower) || (ptEst.x() > ptUpperX) || (ptEst.y() > ptUpperY)){
             return false;
         }
 
-        int32_t bX = 0;
-        int32_t bY = 0;
+        float bX = 0.0f;
+        float bY = 0.0f;
         
         // Compute the accumulated error
         // START VECTORIZE
@@ -77,25 +74,30 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
                 size_t idx = static_cast<size_t>((dy + RADIUS) * feature.PATCH_SIZE + (dx + RADIUS));
                 const Eigen::Vector2f offset{dx, dy};
 
-                int16_t sampleI = bilinear(curBuffer, ptEst + offset);
-                int16_t diff = sampleI - static_cast<int16_t>(feature.patch[idx]);
-                madError += static_cast<uint32_t>(std::abs(diff));
+                float sampleI = bilinearFloat(curBuffer, ptEst + offset);
+                float diff = sampleI - static_cast<float>(feature.patch[idx]);
+                madError += std::abs(diff);
 
-                bX += static_cast<int32_t>(feature.xGrad[idx]) * diff;
-                bY += static_cast<int32_t>(feature.yGrad[idx]) * diff;
+                bX += static_cast<float>(feature.xGrad[idx]) * diff;
+                bY += static_cast<float>(feature.yGrad[idx]) * diff;
             }
         }
         // END VECTORIZE
 
-        Eigen::Vector2f b = {static_cast<float>(bX), static_cast<float>(bY)};
+        Eigen::Vector2f b = {bX, bY};
         
-        Eigen::Vector2f delta = feature.HInv * b;
+        // Compensate for the 8x Sobel scaling (H is 64x, b is 8x)
+        Eigen::Vector2f delta = (feature.HInv * b) * 8.0f;
 
         // Update estimate based on the gradient
         ptEst += delta;
+
+        if(delta.squaredNorm() < 1e-4f){
+            break;
+        }
     }
 
-    if(!converged || (madError > ICLK_MAD_THRESHOLD)){
+    if(madError > static_cast<float>(ICLK_MAD_THRESHOLD)){
         return false;
     }
 
@@ -107,6 +109,24 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
     feature.ptCurr = ptEst;
     feature.age++;
     return true;
+}
+
+float HfTracker::bilinearFloat(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const{
+    float x0 = static_cast<float>(std::floor(pt.x()));
+    float y0 = static_cast<float>(std::floor(pt.y()));
+
+    float fx = pt.x() - x0;
+    float fy = pt.y() - y0;
+    float fxC = 1.0f - fx;
+    float fyC = 1.0f - fy;
+
+    size_t x = static_cast<size_t>(x0);
+    size_t y = static_cast<size_t>(y0);
+
+    return (fxC * fyC * static_cast<float>(curBuffer[y * wImage + x])) +
+           (fx * fyC * static_cast<float>(curBuffer[y * wImage + x + 1])) +
+           (fxC * fy * static_cast<float>(curBuffer[(y + 1) * wImage + x])) +
+           (fx * fy * static_cast<float>(curBuffer[(y + 1) * wImage + x + 1]));
 }
 
 int16_t HfTracker::bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const{
@@ -200,8 +220,8 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
     Eigen::Vector3f t, tBest;
     for(int iter = 0; iter < RANSAC_ITERS; iter++){
         // Select two distinct reandom numbers
-        auto a = static_cast<Eigen::Index>((ransacRng() * numFeatures) >> 31);
-        auto b = static_cast<Eigen::Index>((ransacRng() * numFeatures) >> 31);
+        auto a = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numFeatures) >> 31);
+        auto b = static_cast<Eigen::Index>((static_cast<uint64_t>(ransacRng()) * numFeatures) >> 31);
         b = a == b ? (static_cast<size_t>(b) == (numFeatures - 1) ? b - 1 : b + 1) : b;
 
         Eigen::Vector3f ma = epi.scratch.col(a).cross(epi.currRays.col(a));
@@ -241,7 +261,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
         }
     }
 
-    if(maxInliers >= RANSAC_MIN_INLIERS){
+    if(maxInliers >= RANSAC_MIN_INLIERS || (numFeatures >= RANSAC_MIN_INLIERS && maxInliers >= 8)){
         size_t writeIdx = 0;
         for(size_t readIdx = 0; readIdx < numFeatures; readIdx++){
             auto i = static_cast<Eigen::Index>(readIdx);
@@ -266,6 +286,8 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             }
         }
         activeFeatures.resize(writeIdx);
+    }else if(numFeatures >= RANSAC_MIN_INLIERS){
+        handleTrackingError();
     }else{
         for(size_t i = 0; i < numFeatures; i++){
             activeFeatures[i].ptUndis = epi.currRays.col(static_cast<Eigen::Index>(i)).hnormalized();
@@ -277,33 +299,42 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
     return maxInliers;
 }
 
-void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, Eigen::Matrix3Xf &ptUndist, size_t count){
+Eigen::Vector2f HfTracker::undistortPoint(float xDist, float yDist) const{
     float cx = K(0, 2);
     float cy = K(1, 2);
     float fxInv = 1.0f / K(0, 0);
     float fyInv = 1.0f / K(1, 1);
+
+    float xd = (xDist - cx) * fxInv;
+    float yd = (yDist - cy) * fyInv;
+    float x = xd;
+    float y = yd;
+
+    for(int iter = 0; iter < UNDISTORT_ITERS; iter++){
+        float r2 = x * x + y * y;
+        float r4 = r2 * r2;
+        float xy = x * y;
+        float radial = 1.0f + dist.k1 * r2 + dist.k2 * r4;
+
+        float dxTangential = 2.0f * dist.p1 * xy + dist.p2 * (r2 + 2.0f * x * x);
+        float dyTangential = 2.0f * dist.p2 * xy + dist.p1 * (r2 + 2.0f * y * y);
+
+        if(std::abs(radial) > 1e-6f){
+            x = (xd - dxTangential) / radial;
+            y = (yd - dyTangential) / radial;
+        }
+    }
+
+    return Eigen::Vector2f(x, y);
+}
+
+void HfTracker::undistort(std::vector<float> &xDist, std::vector<float> &yDist, Eigen::Matrix3Xf &ptUndist, size_t count){
     // START VECTORIZE
     for(size_t i = 0; i < count; i++){
-        float xd = (xDist[i] - cx) * fxInv;
-        float yd = (yDist[i] - cy) * fyInv;
-        float x = xd;
-        float y = yd;
+        Eigen::Vector2f pt = undistortPoint(xDist[i], yDist[i]);
 
-        for(int iter = 0; iter < UNDISTORT_ITERS; iter++){
-            float r2 = x * x + y * y;
-            float r4 = r2 * r2;
-            float xy = x * y;
-            float radial = 1.0f + dist.k1 * r2 + dist.k2 * r4;
-
-            float xEst = x * radial + 2.0f * dist.p1 * xy + dist.p2 * (r2 + 2 * x * x);
-            float yEst = y * radial + 2.0f * dist.p2 * xy + dist.p1 * (r2 + 2 * y * y);
-
-            x -= (xEst - xd);
-            y -= (yEst - yd);
-        }
-
-        ptUndist(0, static_cast<Eigen::Index>(i)) = x;
-        ptUndist(1, static_cast<Eigen::Index>(i)) = y;
+        ptUndist(0, static_cast<Eigen::Index>(i)) = pt.x();
+        ptUndist(1, static_cast<Eigen::Index>(i)) = pt.y();
         ptUndist(2, static_cast<Eigen::Index>(i)) = 1.0f;
     }
     // END VECTORIZE
@@ -349,6 +380,7 @@ void HfTracker::enforceBucketDensity(){
                     keep[bucket.olderIdx] = false;
                 }else{
                     keep[bucket.youngerIdx] = false;
+                    bucket.youngerIdx = bucket.olderIdx;
                 }
                 bucket.olderIdx = i;
             }else if(activeFeatures[bucket.youngerIdx].age < feature.age){

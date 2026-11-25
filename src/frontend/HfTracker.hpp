@@ -51,7 +51,7 @@ private:
     static constexpr size_t NUM_FEATURES_TARGET_DEFAULT = 200; // Target number of features
     static constexpr int ICLK_ITERS = 20; // Number of ICLK iterations
     static constexpr uint32_t ICLK_MAD_THRESHOLD = 5 * (TrackedFeature<RADIUS>::PATCH_SIZE) * (TrackedFeature<RADIUS>::PATCH_SIZE);
-    static constexpr int UNDISTORT_ITERS = 5; // Number of times to undistort each point
+    static constexpr int UNDISTORT_ITERS = 10; // Number of times to undistort each point
     static constexpr int RANSAC_ITERS = 20; // Number of random samples to inspect in RANSAC
     static constexpr float RANSAC_TRANS_EP = 1e-6f; // Epislon to exclude translations which are too close to zero
     static constexpr float RANSAC_EARLY_CONSENSUS = 0.9f; // If consenus exceeds this threshold, exit RANSAC early
@@ -60,7 +60,7 @@ private:
     static constexpr uint8_t FAST_THRESHOLD = 20; // Threshold for FAST keypoint detection
     static constexpr float ST_THRESHOLD = 500.0f; // Minimum Shi-Tomasi score of canidate feature
     static constexpr int ST_PATCH_SIZE = 7; // Width and height of patch for Shi-Tomasi gradient computation
-    static constexpr float HESSIAN_STABILITY_THRESHOLD = 0.1f; // Minimum absolute value of the determinant of the Hessian
+    static constexpr float HESSIAN_STABILITY_THRESHOLD = 409.6f; // Minimum absolute value of the determinant of the Hessian (scaled by 64^2)
 
     const size_t wImage, hImage; // Image pixel array height and width
 
@@ -111,9 +111,13 @@ private:
 
     // Biliner interpolation helper
     int16_t bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const;
+    float bilinearFloat(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const;
 
     // Does RANSAC on the active features using R as the IMU prior
     int ransac(const Eigen::Matrix3f &R);
+
+    // Undistort a single pixel into normalized camera coordinates
+    Eigen::Vector2f undistortPoint(float xDist, float yDist) const;
 
     // Undistort into ptUndist
     void undistort(std::vector<float> &xDist, std::vector<float> &yDist, Eigen::Matrix3Xf &ptUndist, size_t count);

@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 #include <gtsam/base/Vector.h>
@@ -51,10 +52,12 @@ Backend::Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &
       config(cfg),
       Kptr(std::make_shared<gtsam::Cal3_S2>(1.0, 1.0, 0.0, 0.0, 0.0)){
     gtsam::ISAM2Params smootherParams;
+    smootherParams.findUnusedFactorSlots = true;
     smootherParams.relinearizeThreshold = config.relinearizeThreshold;
     smootherParams.relinearizeSkip = config.relinearizeSkip;
-    smootherParams.factorization = gtsam::ISAM2Params::QR;
+    smootherParams.factorization = gtsam::ISAM2Params::CHOLESKY;
     smoother = gtsam::IncrementalFixedLagSmoother(config.smootherLag, smootherParams);
+    smartParams.degeneracyMode = gtsam::ZERO_ON_DEGENERACY;
     
     // Initial noise models
     gtsam::Vector6 initBiasSigmas;
@@ -193,10 +196,17 @@ void Backend::processFrame(const BackendHfPacket &pkt){
     const auto &smootherTimestamps = smoother.timestamps();
     const double minAllowedTime = pkt.timestamp - config.smootherLag + 1e-4;
 
+    std::unordered_set<uint32_t> currentVisualFeatures;
     for(const auto &feat : pkt.visualFeatures){
+        currentVisualFeatures.insert(feat.featureId);
         if(feat.isNewTrack){
             activeFeatureTracks[feat.featureId].clear();
-            smartFactorSlots.erase(feat.featureId);
+            auto slotIt = smartFactorSlots.find(feat.featureId);
+            if(slotIt != smartFactorSlots.end()){
+                removeIndices.push_back(slotIt->second);
+                smartFactorSlots.erase(slotIt);
+                smartFactors.erase(feat.featureId);
+            }
         }
 
         auto &track = activeFeatureTracks[feat.featureId];
@@ -216,7 +226,7 @@ void Backend::processFrame(const BackendHfPacket &pkt){
 
         // If track has at least 2 views in the sliding window, create/replace factor
         if(track.size() >= 2){
-            auto factor = std::make_shared<SmartFactor>(visualNoise, Kptr, config.bodyToCameraFrame);
+            auto factor = std::make_shared<SmartFactor>(visualNoise, Kptr, config.bodyToCameraFrame, smartParams);
             for(const auto &obs : track){
                 factor->add(obs.first, obs.second);
             }
@@ -240,6 +250,53 @@ void Backend::processFrame(const BackendHfPacket &pkt){
             }
         }
     }
+
+    // Sweep factors not detected in the current packet whose observations crossed the horizon
+    for(auto it = smartFactorSlots.begin(); it != smartFactorSlots.end(); ){
+        uint32_t featId = it->first;
+        if(currentVisualFeatures.count(featId)){
+            it++;
+            continue;
+        }
+
+        auto trackIt = activeFeatureTracks.find(featId);
+        if(trackIt != activeFeatureTracks.end()){
+            auto &track = trackIt->second;
+            size_t beforeSize = track.size();
+            track.erase(std::remove_if(track.begin(), track.end(), [&](const auto &obs){
+                auto tsIt = smootherTimestamps.find(obs.second);
+                if(tsIt == smootherTimestamps.end()){
+                    return true;
+                }
+                return tsIt->second < minAllowedTime;
+            }), track.end());
+
+            if(track.size() < 2){
+                removeIndices.push_back(it->second);
+                smartFactors.erase(featId);
+                it = smartFactorSlots.erase(it);
+            } else if(track.size() < beforeSize){
+                auto factor = std::make_shared<SmartFactor>(visualNoise, Kptr, config.bodyToCameraFrame, smartParams);
+                for(const auto &obs : track){
+                    factor->add(obs.first, obs.second);
+                }
+                smartFactors[featId] = factor;
+                removeIndices.push_back(it->second);
+                stagingGraph.push_back(factor);
+                stagedFeatureIds.push_back(featId);
+                it++;
+            } else {
+                it++;
+            }
+        } else {
+            removeIndices.push_back(it->second);
+            smartFactors.erase(featId);
+            it = smartFactorSlots.erase(it);
+        }
+    }
+
+    std::sort(removeIndices.begin(), removeIndices.end());
+    removeIndices.erase(std::unique(removeIndices.begin(), removeIndices.end()), removeIndices.end());
 
     if(solveSmoother(pkt.frameId, pkt.timestamp, removeIndices)){
 
@@ -297,18 +354,31 @@ void Backend::processLfPacket(const BackendLfPacket &lfPkt){
 
     if(curKeyValid && matchKeyValid){
         auto betweenPose = config.bodyToCameraFrame * lfPkt.relativePose.inverse() * config.bodyToCameraFrame.inverse();
+        gtsam::SharedNoiseModel loopNoise;
         if(lfPkt.noiseModel != nullptr){
-            globalPoseGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lfPkt.matchedFrameId), X(lfPkt.currentFrameId), betweenPose, lfPkt.noiseModel);
-        }else{ 
-            // Fallback if noiseModel is null for soem reason
+            loopNoise = lfPkt.noiseModel;
+            auto robust = std::dynamic_pointer_cast<gtsam::noiseModel::Robust>(lfPkt.noiseModel);
+            auto baseModel = robust ? robust->noise() : lfPkt.noiseModel;
+            auto gaussian = std::dynamic_pointer_cast<gtsam::noiseModel::Gaussian>(baseModel);
+            if(gaussian && gaussian->dim() == 6){
+                const gtsam::Matrix6 Ad = config.bodyToCameraFrame.AdjointMap();
+                gtsam::Matrix6 covBody = Ad * gaussian->covariance() * Ad.transpose();
+                covBody = 0.5 * (covBody + covBody.transpose());
+                auto bodyGaussian = gtsam::noiseModel::Gaussian::Covariance(covBody);
+                loopNoise = robust
+                    ? gtsam::noiseModel::Robust::Create(robust->robust(), bodyGaussian)
+                    : gtsam::SharedNoiseModel(bodyGaussian);
+            }
+        }else{
+            // Fallback if noiseModel is null for some reason
             gtsam::Vector6 sigmas;
             sigmas << 0.1, 0.1, 0.1, 0.1, 0.1, 0.1;
             auto baseGaussian = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
-            auto fallbackNoise = gtsam::noiseModel::Robust::Create(
+            loopNoise = gtsam::noiseModel::Robust::Create(
                 gtsam::noiseModel::mEstimator::Huber::Create(1.345), baseGaussian
             );
-            globalPoseGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lfPkt.matchedFrameId), X(lfPkt.currentFrameId), betweenPose, fallbackNoise);
         }
+        globalPoseGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lfPkt.matchedFrameId), X(lfPkt.currentFrameId), betweenPose, loopNoise);
     }else{
         return;
     }
@@ -366,14 +436,8 @@ bool Backend::solveSmoother(uint32_t currentFrameId, double timestamp, const gts
                 return deletedKeys.find(obs.second) != deletedKeys.end();
             }), track.end());
 
-            if(track.size() < 2){
-                smartFactors.erase(trackIt->first);
-                smartFactorSlots.erase(trackIt->first);
-                if(track.empty()){
-                    trackIt = activeFeatureTracks.erase(trackIt);
-                }else{
-                    trackIt++;
-                }
+            if(track.empty()){
+                trackIt = activeFeatureTracks.erase(trackIt);
             }else{
                 trackIt++;
             }
@@ -439,6 +503,8 @@ bool Backend::solveGlobal(uint32_t currentFrameId){
 }
 
 void Backend::initializeSystem(const BackendHfPacket &pkt){
+    gtsam::SharedNoiseModel priorPoseNoise = initPoseNoise;
+
     // If the config pose is given, use that
     if(config.initialPose.has_value()){
         prevNavState = gtsam::NavState(*config.initialPose, gtsam::Vector3(0, 0, 0));
@@ -452,7 +518,7 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
             // Set the Z axis noise model to be very loose if there is not a good initial Z estimate
             auto modifiedSigma = config.initPoseSigma;
             modifiedSigma[5] = 100.0;
-            initPoseNoise =  gtsam::noiseModel::Diagonal::Sigmas(modifiedSigma);
+            priorPoseNoise = gtsam::noiseModel::Diagonal::Sigmas(modifiedSigma);
         }
 
         // Initialize pose
@@ -474,7 +540,7 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
     }
 
     // Emplace initial factors for smoother
-    stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(pkt.frameId), prevNavState.pose(), initPoseNoise);
+    stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(pkt.frameId), prevNavState.pose(), priorPoseNoise);
     stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Vector3>>(V(pkt.frameId), prevNavState.velocity(), initVelNoise);
     stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::imuBias::ConstantBias>>(B(pkt.frameId), prevBias, initBiasNoise);
 
@@ -495,7 +561,7 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
     }
 
     // Add prior and initial pose to the global graph
-    globalPoseGraph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(pkt.frameId), prevNavState.pose(), initPoseNoise);
+    globalPoseGraph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(pkt.frameId), prevNavState.pose(), priorPoseNoise);
     globalPoseValues.insert(X(pkt.frameId), prevNavState.pose());
 
     TrackedKeyframe kf;

@@ -48,10 +48,12 @@ void Synchronizer::threadTask(){
             }
 
             SensorHealth imuHealth = imuStream.waitUntil(initPacket.timestamp);
-            if (imuHealth != SensorHealth::DISABLED) {
-                initPacket.initialAccel = imuStream.getAverageAcceleration(initPacket.timestamp);
-                initPacket.initialGyro = imuStream.getAverageAngularVelocity(initPacket.timestamp);
+            if (imuHealth == SensorHealth::DISABLED) {
+                syncFatalShutdown(SyncStatus::FATALIMU, nextFrame);
+                break;
             }
+            initPacket.initialAccel = imuStream.getAverageAcceleration(initPacket.timestamp);
+            initPacket.initialGyro = imuStream.getAverageAngularVelocity(initPacket.timestamp);
 
             {
                 {
@@ -103,17 +105,27 @@ void Synchronizer::threadTask(){
         {
             std::lock_guard<std::mutex> lock(m_outputQueue);
             if(outputQueue.size() >= maxOutputQueueSize){
-                SyncedPacket &stale = outputQueue.front();
+                SyncedPacket stale = std::move(outputQueue.front());
                 std::cerr << "[Synchronizer WARNING] outputQueue full (" << outputQueue.size()
                           << "), dropping stale frame ts=" << stale.timestamp << std::endl;
                 if(stale.image){
                     imageStream.recycleFrame(stale.image);
                 }
                 outputQueue.pop();
+                if(!stale.imu.empty()){
+                    std::vector<Imu> &nextImu = outputQueue.empty() ? packet.imu : outputQueue.front().imu;
+                    nextImu.insert(nextImu.begin(), stale.imu.begin(), stale.imu.end());
+                }
+                if(stale.initialAccel.has_value() && !outputQueue.empty() && !outputQueue.front().initialAccel.has_value()){
+                    outputQueue.front().initialAccel = stale.initialAccel;
+                }
+                if(stale.initialGyro.has_value() && !outputQueue.empty() && !outputQueue.front().initialGyro.has_value()){
+                    outputQueue.front().initialGyro = stale.initialGyro;
+                }
             }
             outputQueue.push(packet);
             imuStream.pruneUntil(previousFrameTime);
-            depthStream.pruneUntil(previousFrameTime);
+            depthStream.pruneUntil(previousFrameTime - 0.2);
             previousFrameTime = packet.timestamp;
         }
 

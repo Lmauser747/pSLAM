@@ -79,16 +79,19 @@ SystemConfig::SystemConfig(const std::string& configFile) {
 
         // Optional initial state pose [R | t]
         const YAML::Node initPoseNode = root["initial_pose"];
-        if (initPoseNode && initPoseNode.IsDefined() && initPoseNode.IsSequence()) {
-            if (initPoseNode.size() == 3 || initPoseNode.size() == 4) {
-                hasInitialPose = true;
-                for (size_t r = 0; r < 3; r++) {
-                    const YAML::Node row = initPoseNode[r];
-                    if (row.IsSequence() && row.size() >= 4) {
-                        for (size_t c = 0; c < 4; c++) {
-                            initialPose(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(c)) = row[c].as<double>();
-                        }
-                    }
+        if (initPoseNode && initPoseNode.IsDefined()) {
+            if (!initPoseNode.IsSequence() || (initPoseNode.size() != 3 && initPoseNode.size() != 4)) {
+                throw std::runtime_error("SystemConfig: 'initial_pose' must be a 3x4 or 4x4 matrix");
+            }
+            hasInitialPose = true;
+            for (size_t r = 0; r < 3; r++) {
+                const YAML::Node row = initPoseNode[r];
+                if (!row.IsSequence() || row.size() < 4) {
+                    throw std::runtime_error("SystemConfig: row " + std::to_string(r) +
+                                             " of 'initial_pose' must have at least 4 elements");
+                }
+                for (size_t c = 0; c < 4; c++) {
+                    initialPose(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(c)) = row[c].as<double>();
                 }
             }
         }

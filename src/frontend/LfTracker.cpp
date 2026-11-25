@@ -66,7 +66,7 @@ bool LfTracker::passKeyframe(uint32_t id, double timestamp, const uint8_t *curBu
             Eigen::Vector2i kp = feature.ptCurr.cast<int>();
             if(kp.x() >= QOV_RADIUS && kp.x() < static_cast<int>(config.w) - QOV_RADIUS &&
                kp.y() >= QOV_RADIUS && kp.y() < static_cast<int>(config.h) - QOV_RADIUS){
-                newFrame.addKp(kp, feature.id);
+                newFrame.addKp(feature.ptCurr, feature.id);
             }
         }
 
@@ -244,7 +244,8 @@ void LfTracker::processKeyframe(){
             packet.timestamp = kf.timestamp;
 
             // Find the ratio between the score of the best frame and the score of the previous frame
-            auto scoreRatio = (lastScore > 1e-6f) ? (bestScore / lastScore) : 1.0f;
+            auto refScore = (lastScore > 1e-6f) ? lastScore : 1.0f;
+            auto scoreRatio = bestScore / refScore;
 
             packet.matchScore = bestScore;
 
@@ -402,7 +403,7 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
         }
 
         if(!exactMatch){
-            if(bestDist == INT32_MAX || secondDist == 0){
+            if(bestDist == INT32_MAX || bestDist > MAX_HAMMING_DIST || secondDist == 0){
                 continue;
             }
             // Reject features too similar to other features
@@ -440,7 +441,7 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
         }
 
         if(matchingIdx < matching.curFeatures.cols() && static_cast<size_t>(bestIdx) < matchKf.landmarks.size()){
-            matching.curFeatures.col(matchingIdx) = curFeat.pt.homogeneous().cast<double>();
+            matching.curFeatures.col(matchingIdx) = curFeat.ptSubpix.homogeneous().cast<double>();
             matching.matchLandmarks.col(matchingIdx) = matchKf.landmarks[static_cast<size_t>(bestIdx)].pt3d;
             matchingIdx++;
         } 
@@ -581,11 +582,13 @@ void LfTracker::undistort(Eigen::Matrix3Xd &pts, size_t count){
             float xy = x * y;
             float radial = 1.0f + config.dist.k1 * r2 + config.dist.k2 * r4;
 
-            float xEst = x * radial + 2.0f * config.dist.p1 * xy + config.dist.p2 * (r2 + 2 * x * x);
-            float yEst = y * radial + 2.0f * config.dist.p2 * xy + config.dist.p1 * (r2 + 2 * y * y);
+            float dxTangential = 2.0f * config.dist.p1 * xy + config.dist.p2 * (r2 + 2.0f * x * x);
+            float dyTangential = 2.0f * config.dist.p2 * xy + config.dist.p1 * (r2 + 2.0f * y * y);
 
-            x -= (xEst - xd);
-            y -= (yEst - yd);
+            if(std::abs(radial) > 1e-6f){
+                x = (xd - dxTangential) / radial;
+                y = (yd - dyTangential) / radial;
+            }
         }
 
         if(std::isfinite(x) && std::isfinite(y)){

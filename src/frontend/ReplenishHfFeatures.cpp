@@ -173,33 +173,7 @@ bool HfTracker::addKp(const uint8_t *curBuffer, Eigen::Vector2i &kp){
 
     feature.ptCurr = kp.cast<float>();
     feature.ptPrev = kp.cast<float>();
-
-    {
-        float cx = K(0, 2);
-        float cy = K(1, 2);
-        float fxInv = 1.0f / K(0, 0);
-        float fyInv = 1.0f / K(1, 1);
-        
-        float xd = (feature.ptCurr.x() - cx) * fxInv;
-        float yd = (feature.ptCurr.y() - cy) * fyInv;
-        float x = xd;
-        float y = yd;
-
-        for(int iter = 0; iter < UNDISTORT_ITERS; iter++){
-            float r2 = x * x + y * y;
-            float r4 = r2 * r2;
-            float xy = x * y;
-            float radial = 1.0f + dist.k1 * r2 + dist.k2 * r4;
-
-            float xEst = x * radial + 2.0f * dist.p1 * xy + dist.p2 * (r2 + 2 * x * x);
-            float yEst = y * radial + 2.0f * dist.p2 * xy + dist.p1 * (r2 + 2 * y * y);
-
-            x -= (xEst - xd);
-            y -= (yEst - yd);
-        }
-
-        feature.ptUndis = Eigen::Vector2f(x, y);
-    }
+    feature.ptUndis = undistortPoint(feature.ptCurr.x(), feature.ptCurr.y());
     
 
     ptrdiff_t xPt = static_cast<ptrdiff_t>(kp.x());

@@ -340,6 +340,13 @@ class EurocDataset:
             (t - self.t0, path) for (t, path) in self.frame_records
         ]
 
+        # Align frame start to ground truth start so initial_pose and synthetic depth match frame 0
+        if len(self.gt_times) > 0:
+            gt_start = float(self.gt_times[0])
+            aligned_frames = [rec for rec in self.frame_records if rec[0] >= gt_start]
+            if aligned_frames:
+                self.frame_records = aligned_frames
+
         # Apply time cutoff if specified
         if self.time_cutoff is not None and self.time_cutoff > 0:
             filtered_frames = [

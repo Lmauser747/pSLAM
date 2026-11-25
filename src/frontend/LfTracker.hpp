@@ -81,6 +81,10 @@ public:
         features.emplace_back(kp, featureId);
     }
 
+    void addKp(const Eigen::Vector2f &kpSubpix, uint32_t featureId){
+        features.emplace_back(kpSubpix, featureId);
+    }
+
     // Resize the feature vector to final size once all keypoints have been added
     size_t finalSize(){
         features.shrink_to_fit();
@@ -98,9 +102,10 @@ class LfTracker{
 private:
     static constexpr int FEATURE_RADIUS = 5; // Radius of the feature patch from HfTracker
     static constexpr int QOV_RADIUS = 15; // Radius of the patched used by QOV
-    static constexpr int UNDISTORT_ITERS = 5; // Number of iterations in undistortion
+    static constexpr int UNDISTORT_ITERS = 10; // Number of iterations in undistortion
     static constexpr float MIN_SCORE_RATIO = 0.3f; // Min ratio between score of matched keyframe and score of previous keyframe
     static constexpr float MAX_FEATURE_DIST_RATIO = 0.80f; // Max ratio between best feature match and second best match
+    static constexpr int MAX_HAMMING_DIST = 64; // Maximum Hamming distance allowed for descriptor matching
     static constexpr size_t BIDIRECTIONAL_SEARCH_INTERVAL = 10; // Interval to searh in for better matches between matched feature and features in current keyframe
 
     const LfTrackerConfig config; // Class configuration

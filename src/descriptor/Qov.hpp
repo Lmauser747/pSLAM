@@ -40,11 +40,13 @@ struct alignas(16) QovDescriptor{
 struct QovFeature{
     QovDescriptor des;
     Eigen::Vector2i pt = Eigen::Vector2i::Zero();
+    Eigen::Vector2f ptSubpix = Eigen::Vector2f::Zero();
     uint32_t wordId = 0;
     uint32_t featureId = 0;
 
     QovFeature() = default;
-    QovFeature(const Eigen::Vector2i &kp, uint32_t id) : pt(kp), featureId(id){}
+    QovFeature(const Eigen::Vector2i &kp, uint32_t id) : pt(kp), ptSubpix(kp.cast<float>()), featureId(id){}
+    QovFeature(const Eigen::Vector2f &kpSubpix, uint32_t id) : pt(kpSubpix.cast<int>()), ptSubpix(kpSubpix), featureId(id){}
 };
 
 struct QovCompPair{

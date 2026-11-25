@@ -30,6 +30,7 @@
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/Values.h>
 #include <gtsam/slam/SmartProjectionPoseFactor.h>
+#include <gtsam/slam/SmartFactorParams.h>
 
 #include "CoreTypes.hpp"
 #include "pool_slam/SystemTypes.hpp"
@@ -49,8 +50,8 @@ struct BackendConfig{
     std::optional<gtsam::Pose3> initialPose = std::nullopt; // Optional user/dataset initial pose anchor
 
     // iSAM2 incremental solver parameters
-    double relinearizeThreshold = 0.01;
-    int relinearizeSkip = 1;
+    double relinearizeThreshold = 0.1;
+    int relinearizeSkip = 10;
 
     // Initial state prior standard deviations (Frame 0 bootstrapping)
     Eigen::Matrix<double, 6, 1> initPoseSigma =
@@ -136,6 +137,7 @@ class Backend{
     gtsam::imuBias::ConstantBias prevBias;
 
     // Smart factor storage
+    gtsam::SmartProjectionParams smartParams;
     std::unordered_map<uint32_t, std::shared_ptr<SmartFactor>> smartFactors;
     std::unordered_map<uint32_t, gtsam::FactorIndex> smartFactorSlots;
     std::unordered_map<uint32_t, std::vector<std::pair<gtsam::Point2, gtsam::Key>>> activeFeatureTracks; // Active visual tracks in smoother window
