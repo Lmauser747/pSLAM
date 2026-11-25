@@ -13,6 +13,8 @@
 #include <gtsam/linear/NoiseModel.h>
 #include <gtsam/base/Vector.h>
 
+#include "pool_slam/HalTypes.hpp"
+
 namespace PoolSLAM{
 
 struct Distortion{
@@ -28,6 +30,7 @@ struct TrackedFeature{
     Eigen::Vector2f ptCurr = Eigen::Vector2f::Zero(); // Disorted position of the feature in pixel coordinates
     Eigen::Vector2f ptPrev = Eigen::Vector2f::Zero(); // Disorted position of the feature in pixel coordinates in previous frame
     Eigen::Vector2f ptUndis = Eigen::Vector2f::Zero(); // Undistorted position of the points in normalzied camera coordinates
+    Eigen::Vector2f ptKfUndis = Eigen::Vector2f::Zero(); // Undistorted normalized position at the last keyframe
 
 
     static constexpr int PATCH_SIZE = 2 * Radius + 1;
@@ -57,6 +60,9 @@ struct BackendHfPacket{
     
     // Preintegrated IMU measurements
     std::unique_ptr<gtsam::PreintegratedImuMeasurements> imuDelta;
+
+    // Raw IMU samples spanning this frame interval (for backend re-preintegration across merged non-keyframes)
+    std::vector<Imu> rawImu;
 
     // Depth in meters
     std::optional<double> depth;

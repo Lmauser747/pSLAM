@@ -411,4 +411,41 @@ void HfTracker::enforceBucketDensity(){
         activeFeatures.resize(writeIdx);
     }
 }
+
+float HfTracker::computeKeyframeParallax(const Eigen::Matrix3f &R_kf_curr) const{
+    if(activeFeatures.empty()){
+        return 0.0f;
+    }
+
+    const float fx = K(0, 0);
+    const float fy = K(1, 1);
+    const Eigen::Matrix3f R_curr_kf = R_kf_curr.transpose();
+
+    std::vector<float> parallaxes;
+    parallaxes.reserve(activeFeatures.size());
+
+    for(const auto &feat : activeFeatures){
+        const Eigen::Vector3f pRot = R_curr_kf * feat.ptKfUndis.homogeneous();
+        if(pRot.z() <= 1e-6f){
+            continue;
+        }
+        const Eigen::Vector2f pRotNorm = pRot.head<2>() / pRot.z();
+        const Eigen::Vector2f diff = feat.ptUndis - pRotNorm;
+        parallaxes.push_back(std::hypot(diff.x() * fx, diff.y() * fy));
+    }
+
+    if(parallaxes.empty()){
+        return 0.0f;
+    }
+
+    const size_t mid = parallaxes.size() / 2;
+    std::nth_element(parallaxes.begin(), parallaxes.begin() + static_cast<ptrdiff_t>(mid), parallaxes.end());
+    return parallaxes[mid];
+}
+
+void HfTracker::markKeyframe(){
+    for(auto &feat : activeFeatures){
+        feat.ptKfUndis = feat.ptUndis;
+    }
+}
 }

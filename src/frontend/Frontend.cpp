@@ -44,6 +44,9 @@ void Frontend::processPacket(){
                 double dt = tCurr - tPrev;
                 if(dt > 0.0){
                     frameImuDelta->integrateMeasurement(syncPkt.imu[i].a, syncPkt.imu[i].w, dt);
+                    if(keyframeImuDelta){
+                        keyframeImuDelta->integrateMeasurement(syncPkt.imu[i].a, syncPkt.imu[i].w, dt);
+                    }
                     tPrev = tCurr;
                 }
             }
@@ -57,23 +60,36 @@ void Frontend::processPacket(){
         auto Rcam = config.bodyToCameraRot.transpose() * frameImuDelta->deltaRij().matrix() * config.bodyToCameraRot; // Frame to frame relative camera rotation
         
         // Track the existing features using IC-LK
-        auto meanDisplacement = hf.trackExistingFeatures(syncPkt.image->arr.data(), Rcam.cast<float>()); 
+        (void)hf.trackExistingFeatures(syncPkt.image->arr.data(), Rcam.cast<float>()); 
         
         auto featureCount = hf.getActiveFeatures().size();
+
+        // Compute rotation-compensated parallax since the last keyframe
+        Eigen::Matrix3d RcamKf = Eigen::Matrix3d::Identity();
+        if(keyframeImuDelta && keyframeImuDelta->deltaTij() > 0.0){
+            RcamKf = config.bodyToCameraRot.transpose() * keyframeImuDelta->deltaRij().matrix() * config.bodyToCameraRot;
+        }
+        const float keyframeParallax = hf.computeKeyframeParallax(RcamKf.cast<float>());
 
         // Determine if keyframe
         auto percentRetainedFeatures = (lastKfCount > 0) ? (static_cast<float>(featureCount) / static_cast<float>(lastKfCount)) : 0.0f;
         if(frameId == 0 || 
-            meanDisplacement > config.meanDisplacementThreshold || 
+            keyframeParallax > config.meanDisplacementThreshold || 
             lastKfCount == 0 ||
             percentRetainedFeatures < config.droppedFeatureThreshold ||
             (syncPkt.timestamp - lastKfTimestamp > config.maxTimeBetweenKf)
         ){
             hfPkt->isKeyframe = true;
 
-            //Replenish buckets before adding features
+            // Anchor current tracks as keyframe reference and replenish drained buckets
+            hf.markKeyframe();
             hf.replenishBuckets(syncPkt.image->arr.data());
             lf.passKeyframe(frameId, syncPkt.timestamp, syncPkt.image->arr.data(), hf.getActiveFeatures());
+
+            {
+                std::lock_guard<std::mutex> lock(m_imuBias);
+                keyframeImuDelta = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, imuBias);
+            }
 
             lastKfCount = hf.getActiveFeatures().size();
             lastKfTimestamp = syncPkt.timestamp;
@@ -81,6 +97,7 @@ void Frontend::processPacket(){
 
         // Fill packet
         hfPkt->imuDelta = std::move(frameImuDelta);
+        hfPkt->rawImu = std::move(syncPkt.imu);
         if(syncPkt.depth.has_value()){
             hfPkt->depth = syncPkt.depth->z;
         }

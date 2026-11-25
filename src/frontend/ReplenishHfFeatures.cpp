@@ -174,6 +174,7 @@ bool HfTracker::addKp(const uint8_t *curBuffer, Eigen::Vector2i &kp){
     feature.ptCurr = kp.cast<float>();
     feature.ptPrev = kp.cast<float>();
     feature.ptUndis = undistortPoint(feature.ptCurr.x(), feature.ptCurr.y());
+    feature.ptKfUndis = feature.ptUndis;
     
 
     ptrdiff_t xPt = static_cast<ptrdiff_t>(kp.x());

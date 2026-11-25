@@ -190,6 +190,12 @@ public:
     // Replenishs drained buckets with new keypoints obtained via FAST + Shi-Thomasi
     size_t replenishBuckets(const uint8_t *curBuffer);
 
+    // Computes median rotation-compensated parallax (in pixels) since the last keyframe
+    float computeKeyframeParallax(const Eigen::Matrix3f &R_kf_curr) const;
+
+    // Anchors active features' ptKfUndis to their current undistorted coordinates
+    void markKeyframe();
+
     FORCE_INLINE const std::vector<TrackedFeature<RADIUS>> &getActiveFeatures() const{return activeFeatures;}
 
     FORCE_INLINE size_t getNumBuckets() const{return totalBuckets;}
