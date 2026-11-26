@@ -47,9 +47,12 @@ struct EpipolarData{
 class HfTracker{
 private:
     static constexpr int RADIUS = 5; // Radius of feature patch
+    static constexpr size_t PYR_LEVELS = 4; // Number of pyramid levels
     static constexpr size_t MIN_MARGIN = 16; // Minimum bucket margin in pixels
     static constexpr size_t NUM_FEATURES_TARGET_DEFAULT = 200; // Target number of features
     static constexpr int ICLK_ITERS = 20; // Number of ICLK iterations
+    static constexpr int ICLK_COARSE_ITERS = 10; // Coarse pyramid level iterations
+    static constexpr float COARSE_MAX_SHIFT = 2.5f * static_cast<float>(RADIUS); // Guard against divergent coarse steps
     static constexpr uint32_t ICLK_MAD_THRESHOLD = 5 * (TrackedFeature<RADIUS>::PATCH_SIZE) * (TrackedFeature<RADIUS>::PATCH_SIZE);
     static constexpr int UNDISTORT_ITERS = 10; // Number of times to undistort each point
     static constexpr int RANSAC_ITERS = 20; // Number of random samples to inspect in RANSAC
@@ -61,6 +64,12 @@ private:
     static constexpr float ST_THRESHOLD = 500.0f; // Minimum Shi-Tomasi score of canidate feature
     static constexpr int ST_PATCH_SIZE = 7; // Width and height of patch for Shi-Tomasi gradient computation
     static constexpr float HESSIAN_STABILITY_THRESHOLD = 409.6f; // Minimum absolute value of the determinant of the Hessian (scaled by 64^2)
+
+    struct ImagePyramid{
+        std::array<std::vector<uint8_t>, PYR_LEVELS> levels;
+        std::array<size_t, PYR_LEVELS> widths{};
+        std::array<size_t, PYR_LEVELS> heights{};
+    };
 
     const size_t wImage, hImage; // Image pixel array height and width
 
@@ -91,10 +100,18 @@ private:
 
     std::minstd_rand ransacRng; // Random number generation for RANSAC
 
+    std::array<ImagePyramid, 2> pyramids;
+    std::vector<uint16_t> pyrBlurScratch;
+    uint8_t curPyrIdx = 0;
+    bool hasPrevPyramid = false;
+
+    FORCE_INLINE uint8_t prevPyrIdx() const{return curPyrIdx ^ 1u;}
+
     // Handle errors in the tracking
     void handleTrackingError(){
         activeFeatures.clear();
         std::fill(gridOccupancy.begin(), gridOccupancy.end(), GridBucket{0, UINT32_MAX, UINT32_MAX});
+        hasPrevPyramid = false;
     }
 
     // Gets the index of a bucket given sub-pixel coordinates
@@ -106,12 +123,44 @@ private:
     // Gets the point at the top-left of the bucket
     FORCE_INLINE Eigen::Vector2i topLeftBucket(size_t bucket) const;
 
+    // Build all Gaussian pyramid levels into dst
+    void buildPyramid(const uint8_t *curBuffer, ImagePyramid &dst);
+    void downsampleLevel(const uint8_t *src, size_t srcW, size_t srcH, uint8_t *dst, size_t dstW, size_t dstH);
+
+    // Extract patch, Sobel gradients, and inverse Hessian at subpixel pt
+    bool extractTemplate(
+        const uint8_t *buffer,
+        size_t bufW,
+        size_t bufH,
+        const Eigen::Vector2f &pt,
+        std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
+        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+        Eigen::Matrix2f &HInv) const;
+
+    // Core IC-LK alignment loop on a buffer of arbitrary size
+    bool alignPatchICLK(
+        const std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
+        const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+        const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+        const Eigen::Matrix2f &HInv,
+        const uint8_t *curBuffer,
+        size_t bufW,
+        size_t bufH,
+        int maxIters,
+        Eigen::Vector2f &ptEst,
+        float &madError) const;
+
     // Matches the new feature to a feature in the previous frame using IC-LK
     bool alignFeatureICLK(TrackedFeature<RADIUS> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst);
+
+    // Coarse to fine pyramidal IC-LK alignment followed by level zero refinement
+    bool alignFeaturePyramidICLK(TrackedFeature<RADIUS> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst);
 
     // Biliner interpolation helper
     int16_t bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const;
     float bilinearFloat(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const;
+    float bilinearFloatStride(const uint8_t *curBuffer, size_t stride, const Eigen::Vector2f &pt) const;
 
     // Does RANSAC on the active features using R as the IMU prior
     int ransac(const Eigen::Matrix3f &R);
@@ -182,6 +231,17 @@ public:
         epi.yPrev.reserve(maxFeatures);
 
         fastPoints.reserve(wBucket);
+
+        for(size_t lvl = 0; lvl < PYR_LEVELS; lvl++){
+            const size_t lvlW = wImage >> lvl;
+            const size_t lvlH = hImage >> lvl;
+            for(auto &pyr : pyramids){
+                pyr.widths[lvl] = lvlW;
+                pyr.heights[lvl] = lvlH;
+                pyr.levels[lvl].resize(lvlW * lvlH);
+            }
+        }
+        pyrBlurScratch.resize((wImage / 2) * hImage);
     };
 
     // Tracks existing features with IC-LK, removes outliers with RANSAC, and retunrs the number of active features

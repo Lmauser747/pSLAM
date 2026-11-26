@@ -71,6 +71,8 @@ struct BackendConfig{
     double depthSigma = 0.05; 
     double depthHuberK = 1.345;
 
+    double smartRankTolerance = 1e-3; 
+
     size_t keyframeWindowSize = 20; // Number of keyframes to keep in trackedKeyframes
     size_t slidingWindowSize = 10; // Maximum number of frames in the iSAM2 sliding window
 };

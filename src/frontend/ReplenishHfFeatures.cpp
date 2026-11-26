@@ -17,6 +17,14 @@ size_t HfTracker::replenishBuckets(const uint8_t *curBuffer){
     if(curBuffer == nullptr){
         return 0;
     }
+
+    // Seed previous pyramid only when replenishBuckets is called before trackExistingFeatures
+    if(!hasPrevPyramid){
+        buildPyramid(curBuffer, pyramids[curPyrIdx]);
+        curPyrIdx ^= 1u;
+        hasPrevPyramid = true;
+    }
+
     size_t bucketsOccipied = 0;
     
     for(size_t bucket = 0;  bucket < gridOccupancy.size(); bucket++){

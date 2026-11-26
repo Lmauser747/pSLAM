@@ -15,9 +15,12 @@ namespace PoolSLAM{
 float HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const Eigen::Matrix3f &R){
     if(curBuffer == nullptr){
         handleTrackingError();
-        return 0;
+        return 0.0f;
     }
 
+    buildPyramid(curBuffer, pyramids[curPyrIdx]);
+
+    float meanDisplacement = 0.0f;
     // Run IC-LK if we have previous features to track
     if(!activeFeatures.empty()){
         Eigen::Matrix3f prior = K * R.transpose() * KInv;
@@ -26,7 +29,7 @@ float HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const Eigen::Ma
         for(size_t i = 0; i < activeFeatures.size(); i++){
             auto &feature = activeFeatures[i];
             Eigen::Vector2f ptEst = (prior * feature.ptCurr.homogeneous()).hnormalized();
-            if(alignFeatureICLK(feature, curBuffer, ptEst)){
+            if(alignFeaturePyramidICLK(feature, curBuffer, ptEst)){
                 if(survivorCount != i){
                     activeFeatures[survivorCount] = std::move(activeFeatures[i]);
                 }
@@ -45,20 +48,155 @@ float HfTracker::trackExistingFeatures(const uint8_t *curBuffer, const Eigen::Ma
         for (const auto &feat : activeFeatures) {
             totalDisplacement += (feat.ptCurr - feat.ptPrev).norm();
         }
-        return activeFeatures.empty() ? 0.0f : (totalDisplacement / static_cast<float>(activeFeatures.size()));
-    }else{
-        return 0;
+        meanDisplacement = activeFeatures.empty() ? 0.0f : (totalDisplacement / static_cast<float>(activeFeatures.size()));
+    }
+
+    // Flip ring index after tracking so prevPyrIdx holds curBuffer even on empty or recovered sets
+    curPyrIdx ^= 1u;
+    hasPrevPyramid = true;
+    return meanDisplacement;
+}
+
+void HfTracker::buildPyramid(const uint8_t *curBuffer, ImagePyramid &dst){
+    std::copy(curBuffer, curBuffer + wImage * hImage, dst.levels[0].data());
+    for(size_t lvl = 1; lvl < PYR_LEVELS; lvl++){
+        const size_t dstW = dst.widths[lvl];
+        const size_t dstH = dst.heights[lvl];
+        if(dstW == 0 || dstH == 0){
+            continue;
+        }
+        const uint8_t *srcPtr = (lvl == 1) ? curBuffer : dst.levels[lvl - 1].data();
+        downsampleLevel(srcPtr, dst.widths[lvl - 1], dst.heights[lvl - 1], dst.levels[lvl].data(), dstW, dstH);
     }
 }
 
-bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst){
+void HfTracker::downsampleLevel(const uint8_t *src, size_t srcW, size_t srcH, uint8_t *dst, size_t dstW, size_t dstH){
+    const int maxX = static_cast<int>(srcW) - 1;
+    const int maxY = static_cast<int>(srcH) - 1;
+
+    // Blur only even columns needed for 2x horizontal decimation
+    for(size_t y = 0; y < srcH; y++){
+        const uint8_t *rowPtr = src + y * srcW;
+        uint16_t *scratchRow = pyrBlurScratch.data() + y * dstW;
+        for(size_t x = 0; x < dstW; x++){
+            const int cx = static_cast<int>(x * 2);
+            if(cx >= 2 && cx + 2 <= maxX){
+                scratchRow[x] = static_cast<uint16_t>(
+                    rowPtr[cx - 2] + 4 * rowPtr[cx - 1] + 6 * rowPtr[cx] + 4 * rowPtr[cx + 1] + rowPtr[cx + 2]
+                );
+            }else{
+                const int xm2 = std::clamp(cx - 2, 0, maxX);
+                const int xm1 = std::clamp(cx - 1, 0, maxX);
+                const int x0 = std::clamp(cx, 0, maxX);
+                const int xp1 = std::clamp(cx + 1, 0, maxX);
+                const int xp2 = std::clamp(cx + 2, 0, maxX);
+                scratchRow[x] = static_cast<uint16_t>(
+                    rowPtr[xm2] + 4 * rowPtr[xm1] + 6 * rowPtr[x0] + 4 * rowPtr[xp1] + rowPtr[xp2]
+                );
+            }
+        }
+    }
+
+    for(size_t y = 0; y < dstH; y++){
+        const int cy = static_cast<int>(y * 2);
+        const uint16_t *rm2 = pyrBlurScratch.data() + static_cast<size_t>(std::clamp(cy - 2, 0, maxY)) * dstW;
+        const uint16_t *rm1 = pyrBlurScratch.data() + static_cast<size_t>(std::clamp(cy - 1, 0, maxY)) * dstW;
+        const uint16_t *r0 = pyrBlurScratch.data() + static_cast<size_t>(std::clamp(cy, 0, maxY)) * dstW;
+        const uint16_t *rp1 = pyrBlurScratch.data() + static_cast<size_t>(std::clamp(cy + 1, 0, maxY)) * dstW;
+        const uint16_t *rp2 = pyrBlurScratch.data() + static_cast<size_t>(std::clamp(cy + 2, 0, maxY)) * dstW;
+        uint8_t *dstRow = dst + y * dstW;
+
+        for(size_t x = 0; x < dstW; x++){
+            const uint32_t sum = static_cast<uint32_t>(rm2[x]) + 4u * rm1[x] + 6u * r0[x] + 4u * rp1[x] + rp2[x];
+            dstRow[x] = static_cast<uint8_t>((sum + 128u) >> 8);
+        }
+    }
+}
+
+bool HfTracker::extractTemplate(
+    const uint8_t *buffer,
+    size_t bufW,
+    size_t bufH,
+    const Eigen::Vector2f &pt,
+    std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
+    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+    Eigen::Matrix2f &HInv) const{
+    // Leave one extra pixel margin for Sobel taps and floor plus one bilinear lookup
+    const float ptLower = static_cast<float>(RADIUS + 1);
+    const float ptUpperX = static_cast<float>(bufW) - static_cast<float>(RADIUS) - 3.0f;
+    const float ptUpperY = static_cast<float>(bufH) - static_cast<float>(RADIUS) - 3.0f;
+    if(pt.x() < ptLower || pt.y() < ptLower || pt.x() > ptUpperX || pt.y() > ptUpperY){
+        return false;
+    }
+
+    int Txx = 0;
+    int Tyy = 0;
+    int Txy = 0;
+    constexpr int PATCH_SIZE = TrackedFeature<RADIUS>::PATCH_SIZE;
+
+    for(int dy = -RADIUS; dy <= RADIUS; dy++){
+        const size_t rowOffset = static_cast<size_t>((dy + RADIUS) * PATCH_SIZE);
+        for(int dx = -RADIUS; dx <= RADIUS; dx++){
+            const size_t idx = rowOffset + static_cast<size_t>(dx + RADIUS);
+            const Eigen::Vector2f c = pt + Eigen::Vector2f(static_cast<float>(dx), static_cast<float>(dy));
+
+            const float center = bilinearFloatStride(buffer, bufW, c);
+            patch[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(center)), 0, 255));
+
+            // Match addKp left minus right and top minus bottom 8x Sobel convention
+            const float tl = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(-1.0f, -1.0f));
+            const float tc = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(0.0f, -1.0f));
+            const float tr = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(1.0f, -1.0f));
+            const float ml = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(-1.0f, 0.0f));
+            const float mr = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(1.0f, 0.0f));
+            const float bl = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(-1.0f, 1.0f));
+            const float bc = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(0.0f, 1.0f));
+            const float br = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(1.0f, 1.0f));
+
+            const int tx = static_cast<int>(std::lround(2.0f * (ml - mr) + bl + tl - br - tr));
+            const int ty = static_cast<int>(std::lround(2.0f * (tc - bc) + tl + tr - bl - br));
+
+            xGrad[idx] = tx;
+            yGrad[idx] = ty;
+
+            Txx += tx * tx;
+            Tyy += ty * ty;
+            Txy += tx * ty;
+        }
+    }
+
+    Eigen::Matrix2f H{
+        {static_cast<float>(Txx), static_cast<float>(Txy)},
+        {static_cast<float>(Txy), static_cast<float>(Tyy)}
+    };
+
+    if(std::abs(H.determinant()) < HESSIAN_STABILITY_THRESHOLD){
+        return false;
+    }
+
+    HInv = H.inverse();
+    return true;
+}
+
+bool HfTracker::alignPatchICLK(
+    const std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
+    const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+    const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+    const Eigen::Matrix2f &HInv,
+    const uint8_t *curBuffer,
+    size_t bufW,
+    size_t bufH,
+    int maxIters,
+    Eigen::Vector2f &ptEst,
+    float &madError) const{
     const double ptLower = RADIUS + 1;
-    const double ptUpperX = static_cast<double>(wImage) - RADIUS - 2;
-    const double ptUpperY = static_cast<double>(hImage) - RADIUS - 2;
+    const double ptUpperX = static_cast<double>(bufW) - RADIUS - 2;
+    const double ptUpperY = static_cast<double>(bufH) - RADIUS - 2;
 
-    float madError = 0.0f;
+    madError = 0.0f;
 
-    for(int iter = 0; iter < ICLK_ITERS; iter++){
+    for(int iter = 0; iter < maxIters; iter++){
         madError = 0.0f;
         if((ptEst.x() < ptLower) || (ptEst.y() < ptLower) || (ptEst.x() > ptUpperX) || (ptEst.y() > ptUpperY)){
             return false;
@@ -66,30 +204,28 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
 
         float bX = 0.0f;
         float bY = 0.0f;
-        
-        // Compute the accumulated error
+
         // START VECTORIZE
         for(int dy = -RADIUS; dy <= RADIUS; dy++){
             for(int dx = -RADIUS; dx <= RADIUS; dx++){
-                size_t idx = static_cast<size_t>((dy + RADIUS) * feature.PATCH_SIZE + (dx + RADIUS));
+                size_t idx = static_cast<size_t>((dy + RADIUS) * TrackedFeature<RADIUS>::PATCH_SIZE + (dx + RADIUS));
                 const Eigen::Vector2f offset{dx, dy};
 
-                float sampleI = bilinearFloat(curBuffer, ptEst + offset);
-                float diff = sampleI - static_cast<float>(feature.patch[idx]);
+                float sampleI = bilinearFloatStride(curBuffer, bufW, ptEst + offset);
+                float diff = sampleI - static_cast<float>(patch[idx]);
                 madError += std::abs(diff);
 
-                bX += static_cast<float>(feature.xGrad[idx]) * diff;
-                bY += static_cast<float>(feature.yGrad[idx]) * diff;
+                bX += static_cast<float>(xGrad[idx]) * diff;
+                bY += static_cast<float>(yGrad[idx]) * diff;
             }
         }
         // END VECTORIZE
 
         Eigen::Vector2f b = {bX, bY};
-        
-        // Compensate for the 8x Sobel scaling (H is 64x, b is 8x)
-        Eigen::Vector2f delta = (feature.HInv * b) * 8.0f;
 
-        // Update estimate based on the gradient
+        // Compensate for the 8x Sobel scaling
+        Eigen::Vector2f delta = (HInv * b) * 8.0f;
+
         ptEst += delta;
 
         if(delta.squaredNorm() < 1e-4f){
@@ -97,11 +233,21 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
         }
     }
 
-    if(madError > static_cast<float>(ICLK_MAD_THRESHOLD)){
+    if((ptEst.x() < ptLower) || (ptEst.y() < ptLower) || (ptEst.x() > ptUpperX) || (ptEst.y() > ptUpperY)){
         return false;
     }
 
-    if((ptEst.x() < ptLower) || (ptEst.y() < ptLower) || (ptEst.x() > ptUpperX) || (ptEst.y() > ptUpperY)){
+    return true;
+}
+
+bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst){
+    float madError = 0.0f;
+    if(!alignPatchICLK(feature.patch, feature.xGrad, feature.yGrad, feature.HInv,
+                       curBuffer, wImage, hImage, ICLK_ITERS, ptEst, madError)){
+        return false;
+    }
+
+    if(madError > static_cast<float>(ICLK_MAD_THRESHOLD)){
         return false;
     }
 
@@ -111,7 +257,54 @@ bool HfTracker::alignFeatureICLK(TrackedFeature<5> &feature, const uint8_t *curB
     return true;
 }
 
+bool HfTracker::alignFeaturePyramidICLK(TrackedFeature<RADIUS> &feature, const uint8_t *curBuffer, Eigen::Vector2f &ptEst){
+    if(hasPrevPyramid){
+        const auto &prevPyr = pyramids[prevPyrIdx()];
+        const auto &curPyr = pyramids[curPyrIdx];
+
+        std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> coarsePatch;
+        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> coarseXGrad;
+        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> coarseYGrad;
+        Eigen::Matrix2f coarseHInv;
+
+        for(int lvl = static_cast<int>(PYR_LEVELS) - 1; lvl >= 1; lvl--){
+            const size_t uLvl = static_cast<size_t>(lvl);
+            const size_t lvlW = curPyr.widths[uLvl];
+            const size_t lvlH = curPyr.heights[uLvl];
+            const float scale = 1.0f / static_cast<float>(1u << lvl);
+
+            const Eigen::Vector2f ptPrevL = feature.ptCurr * scale;
+            Eigen::Vector2f ptEstL = ptEst * scale;
+            const Eigen::Vector2f ptPreLevelL = ptEstL;
+
+            // Skip unusable coarse levels instead of dropping border features early
+            if(!extractTemplate(prevPyr.levels[uLvl].data(), lvlW, lvlH, ptPrevL,
+                                coarsePatch, coarseXGrad, coarseYGrad, coarseHInv)){
+                continue;
+            }
+
+            float coarseMad = 0.0f;
+            if(!alignPatchICLK(coarsePatch, coarseXGrad, coarseYGrad, coarseHInv,
+                               curPyr.levels[uLvl].data(), lvlW, lvlH, ICLK_COARSE_ITERS, ptEstL, coarseMad)){
+                continue;
+            }
+
+            if((ptEstL - ptPreLevelL).norm() > COARSE_MAX_SHIFT){
+                continue;
+            }
+
+            ptEst = ptEstL / scale;
+        }
+    }
+
+    return alignFeatureICLK(feature, curBuffer, ptEst);
+}
+
 float HfTracker::bilinearFloat(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const{
+    return bilinearFloatStride(curBuffer, wImage, pt);
+}
+
+float HfTracker::bilinearFloatStride(const uint8_t *curBuffer, size_t stride, const Eigen::Vector2f &pt) const{
     float x0 = static_cast<float>(std::floor(pt.x()));
     float y0 = static_cast<float>(std::floor(pt.y()));
 
@@ -123,10 +316,10 @@ float HfTracker::bilinearFloat(const uint8_t *curBuffer, const Eigen::Vector2f &
     size_t x = static_cast<size_t>(x0);
     size_t y = static_cast<size_t>(y0);
 
-    return (fxC * fyC * static_cast<float>(curBuffer[y * wImage + x])) +
-           (fx * fyC * static_cast<float>(curBuffer[y * wImage + x + 1])) +
-           (fxC * fy * static_cast<float>(curBuffer[(y + 1) * wImage + x])) +
-           (fx * fy * static_cast<float>(curBuffer[(y + 1) * wImage + x + 1]));
+    return (fxC * fyC * static_cast<float>(curBuffer[y * stride + x])) +
+           (fx * fyC * static_cast<float>(curBuffer[y * stride + x + 1])) +
+           (fxC * fy * static_cast<float>(curBuffer[(y + 1) * stride + x])) +
+           (fx * fy * static_cast<float>(curBuffer[(y + 1) * stride + x + 1]));
 }
 
 int16_t HfTracker::bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const{
@@ -444,8 +637,22 @@ float HfTracker::computeKeyframeParallax(const Eigen::Matrix3f &R_kf_curr) const
 }
 
 void HfTracker::markKeyframe(){
+    const uint8_t *kfBuffer = hasPrevPyramid ? pyramids[prevPyrIdx()].levels[0].data() : nullptr;
+    std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> newPatch;
+    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> newXGrad;
+    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> newYGrad;
+    Eigen::Matrix2f newHInv;
+
     for(auto &feat : activeFeatures){
         feat.ptKfUndis = feat.ptUndis;
+        // Refresh level zero template at keyframes to prevent multi second drift
+        if(kfBuffer != nullptr &&
+           extractTemplate(kfBuffer, wImage, hImage, feat.ptCurr, newPatch, newXGrad, newYGrad, newHInv)){
+            feat.patch = newPatch;
+            feat.xGrad = newXGrad;
+            feat.yGrad = newYGrad;
+            feat.HInv = newHInv;
+        }
     }
 }
 }

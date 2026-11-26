@@ -49,8 +49,8 @@ Backend::Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &
     // Keep degenerate tracks zeroed instead of throwing during stationary motion
     smartParams.degeneracyMode = gtsam::ZERO_ON_DEGENERACY;
     smartParams.setLandmarkDistanceThreshold(100.0);
-    smartParams.setDynamicOutlierRejectionThreshold(5.0 / config.K(0, 0));
     smartParams.setEnableEPI(true);
+    smartParams.setDynamicOutlierRejectionThreshold(5.0 / config.K(0, 0));
     
     // Initial noise models
     gtsam::Vector6 initBiasSigmas;

@@ -80,6 +80,26 @@ protected:
         return tracker.topLeftBucket(bucket);
     }
 
+    static bool getHasPrevPyramid(const HfTracker& tracker) {
+        return tracker.hasPrevPyramid;
+    }
+
+    static uint8_t getCurPyrIdx(const HfTracker& tracker) {
+        return tracker.curPyrIdx;
+    }
+
+    static size_t getPyrWidth(const HfTracker& tracker, size_t lvl) {
+        return tracker.pyramids[tracker.prevPyrIdx()].widths[lvl];
+    }
+
+    static size_t getPyrHeight(const HfTracker& tracker, size_t lvl) {
+        return tracker.pyramids[tracker.prevPyrIdx()].heights[lvl];
+    }
+
+    static const std::vector<uint8_t>& getPrevPyrLevel(const HfTracker& tracker, size_t lvl) {
+        return tracker.pyramids[tracker.prevPyrIdx()].levels[lvl];
+    }
+
     // Helper to generate a synthetic image with a textured circle / checker patch
     static std::vector<uint8_t> makeSyntheticImage(size_t w, size_t h, uint8_t bg = 50) {
         return std::vector<uint8_t>(w * h, bg);
@@ -176,6 +196,26 @@ protected:
 
     static Eigen::Vector2i getTopLeftBucket(const HfTracker& tracker, size_t bucket) {
         return tracker.topLeftBucket(bucket);
+    }
+
+    static bool getHasPrevPyramid(const HfTracker& tracker) {
+        return tracker.hasPrevPyramid;
+    }
+
+    static uint8_t getCurPyrIdx(const HfTracker& tracker) {
+        return tracker.curPyrIdx;
+    }
+
+    static size_t getPyrWidth(const HfTracker& tracker, size_t lvl) {
+        return tracker.pyramids[tracker.prevPyrIdx()].widths[lvl];
+    }
+
+    static size_t getPyrHeight(const HfTracker& tracker, size_t lvl) {
+        return tracker.pyramids[tracker.prevPyrIdx()].heights[lvl];
+    }
+
+    static const std::vector<uint8_t>& getPrevPyrLevel(const HfTracker& tracker, size_t lvl) {
+        return tracker.pyramids[tracker.prevPyrIdx()].levels[lvl];
     }
 
     static size_t getBucketIdx(const HfTracker& tracker, double x, double y) {

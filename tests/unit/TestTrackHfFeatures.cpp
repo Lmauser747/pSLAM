@@ -329,6 +329,129 @@ TEST_F(TestTrackHfFeatures, TrackExistingFeaturesEmptySetReturnsZero) {
 
     float displacement = tracker.trackExistingFeatures(img.data(), Eigen::Matrix3f::Identity());
     EXPECT_FLOAT_EQ(displacement, 0.0f);
+    EXPECT_TRUE(getHasPrevPyramid(tracker));
+}
+
+// Ring buffer swaps pyramid slots without copying and matches 2x level dimensions
+TEST_F(TestTrackHfFeatures, PyramidRingBufferToggleAndDimensions) {
+    auto tracker = createTracker();
+    auto img0 = makeSyntheticImage(W, H, 40);
+    auto img1 = makeSyntheticImage(W, H, 90);
+
+    EXPECT_FALSE(getHasPrevPyramid(tracker));
+    const uint8_t initialCur = getCurPyrIdx(tracker);
+
+    tracker.trackExistingFeatures(img0.data(), Eigen::Matrix3f::Identity());
+    EXPECT_TRUE(getHasPrevPyramid(tracker));
+    EXPECT_EQ(getCurPyrIdx(tracker), static_cast<uint8_t>(initialCur ^ 1u));
+    EXPECT_EQ(getPyrWidth(tracker, 0), W);
+    EXPECT_EQ(getPyrHeight(tracker, 0), H);
+    EXPECT_EQ(getPyrWidth(tracker, 1), W / 2);
+    EXPECT_EQ(getPyrHeight(tracker, 1), H / 2);
+    EXPECT_EQ(getPyrWidth(tracker, 2), W / 4);
+    EXPECT_EQ(getPyrHeight(tracker, 2), H / 4);
+    EXPECT_EQ(getPyrWidth(tracker, 3), W / 8);
+    EXPECT_EQ(getPyrHeight(tracker, 3), H / 8);
+    EXPECT_EQ(getPrevPyrLevel(tracker, 3)[0], 40);
+
+    tracker.trackExistingFeatures(img1.data(), Eigen::Matrix3f::Identity());
+    EXPECT_EQ(getCurPyrIdx(tracker), initialCur);
+    EXPECT_EQ(getPrevPyrLevel(tracker, 3)[0], 90);
+
+    tracker.trackExistingFeatures(nullptr, Eigen::Matrix3f::Identity());
+    EXPECT_FALSE(getHasPrevPyramid(tracker));
+}
+
+// Pyramidal IC-LK converges across large displacements beyond single scale patch radius
+TEST_F(TestTrackHfFeatures, PyramidalICLKLargeDisplacementConvergence) {
+    auto tracker = createTracker();
+
+    auto drawLargeCorner = [&](std::vector<uint8_t>& img, int cx, int cy) {
+        for (int y = cy - 40; y <= cy + 40; ++y) {
+            for (int x = cx - 40; x <= cx + 40; ++x) {
+                if (x >= 0 && x < static_cast<int>(W) && y >= 0 && y < static_cast<int>(H)) {
+                    const uint8_t val = (x >= cx && y >= cy) ? 220 : 50;
+                    img[static_cast<size_t>(y) * W + static_cast<size_t>(x)] = val;
+                }
+            }
+        }
+    };
+
+    auto img0 = makeSyntheticImage(W, H, 50);
+    drawLargeCorner(img0, 300, 240);
+
+    // Seed pyramid and feature via normal frame-0 sequence
+    tracker.trackExistingFeatures(img0.data(), Eigen::Matrix3f::Identity());
+    Eigen::Vector2i kp(300, 240);
+    ASSERT_TRUE(callAddKp(tracker, img0.data(), kp));
+    ASSERT_EQ(getActiveFeatures(tracker).size(), 1u);
+
+    // Displace corner by (+18, -14) px, well outside single-scale RADIUS=5 basin
+    auto img1 = makeSyntheticImage(W, H, 50);
+    drawLargeCorner(img1, 318, 226);
+
+    float disp = tracker.trackExistingFeatures(img1.data(), Eigen::Matrix3f::Identity());
+    const auto& features = getActiveFeatures(tracker);
+    ASSERT_EQ(features.size(), 1u);
+    EXPECT_GT(disp, 15.0f);
+    EXPECT_NEAR(features[0].ptCurr.x(), 318.0f, 0.5f);
+    EXPECT_NEAR(features[0].ptCurr.y(), 226.0f, 0.5f);
+}
+
+// Features near border outside coarsest level bounds still converge via finer levels
+TEST_F(TestTrackHfFeatures, PyramidalICLKBorderFeatureSkipsCoarseLevel) {
+    auto tracker = createTracker();
+
+    auto drawLargeCorner = [&](std::vector<uint8_t>& img, int cx, int cy) {
+        for (int y = cy - 16; y <= cy + 16; ++y) {
+            for (int x = cx - 16; x <= cx + 16; ++x) {
+                if (x >= 0 && x < static_cast<int>(W) && y >= 0 && y < static_cast<int>(H)) {
+                    const uint8_t val = (x >= cx && y >= cy) ? 220 : 50;
+                    img[static_cast<size_t>(y) * W + static_cast<size_t>(x)] = val;
+                }
+            }
+        }
+    };
+
+    // At x=20, level 3 coord is 2.5 (< RADIUS + 1 = 6), so level 3 must be skipped gracefully
+    auto img0 = makeSyntheticImage(W, H, 50);
+    drawLargeCorner(img0, 20, 240);
+    tracker.trackExistingFeatures(img0.data(), Eigen::Matrix3f::Identity());
+    Eigen::Vector2i kp(20, 240);
+    ASSERT_TRUE(callAddKp(tracker, img0.data(), kp));
+
+    auto img1 = makeSyntheticImage(W, H, 50);
+    drawLargeCorner(img1, 23, 240);
+    tracker.trackExistingFeatures(img1.data(), Eigen::Matrix3f::Identity());
+
+    const auto& features = getActiveFeatures(tracker);
+    ASSERT_EQ(features.size(), 1u);
+    EXPECT_NEAR(features[0].ptCurr.x(), 23.0f, 0.5f);
+    EXPECT_NEAR(features[0].ptCurr.y(), 240.0f, 0.5f);
+}
+
+// markKeyframe refreshes level-0 patch and ptKfUndis from the cached current image
+TEST_F(TestTrackHfFeatures, MarkKeyframeRefreshesTemplateAndAnchor) {
+    auto tracker = createTracker();
+    auto img0 = makeSyntheticImage(W, H, 50);
+    drawCorner(img0, W, 200, 200, 50, 200);
+    tracker.trackExistingFeatures(img0.data(), Eigen::Matrix3f::Identity());
+    Eigen::Vector2i kp(200, 200);
+    ASSERT_TRUE(callAddKp(tracker, img0.data(), kp));
+
+    // Subtle brightness shift in frame 1 within MAD threshold
+    auto img1 = makeSyntheticImage(W, H, 53);
+    drawCorner(img1, W, 201, 200, 53, 203);
+    tracker.trackExistingFeatures(img1.data(), Eigen::Matrix3f::Identity());
+    ASSERT_EQ(getActiveFeatures(tracker).size(), 1u);
+
+    const uint8_t patchBefore = getActiveFeatures(tracker)[0].patch[0];
+    tracker.markKeyframe();
+    const auto& feat = getActiveFeatures(tracker)[0];
+    EXPECT_NE(feat.patch[0], patchBefore);
+    EXPECT_EQ(feat.patch[0], 53);
+    EXPECT_FLOAT_EQ(feat.ptKfUndis.x(), feat.ptUndis.x());
+    EXPECT_FLOAT_EQ(feat.ptKfUndis.y(), feat.ptUndis.y());
 }
 
 } // namespace PoolSLAM
