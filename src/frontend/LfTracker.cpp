@@ -344,7 +344,7 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
     auto &curKf = keyframes[curId];
     auto &matchKf = keyframes[matchId];
 
-    if(matchKf.landmarks.empty() || matchKf.landmarks.size() < matchKf.features.size()){
+    if(curKf.features.empty() || matchKf.landmarks.empty() || matchKf.landmarks.size() < matchKf.features.size()){
         return 0;
     }
 
@@ -353,98 +353,72 @@ size_t LfTracker::matchFeatures(size_t curId, size_t matchId){
         matching.matchLandmarks.resize(3, static_cast<int>(curKf.features.size()));
     }
 
-    // Match features
-    Eigen::Index matchingIdx = 0;
-    for(size_t curFeatIdx = 0; curFeatIdx < curKf.features.size(); curFeatIdx++){
-        int bestDist = INT32_MAX; // Distance of the best match
-        int secondDist = INT32_MAX; // Distance of the second best match
-        size_t bestIdx = 0;
-        auto &curFeat = curKf.features[curFeatIdx];
-        if(curFeat.wordId >= vocabTree.vocabulary.size()){
-            continue;
-        }
-        auto curParent = vocabTree.vocabulary[curFeat.wordId].parent;
-        bool firstChild = false;
-        bool exactMatch = false;
-        // Iterate through features of matched frame until the best two features remain
-        for(size_t matchFeatIdx = 0; matchFeatIdx < matchKf.features.size(); matchFeatIdx++){
-            auto &matchFeat = matchKf.features[matchFeatIdx];
+    const size_t curSize = curKf.features.size();
+    const size_t matchSize = matchKf.features.size();
+
+    std::vector<int> bestDistForCur(curSize, INT32_MAX);
+    std::vector<int> secondDistForCur(curSize, INT32_MAX);
+    std::vector<size_t> bestMatchForCur(curSize, 0);
+    std::vector<uint8_t> isExactForCur(curSize, 0);
+
+    std::vector<int> bestDistForMatch(matchSize, INT32_MAX);
+    std::vector<size_t> bestCurForMatch(matchSize, 0);
+    std::vector<uint8_t> matchLockedByExact(matchSize, 0);
+
+    // Match across all valid landmarks so tree quantization boundaries never drop descriptors
+    for(size_t curFeatIdx = 0; curFeatIdx < curSize; curFeatIdx++){
+        const auto &curFeat = curKf.features[curFeatIdx];
+        for(size_t matchFeatIdx = 0; matchFeatIdx < matchSize; matchFeatIdx++){
+            const auto &matchFeat = matchKf.features[matchFeatIdx];
             if(matchKf.landmarks[matchFeatIdx].featureId != matchFeat.featureId ||
                matchKf.landmarks[matchFeatIdx].pt3d.z() <= 0.0){
                 continue;
             }
             if(matchFeat.featureId == curFeat.featureId){
-                exactMatch = true;
-                bestIdx = matchFeatIdx;
+                isExactForCur[curFeatIdx] = 1;
+                bestMatchForCur[curFeatIdx] = matchFeatIdx;
+                matchLockedByExact[matchFeatIdx] = 1;
                 break;
             }
-            if(matchFeat.wordId >= vocabTree.vocabulary.size()){
-                continue;
+            const int hamDist = descriptor::fastHamming(curFeat.des, matchFeat.des);
+            if(hamDist < bestDistForCur[curFeatIdx]){
+                secondDistForCur[curFeatIdx] = bestDistForCur[curFeatIdx];
+                bestDistForCur[curFeatIdx] = hamDist;
+                bestMatchForCur[curFeatIdx] = matchFeatIdx;
+            }else if(hamDist < secondDistForCur[curFeatIdx]){
+                secondDistForCur[curFeatIdx] = hamDist;
             }
-            auto matchParent = vocabTree.vocabulary[matchFeat.wordId].parent;
-            // Only look at features whose associated words share a parent
-            if(matchParent != curParent){
-                // Break if we passed the region where the parent's leaves reside
-                if(firstChild){
-                    break;
-                }else{
-                    continue;
-                }
-            }
-            firstChild = true;
-            auto hamDist = descriptor::fastHamming(curFeat.des, matchFeat.des);
-            if(hamDist < bestDist){
-                secondDist = bestDist;
-                bestDist = hamDist;
-                bestIdx = matchFeatIdx;
-            }else if(hamDist < secondDist){
-                secondDist = hamDist;
+
+            if(hamDist < bestDistForMatch[matchFeatIdx]){
+                bestDistForMatch[matchFeatIdx] = hamDist;
+                bestCurForMatch[matchFeatIdx] = curFeatIdx;
             }
         }
+    }
 
-        if(!exactMatch){
+    Eigen::Index matchingIdx = 0;
+    for(size_t curFeatIdx = 0; curFeatIdx < curSize; curFeatIdx++){
+        const size_t bestIdx = bestMatchForCur[curFeatIdx];
+        if(!isExactForCur[curFeatIdx]){
+            const int bestDist = bestDistForCur[curFeatIdx];
+            const int secondDist = secondDistForCur[curFeatIdx];
             if(bestDist == INT32_MAX || bestDist > MAX_HAMMING_DIST || secondDist == 0){
                 continue;
             }
-            // Reject features too similar to other features
-            if(static_cast<float>(bestDist) / static_cast<float>(secondDist) > MAX_FEATURE_DIST_RATIO){
+            if(secondDist < INT32_MAX &&
+               static_cast<float>(bestDist) / static_cast<float>(secondDist) > MAX_FEATURE_DIST_RATIO){
                 continue;
             }
-
-            auto &matchedFeat = matchKf.features[bestIdx];
-
-            // Check features in the current keyframe near the current feature to see if they are more similar to the matched feature
-            bool bidirectional = true;
-            size_t minIdx = (curFeatIdx > BIDIRECTIONAL_SEARCH_INTERVAL) ? (curFeatIdx - BIDIRECTIONAL_SEARCH_INTERVAL) : 0;
-            for(size_t i = minIdx; i < curFeatIdx; i++){
-                auto hamDist = descriptor::fastHamming(matchedFeat.des, curKf.features[i].des);
-                if(hamDist < bestDist){
-                    bidirectional = false;
-                    break;
-                }
-            }
-
-            if(bidirectional){
-                size_t maxIdx = std::min<size_t>(curKf.features.size(), curFeatIdx + BIDIRECTIONAL_SEARCH_INTERVAL + 1);
-                for(size_t i = curFeatIdx + 1; i < maxIdx; i++){
-                    auto hamDist = descriptor::fastHamming(matchedFeat.des, curKf.features[i].des);
-                    if(hamDist < bestDist){
-                        bidirectional = false;
-                        break;
-                    }
-                }
-            }
-
-            if(!bidirectional){
+            if(matchLockedByExact[bestIdx] || bestCurForMatch[bestIdx] != curFeatIdx){
                 continue;
             }
         }
 
-        if(matchingIdx < matching.curFeatures.cols() && static_cast<size_t>(bestIdx) < matchKf.landmarks.size()){
-            matching.curFeatures.col(matchingIdx) = curFeat.ptSubpix.homogeneous().cast<double>();
-            matching.matchLandmarks.col(matchingIdx) = matchKf.landmarks[static_cast<size_t>(bestIdx)].pt3d;
+        if(matchingIdx < matching.curFeatures.cols() && bestIdx < matchKf.landmarks.size()){
+            matching.curFeatures.col(matchingIdx) = curKf.features[curFeatIdx].ptSubpix.homogeneous().cast<double>();
+            matching.matchLandmarks.col(matchingIdx) = matchKf.landmarks[bestIdx].pt3d;
             matchingIdx++;
-        } 
+        }
     }
 
     return static_cast<size_t>(matchingIdx);
@@ -467,6 +441,10 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
     std::array<Eigen::Vector3d, 4> y; // homogenous points
     Eigen::Matrix<double, 3, 4> bestT = Eigen::Matrix<double, 3, 4>::Zero(); // Best transformation
     size_t bestInliers = 0; // Best number of inliers
+    const size_t earlyExitInliers = std::max<size_t>(
+        config.ransacInliearThreshold,
+        static_cast<size_t>(0.85f * static_cast<float>(numMatches))
+    );
     for(int iter = 0; iter < config.ransacIters; iter++){
         // Find 4 distinct random matches
         for(size_t k = 0; k < 4; k++){
@@ -522,6 +500,10 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
         if(inliers > bestInliers){
             bestInliers = inliers;
             bestT = *T;
+            if(bestInliers >= earlyExitInliers &&
+               (static_cast<float>(bestInliers) / static_cast<float>(numMatches)) >= config.minInliearRatio){
+                break;
+            }
         }
     }
 

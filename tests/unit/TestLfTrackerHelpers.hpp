@@ -45,10 +45,10 @@ protected:
                  0.0f, 0.0f, 1.0f;
         cfg.minTfIdfScore = 0.05f;
         cfg.excludedFrames = 20;
-        cfg.ransacInliearThreshold = 20;
-        cfg.ransacIters = 20;
+        cfg.ransacInliearThreshold = 12;
+        cfg.ransacIters = 150;
         cfg.minInliearRatio = 0.30f;
-        cfg.maxReprojectionError = 2.0f;
+        cfg.maxReprojectionError = 3.0f;
         return cfg;
     }
 
@@ -119,6 +119,15 @@ protected:
 
     static size_t callMatchFeatures(LfTracker& tracker, size_t curId, size_t matchId) {
         return tracker.matchFeatures(curId, matchId);
+    }
+
+    static std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> callRansac(LfTracker& tracker, size_t numMatches) {
+        return tracker.ransac(numMatches);
+    }
+
+    static bool callRefinePoseLM(LfTracker& tracker, size_t numInliers, const Eigen::Matrix3d& K_cam,
+                                   Eigen::Matrix<double, 3, 4>& Tcand, Eigen::Matrix<double, 6, 6>& outCovariance) {
+        return tracker.refinePoseLM(numInliers, K_cam, Tcand, outCovariance);
     }
 
     static LfMatching& getMatching(LfTracker& tracker) {

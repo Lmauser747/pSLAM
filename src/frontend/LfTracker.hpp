@@ -38,10 +38,10 @@ struct LfTrackerConfig{
     float minTfIdfScore = 0.05f; // Minimum score for TF-IDF
     size_t excludedFrames = 20; // Number of previous frames to exclude to ensure long-term matches
 
-    uint32_t ransacInliearThreshold = 20; // Minimum number of RANSAC inliers
-    int ransacIters = 20;
+    uint32_t ransacInliearThreshold = 12; // Minimum number of RANSAC inliers
+    int ransacIters = 150;
     float minInliearRatio = 0.30f; // Minimum ratio of inlier to total landmarks
-    float maxReprojectionError = 2.00f; // Maximum reprojection error from mathec frame to current frame
+    float maxReprojectionError = 3.00f; // Maximum reprojection error from mathec frame to current frame
     
 
 };
@@ -106,7 +106,6 @@ private:
     static constexpr float MIN_SCORE_RATIO = 0.3f; // Min ratio between score of matched keyframe and score of previous keyframe
     static constexpr float MAX_FEATURE_DIST_RATIO = 0.80f; // Max ratio between best feature match and second best match
     static constexpr int MAX_HAMMING_DIST = 64; // Maximum Hamming distance allowed for descriptor matching
-    static constexpr size_t BIDIRECTIONAL_SEARCH_INTERVAL = 10; // Interval to searh in for better matches between matched feature and features in current keyframe
 
     const LfTrackerConfig config; // Class configuration
 

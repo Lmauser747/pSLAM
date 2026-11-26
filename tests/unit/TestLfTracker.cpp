@@ -221,38 +221,94 @@ TEST_F(TestLfTracker, OrientationEstimationFromGradients) {
 // 5. Feature Matching Filters (matchFeatures)
 // =============================================================================
 
-TEST_F(TestLfTracker, MatchFeaturesParentBranchRestriction) {
+TEST_F(TestLfTracker, MatchFeaturesCrossCheckAndLandmarkFilters) {
     auto tracker = createTracker();
     auto& tree = getVocabTree(tracker);
     tree.vocabulary.resize(10000);
 
-    // Word 100 and Word 200 have different parents
+    // Different depth-3 parents must still match when descriptors agree
     tree.vocabulary[100].parent = 50;
     tree.vocabulary[200].parent = 60;
 
     auto& kfs = getKeyframes(tracker);
 
-    // Frame 0 (historical)
-    kfs.emplace_back(1, 0, 0.0, 0);
+    // Frame 0 (historical) with valid landmark 0 and behind-camera landmark 1
+    kfs.emplace_back(2, 0, 0.0, 0);
     kfs[0].features.emplace_back(Eigen::Vector2i(100, 100), 1);
     kfs[0].features[0].wordId = 100;
     kfs[0].features[0].des.bits = {0xAAAAAAAAAAAAAAAAULL, 0, 0, 0};
     kfs[0].landmarks.push_back({Eigen::Vector3d(1.0, 1.0, 5.0), 1});
 
-    // Frame 1 (current)
-    kfs.emplace_back(1, 1, 1.0, 1);
-    kfs[1].features.emplace_back(Eigen::Vector2i(100, 100), 2);
-    kfs[1].features[0].wordId = 200; // Different parent
-    kfs[1].features[0].des.bits = {0xAAAAAAAAAAAAAAAAULL, 0, 0, 0}; // Identical descriptor
+    kfs[0].features.emplace_back(Eigen::Vector2i(150, 150), 2);
+    kfs[0].features[1].wordId = 100;
+    kfs[0].features[1].des.bits = {0x5555555555555555ULL, 0, 0, 0};
+    kfs[0].landmarks.push_back({Eigen::Vector3d(0.5, 0.5, -1.0), 2}); // Invalid negative depth
 
-    // Because parents differ, matchFeatures must reject
-    size_t matches = callMatchFeatures(tracker, 1, 0);
-    EXPECT_EQ(matches, 0);
+    // Frame 1 (current) has two competing features for landmark 0; mutual cross-check picks exact match
+    kfs.emplace_back(3, 1, 1.0, 1);
+    kfs[1].features.emplace_back(Eigen::Vector2i(100, 100), 10);
+    kfs[1].features[0].wordId = 200; // Cross-parent
+    kfs[1].features[0].des.bits = {0xAAAAAAAAAAAAAAAAULL, 0, 0, 0};
 
-    // Now set matching parent
-    tree.vocabulary[200].parent = 50;
-    matches = callMatchFeatures(tracker, 1, 0);
-    EXPECT_EQ(matches, 1);
+    kfs[1].features.emplace_back(Eigen::Vector2i(120, 120), 11);
+    kfs[1].features[1].wordId = 200;
+    kfs[1].features[1].des.bits = {0xAAAAAAAAAAAAAAABULL, 0, 0, 0}; // Dist 1, loses mutual check
+
+    kfs[1].features.emplace_back(Eigen::Vector2i(150, 150), 12);
+    kfs[1].features[2].wordId = 100;
+    kfs[1].features[2].des.bits = {0x5555555555555555ULL, 0, 0, 0}; // Targets behind-camera landmark
+
+    const size_t matches = callMatchFeatures(tracker, 1, 0);
+    EXPECT_EQ(matches, 1u);
+}
+
+TEST_F(TestLfTracker, RansacAndRefinePoseRecoverTransformWithOutliers) {
+    auto tracker = createTracker();
+    auto& matching = getMatching(tracker);
+    const LfTrackerConfig cfg = makeConfig();
+
+    const gtsam::Rot3 gtRot = gtsam::Rot3::Ypr(0.15, -0.08, 0.05);
+    const gtsam::Point3 gtTrans(0.35, -0.20, 0.25);
+    const Eigen::Matrix3d R_gt = gtRot.matrix();
+    const Eigen::Vector3d t_gt = gtTrans;
+
+    constexpr size_t NUM_INLIERS = 20;
+    constexpr size_t NUM_OUTLIERS = 20;
+    constexpr size_t TOTAL = NUM_INLIERS + NUM_OUTLIERS;
+    matching.curFeatures.resize(3, static_cast<Eigen::Index>(TOTAL));
+    matching.matchLandmarks.resize(3, static_cast<Eigen::Index>(TOTAL));
+
+    // Interleave 20 true 3D-2D correspondences and 20 gross outliers
+    std::minstd_rand rng(42);
+    for (size_t i = 0; i < TOTAL; ++i) {
+        if (i < NUM_INLIERS) {
+            const double x = -1.2 + 0.13 * static_cast<double>(i % 10);
+            const double y = -0.8 + 0.6 * static_cast<double>(i / 10);
+            const double z = 3.0 + 0.2 * static_cast<double>(i % 5);
+            const Eigen::Vector3d P(x, y, z);
+            const Eigen::Vector3d PCam = R_gt * P + t_gt;
+            const double u = cfg.K(0, 0) * (PCam.x() / PCam.z()) + cfg.K(0, 2);
+            const double v = cfg.K(1, 1) * (PCam.y() / PCam.z()) + cfg.K(1, 2);
+            matching.matchLandmarks.col(static_cast<Eigen::Index>(i)) = P;
+            matching.curFeatures.col(static_cast<Eigen::Index>(i)) = Eigen::Vector3d(u, v, 1.0);
+        } else {
+            const double u = 50.0 + static_cast<double>(rng() % 540);
+            const double v = 50.0 + static_cast<double>(rng() % 380);
+            matching.matchLandmarks.col(static_cast<Eigen::Index>(i)) = Eigen::Vector3d(2.5, -1.5, 4.0);
+            matching.curFeatures.col(static_cast<Eigen::Index>(i)) = Eigen::Vector3d(u, v, 1.0);
+        }
+    }
+
+    auto ransacOut = callRansac(tracker, TOTAL);
+    ASSERT_TRUE(ransacOut.has_value());
+    EXPECT_GE(ransacOut->second, NUM_INLIERS);
+
+    Eigen::Matrix<double, 3, 4> T = ransacOut->first;
+    Eigen::Matrix<double, 6, 6> cov;
+    ASSERT_TRUE(callRefinePoseLM(tracker, ransacOut->second, cfg.K.cast<double>(), T, cov));
+    EXPECT_TRUE(cov.allFinite());
+    EXPECT_LT((T.leftCols<3>() - R_gt).norm(), 1e-3);
+    EXPECT_LT((T.rightCols<1>() - t_gt).norm(), 1e-3);
 }
 
 TEST_F(TestLfTracker, MatchFeaturesLowesRatioTest) {
