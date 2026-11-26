@@ -332,26 +332,59 @@ void Backend::processFrame(const BackendHfPacket &pkt){
 
     window.push_back(std::move(wf));
 
+    // Refresh active global odometry edges using refined window poses before marginalization
+    for(const auto &[kfA, kfB, factorIdx] : activeGlobalOdomEdges){
+        if(factorIdx < globalPoseGraph.size() &&
+           smootherEstimate.exists(X(kfA)) &&
+           smootherEstimate.exists(X(kfB))){
+            const auto refinedRel = smootherEstimate.at<gtsam::Pose3>(X(kfA)).between(
+                smootherEstimate.at<gtsam::Pose3>(X(kfB))
+            );
+            globalPoseGraph.replace(
+                factorIdx,
+                std::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(kfA), X(kfB), refinedRel, odomNoise)
+            );
+        }
+    }
+
     while(window.size() > config.slidingWindowSize){
         WindowFrame oldFrame = std::move(window.front());
         window.pop_front();
         marginalizeOldestFrame(oldFrame);
     }
 
+    while(!activeGlobalOdomEdges.empty()){
+        const uint32_t kfA = std::get<0>(activeGlobalOdomEdges.front());
+        if(smootherEstimate.exists(X(kfA))){
+            break;
+        }
+        activeGlobalOdomEdges.pop_front();
+    }
+
     bool loopClosed = false;
     // Deal with global graph if this is a keyframe
     if(pkt.isKeyframe){
-        auto relPose = lastCommittedKeyframeNavState.pose().between(prevNavState.pose());
+        const gtsam::Pose3 prevKfPose = smootherEstimate.exists(X(lastCommittedKeyframeId))
+            ? smootherEstimate.at<gtsam::Pose3>(X(lastCommittedKeyframeId))
+            : lastCommittedKeyframeNavState.pose();
+        const auto relPose = prevKfPose.between(prevNavState.pose());
+        const size_t odomFactorIdx = globalPoseGraph.size();
         globalPoseGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
             X(lastCommittedKeyframeId), X(pkt.frameId), relPose, odomNoise
         );
-        globalPoseValues.insert(X(pkt.frameId), prevNavState.pose());
+        activeGlobalOdomEdges.emplace_back(lastCommittedKeyframeId, pkt.frameId, odomFactorIdx);
+
+        const gtsam::Pose3 initGlobalPose = globalPoseValues.exists(X(lastCommittedKeyframeId))
+            ? (globalPoseValues.at<gtsam::Pose3>(X(lastCommittedKeyframeId)) * relPose)
+            : prevNavState.pose();
+        globalPoseValues.insert(X(pkt.frameId), initGlobalPose);
 
         // Drain lf queue
         BackendLfPacket lfPkt;
         while(lf.getMatch(lfPkt)){
-            processLfPacket(lfPkt);
-            loopClosed = true;
+            if(processLfPacket(lfPkt)){
+                loopClosed = true;
+            }
         }
 
         solveGlobal(pkt.frameId);

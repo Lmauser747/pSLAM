@@ -785,4 +785,112 @@ TEST_F(BackendTest, ZuptClampsStandstillDriftAndTransitionsCleanlyToMotion) {
     EXPECT_FALSE(win.front().zuptPoseFactorSlot.has_value());
 }
 
+TEST_F(BackendTest, ClosedLoopCorrectionReducesGlobalDrift) {
+    BackendConfig cfg = makeDefaultBackendConfig();
+    cfg.bodyToCameraFrame = Pose3::Identity();
+    TestHarness harness(cfg);
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.isKeyframe = true;
+    pkt0.depth = 5.0;
+    callInitializeSystem(harness.backend, pkt0);
+
+    // Integrate 15 keyframes that drift along +X via unmodeled constant velocity bias
+    for (uint32_t fid = 1; fid <= 15; ++fid) {
+        BackendHfPacket pkt;
+        pkt.frameId = fid;
+        pkt.timestamp = static_cast<double>(fid) * 0.25;
+        pkt.isKeyframe = true;
+        pkt.depth = 5.0;
+        pkt.imuDelta = makePim(Vector3(0.04, 0.0, 9.81), Vector3::Zero(), 0.25);
+        callProcessFrame(harness.backend, pkt);
+    }
+
+    const double preLoopX = getGlobalPoseValues(harness.backend).at<Pose3>(X(15)).x();
+    ASSERT_GT(preLoopX, 0.2);
+
+    // Inject loop closure anchoring frame 15 back near frame 0 with tight raw Fisher noise
+    BackendLfPacket lfPkt;
+    lfPkt.matchedFrameId = 0;
+    lfPkt.currentFrameId = 15;
+    lfPkt.relativePose = Pose3::Identity();
+    lfPkt.noiseModel = gtsam::noiseModel::Isotropic::Sigma(6, 0.002);
+
+    ASSERT_TRUE(callProcessLfPacket(harness.backend, lfPkt));
+    ASSERT_TRUE(callSolveGlobal(harness.backend, 15));
+
+    const double postLoopX = getGlobalPoseValues(harness.backend).at<Pose3>(X(15)).x();
+    // Global graph should pull drifted X(15) back toward X(0) while preserving non-zero odom balance
+    EXPECT_LT(postLoopX, preLoopX * 0.75);
+    EXPECT_GT(postLoopX, 0.0);
+}
+
+TEST_F(BackendTest, LoopClosureConsistencyGateRejectsGrossOutlier) {
+    BackendConfig cfg = makeDefaultBackendConfig();
+    cfg.bodyToCameraFrame = Pose3::Identity();
+    TestHarness harness(cfg);
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.isKeyframe = true;
+    pkt0.depth = 5.0;
+    callInitializeSystem(harness.backend, pkt0);
+
+    BackendHfPacket pkt1;
+    pkt1.frameId = 1;
+    pkt1.timestamp = 0.5;
+    pkt1.isKeyframe = true;
+    pkt1.depth = 5.0;
+    pkt1.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.5);
+    callProcessFrame(harness.backend, pkt1);
+
+    const size_t graphSizeBefore = getGlobalPoseGraph(harness.backend).size();
+
+    // Gross 10m outlier exceeds loopMaxTransResidual
+    BackendLfPacket badPkt;
+    badPkt.matchedFrameId = 0;
+    badPkt.currentFrameId = 1;
+    badPkt.relativePose = Pose3(Rot3::Identity(), Point3(10.0, 0.0, 0.0));
+    badPkt.noiseModel = gtsam::noiseModel::Isotropic::Sigma(6, 0.05);
+
+    EXPECT_FALSE(callProcessLfPacket(harness.backend, badPkt));
+    EXPECT_EQ(getGlobalPoseGraph(harness.backend).size(), graphSizeBefore);
+}
+
+TEST_F(BackendTest, InWindowGlobalOdomEdgesRefreshAfterRefinement) {
+    BackendConfig cfg = makeDefaultBackendConfig();
+    cfg.slidingWindowSize = 4;
+    TestHarness harness(cfg);
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.isKeyframe = true;
+    pkt0.depth = 5.0;
+    callInitializeSystem(harness.backend, pkt0);
+
+    // Feed keyframes across window eviction boundary and verify edge queue stays bounded
+    for (uint32_t fid = 1; fid <= 6; ++fid) {
+        BackendHfPacket pkt;
+        pkt.frameId = fid;
+        pkt.timestamp = static_cast<double>(fid) * 0.5;
+        pkt.isKeyframe = true;
+        pkt.depth = 5.0;
+        pkt.imuDelta = makePim(Vector3(0.1, 0.0, 9.81), Vector3::Zero(), 0.5);
+        callProcessFrame(harness.backend, pkt);
+    }
+
+    const auto& edges = getActiveGlobalOdomEdges(harness.backend);
+    EXPECT_FALSE(edges.empty());
+    EXPECT_LE(edges.size(), cfg.slidingWindowSize);
+    for (const auto& [kfA, kfB, idx] : edges) {
+        EXPECT_TRUE(getSmootherEstimate(harness.backend).exists(X(kfA)));
+        EXPECT_TRUE(getSmootherEstimate(harness.backend).exists(X(kfB)));
+        EXPECT_LT(idx, getGlobalPoseGraph(harness.backend).size());
+    }
+}
+
 } // namespace PoolSLAM

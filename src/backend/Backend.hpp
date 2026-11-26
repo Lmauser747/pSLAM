@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <tuple>
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -79,6 +80,16 @@ struct BackendConfig{
     double zuptPoseRotSigma = 0.01;
     double initMaxAccelBiasNorm = 1.0;
 
+    // Global pose graph odometry and loop closure weighting
+    double odomRotSigma = 0.005;
+    double odomTransSigma = 0.03;
+    double loopCovScale = 4.0;
+    double loopMinRotSigma = 0.02;
+    double loopMinTransSigma = 0.05;
+    double loopMaxTransResidual = 2.5;
+    double loopMaxRotResidual = 0.6;
+    double loopCauchyK = 3.0;
+
     size_t keyframeWindowSize = 20; // Number of keyframes to keep in trackedKeyframes
     size_t slidingWindowSize = 10; // Maximum number of frames in the iSAM2 sliding window
 };
@@ -138,6 +149,7 @@ class Backend{
     gtsam::NonlinearFactorGraph globalPoseGraph;
     gtsam::Values globalPoseValues;
     gtsam::SharedNoiseModel odomNoise;
+    std::deque<std::tuple<uint32_t, uint32_t, size_t>> activeGlobalOdomEdges;
 
     // Pre-allocated noise models for priors and depth factors
     gtsam::SharedNoiseModel initPoseNoise;
@@ -191,7 +203,7 @@ class Backend{
     void processFrame(const BackendHfPacket &pkt);
 
     // Process lf packets for loop closure
-    void processLfPacket(const BackendLfPacket &pkt);
+    bool processLfPacket(const BackendLfPacket &pkt);
 
     // Sync 3d landmarks to the LfTracker
     void syncLfTracker(bool forceAll);

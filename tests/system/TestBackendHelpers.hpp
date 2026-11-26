@@ -185,6 +185,11 @@ protected:
         return b.trackedKeyframes;
     }
 
+    static const std::deque<std::tuple<uint32_t, uint32_t, size_t>>&
+    getActiveGlobalOdomEdges(const Backend& b) {
+        return b.activeGlobalOdomEdges;
+    }
+
     // Direct invocation of Backend private methods
     static void callInitializeSystem(Backend& b, const BackendHfPacket& pkt) {
         b.initializeSystem(pkt);
@@ -194,8 +199,8 @@ protected:
         b.processFrame(pkt);
     }
 
-    static void callProcessLfPacket(Backend& b, const BackendLfPacket& pkt) {
-        b.processLfPacket(pkt);
+    static bool callProcessLfPacket(Backend& b, const BackendLfPacket& pkt) {
+        return b.processLfPacket(pkt);
     }
 
     static void callSyncLfTracker(Backend& b, bool forceAll) {

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -20,43 +21,63 @@ namespace PoolSLAM{
 
 using gtsam::symbol_shorthand::X;
 
-void Backend::processLfPacket(const BackendLfPacket &lfPkt){
+bool Backend::processLfPacket(const BackendLfPacket &lfPkt){
     // make sure all of the keys exist
     bool curKeyValid = globalPoseValues.exists(X(lfPkt.currentFrameId)); 
     bool matchKeyValid = globalPoseValues.exists(X(lfPkt.matchedFrameId));
 
-    if(curKeyValid && matchKeyValid){
-        // Convert camera loop delta into a body frame factor from match to current
-        auto betweenPose = config.bodyToCameraFrame * lfPkt.relativePose.inverse() * config.bodyToCameraFrame.inverse();
-        gtsam::SharedNoiseModel loopNoise;
-        if(lfPkt.noiseModel != nullptr){
-            loopNoise = lfPkt.noiseModel;
-            auto robust = std::dynamic_pointer_cast<gtsam::noiseModel::Robust>(lfPkt.noiseModel);
-            auto baseModel = robust ? robust->noise() : lfPkt.noiseModel;
-            auto gaussian = std::dynamic_pointer_cast<gtsam::noiseModel::Gaussian>(baseModel);
-            if(gaussian && gaussian->dim() == 6){
-                // Map covariance from camera frame into body frame
-                const gtsam::Matrix6 Ad = config.bodyToCameraFrame.AdjointMap();
-                gtsam::Matrix6 covBody = Ad * gaussian->covariance() * Ad.transpose();
-                covBody = 0.5 * (covBody + covBody.transpose());
-                auto bodyGaussian = gtsam::noiseModel::Gaussian::Covariance(covBody);
-                loopNoise = robust
-                    ? gtsam::noiseModel::Robust::Create(robust->robust(), bodyGaussian)
-                    : gtsam::SharedNoiseModel(bodyGaussian);
-            }
-        }else{
-            // Fallback if noiseModel is null for some reason
-            gtsam::Vector6 sigmas;
-            sigmas << 0.1, 0.1, 0.1, 0.1, 0.1, 0.1;
-            auto baseGaussian = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
-            loopNoise = gtsam::noiseModel::Robust::Create(
-                gtsam::noiseModel::mEstimator::Huber::Create(1.345), baseGaussian
-            );
-        }
-        globalPoseGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lfPkt.matchedFrameId), X(lfPkt.currentFrameId), betweenPose, loopNoise);
-    }else{
-        return;
+    if(!curKeyValid || !matchKeyValid){
+        return false;
     }
+
+    // Convert camera loop delta into a body frame factor from match to current
+    auto betweenPose = config.bodyToCameraFrame * lfPkt.relativePose.inverse() * config.bodyToCameraFrame.inverse();
+
+    const gtsam::Pose3 poseMatch = globalPoseValues.at<gtsam::Pose3>(X(lfPkt.matchedFrameId));
+    const gtsam::Pose3 poseCur = globalPoseValues.at<gtsam::Pose3>(X(lfPkt.currentFrameId));
+    const gtsam::Pose3 residual = poseMatch.between(poseCur).between(betweenPose);
+    const double transErr = residual.translation().norm();
+    const double rotErr = gtsam::Rot3::Logmap(residual.rotation()).norm();
+    if(transErr > config.loopMaxTransResidual || rotErr > config.loopMaxRotResidual){
+        return false;
+    }
+
+    const double minRotVar = config.loopMinRotSigma * config.loopMinRotSigma;
+    const double minTransVar = config.loopMinTransSigma * config.loopMinTransSigma;
+    auto cauchyKernel = gtsam::noiseModel::mEstimator::Cauchy::Create(config.loopCauchyK);
+
+    gtsam::SharedNoiseModel loopNoise;
+    if(lfPkt.noiseModel != nullptr){
+        loopNoise = lfPkt.noiseModel;
+        auto robust = std::dynamic_pointer_cast<gtsam::noiseModel::Robust>(lfPkt.noiseModel);
+        auto baseModel = robust ? robust->noise() : lfPkt.noiseModel;
+        auto gaussian = std::dynamic_pointer_cast<gtsam::noiseModel::Gaussian>(baseModel);
+        if(gaussian && gaussian->dim() == 6){
+            // Map covariance from camera frame into body frame and inflate for landmark depth error
+            const gtsam::Matrix6 Ad = config.bodyToCameraFrame.AdjointMap();
+            gtsam::Matrix6 covBody = (Ad * gaussian->covariance() * Ad.transpose()) * config.loopCovScale;
+            covBody = 0.5 * (covBody + covBody.transpose());
+            for(int i = 0; i < 3; i++){
+                covBody(i, i) = std::max(covBody(i, i), minRotVar);
+                covBody(i + 3, i + 3) = std::max(covBody(i + 3, i + 3), minTransVar);
+            }
+            auto bodyGaussian = gtsam::noiseModel::Gaussian::Covariance(covBody);
+            loopNoise = gtsam::noiseModel::Robust::Create(cauchyKernel, bodyGaussian);
+        }
+    }else{
+        // Fallback if noiseModel is null for some reason
+        gtsam::Vector6 sigmas;
+        sigmas << std::max(0.1, config.loopMinRotSigma),
+                  std::max(0.1, config.loopMinRotSigma),
+                  std::max(0.1, config.loopMinRotSigma),
+                  std::max(0.1, config.loopMinTransSigma),
+                  std::max(0.1, config.loopMinTransSigma),
+                  std::max(0.1, config.loopMinTransSigma);
+        auto baseGaussian = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
+        loopNoise = gtsam::noiseModel::Robust::Create(cauchyKernel, baseGaussian);
+    }
+    globalPoseGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lfPkt.matchedFrameId), X(lfPkt.currentFrameId), betweenPose, loopNoise);
+    return true;
 }
 
 bool Backend::solveGlobal(uint32_t currentFrameId){

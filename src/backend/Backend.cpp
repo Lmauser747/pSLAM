@@ -67,7 +67,8 @@ Backend::Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &
 
     // Odometry noise model for global pose graph
     gtsam::Vector6 odomSigmas;
-    odomSigmas << 0.05, 0.05, 0.05, 0.01, 0.01, 0.01;
+    odomSigmas << config.odomRotSigma, config.odomRotSigma, config.odomRotSigma,
+                  config.odomTransSigma, config.odomTransSigma, config.odomTransSigma;
     odomNoise = gtsam::noiseModel::Diagonal::Sigmas(odomSigmas);
 
     auto baseDepthNoise = gtsam::noiseModel::Isotropic::Sigma(1, config.depthSigma);
