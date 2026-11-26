@@ -74,26 +74,32 @@ void HfTracker::downsampleLevel(const uint8_t *src, size_t srcW, size_t srcH, ui
     const int maxX = static_cast<int>(srcW) - 1;
     const int maxY = static_cast<int>(srcH) - 1;
 
+    // Deal with x = 0 and x = dstW - 1
+    for(size_t y = 0; y < srcH; y++){
+        const uint8_t *rowPtr = src + y * srcW;
+        uint16_t *scratchRow = pyrBlurScratch.data() + y * dstW;
+        for(size_t x = 0; x < dstW; x += dstW - 1){
+            const int cx = static_cast<int>(x * 2);
+            const int xm2 = std::clamp(cx - 2, 0, maxX);
+            const int xm1 = std::clamp(cx - 1, 0, maxX);
+            const int x0 = std::clamp(cx, 0, maxX);
+            const int xp1 = std::clamp(cx + 1, 0, maxX);
+            const int xp2 = std::clamp(cx + 2, 0, maxX);
+            scratchRow[x] = static_cast<uint16_t>(
+                rowPtr[xm2] + 4 * rowPtr[xm1] + 6 * rowPtr[x0] + 4 * rowPtr[xp1] + rowPtr[xp2]
+            );
+        }
+    }
+
     // Blur only even columns needed for 2x horizontal decimation
     for(size_t y = 0; y < srcH; y++){
         const uint8_t *rowPtr = src + y * srcW;
         uint16_t *scratchRow = pyrBlurScratch.data() + y * dstW;
-        for(size_t x = 0; x < dstW; x++){
+        for(size_t x = 1; x < dstW - 1; x++){
             const int cx = static_cast<int>(x * 2);
-            if(cx >= 2 && cx + 2 <= maxX){
-                scratchRow[x] = static_cast<uint16_t>(
-                    rowPtr[cx - 2] + 4 * rowPtr[cx - 1] + 6 * rowPtr[cx] + 4 * rowPtr[cx + 1] + rowPtr[cx + 2]
-                );
-            }else{
-                const int xm2 = std::clamp(cx - 2, 0, maxX);
-                const int xm1 = std::clamp(cx - 1, 0, maxX);
-                const int x0 = std::clamp(cx, 0, maxX);
-                const int xp1 = std::clamp(cx + 1, 0, maxX);
-                const int xp2 = std::clamp(cx + 2, 0, maxX);
-                scratchRow[x] = static_cast<uint16_t>(
-                    rowPtr[xm2] + 4 * rowPtr[xm1] + 6 * rowPtr[x0] + 4 * rowPtr[xp1] + rowPtr[xp2]
-                );
-            }
+            scratchRow[x] = static_cast<uint16_t>(
+                rowPtr[cx - 2] + 4 * rowPtr[cx - 1] + 6 * rowPtr[cx] + 4 * rowPtr[cx + 1] + rowPtr[cx + 2]
+            );
         }
     }
 
