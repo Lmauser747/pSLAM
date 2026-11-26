@@ -538,7 +538,7 @@ void HfTracker::enforceBucketDensity(){
     std::fill(gridOccupancy.begin(), gridOccupancy.end(), GridBucket{0, UINT32_MAX, UINT32_MAX});
     keep.assign(activeFeatures.size(), true);
     for(uint32_t i = 0; i < activeFeatures.size(); i++){
-        auto feature = activeFeatures[i];
+        const auto &feature = activeFeatures[i];
         auto &bucket = gridOccupancy[getBucketIdx(feature.ptCurr.x(), feature.ptCurr.y())];
         
         if(bucket.count == 0){
