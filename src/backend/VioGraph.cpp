@@ -378,6 +378,7 @@ void Backend::processFrame(const BackendHfPacket &pkt){
             ? (globalPoseValues.at<gtsam::Pose3>(X(lastCommittedKeyframeId)) * relPose)
             : prevNavState.pose();
         globalPoseValues.insert(X(pkt.frameId), initGlobalPose);
+        if(pkt.depth.has_value()) globalPoseGraph.emplace_shared<DepthFactor>(X(pkt.frameId), *pkt.depth, depthNoise, config.bodyToDepthSensor);
 
         // Drain lf queue
         BackendLfPacket lfPkt;

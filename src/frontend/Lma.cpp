@@ -46,7 +46,7 @@ bool LfTracker::refinePoseLM(size_t numInliers, const Eigen::Matrix3d& K_cam, Ei
         return false;
     }
 
-    constexpr int MAX_ITER = 8;
+    constexpr int MAX_ITER = 15;
     constexpr double HUBER_THRESHOLD = 2.0;
     const double fx = K_cam(0, 0);
     const double fy = K_cam(1, 1);

@@ -54,15 +54,15 @@ struct BackendConfig{
     std::optional<gtsam::Pose3> initialPose = std::nullopt; // Optional user/dataset initial pose anchor
 
     // iSAM2 incremental solver parameters
-    double relinearizeThreshold = 0.1;
-    int relinearizeSkip = 1;
+    double relinearizeThreshold = 0.03;
+    int relinearizeSkip = 10;
 
     // Initial state prior standard deviations (Frame 0 bootstrapping)
     Eigen::Matrix<double, 6, 1> initPoseSigma =
         (Eigen::Matrix<double, 6, 1>() << 1e-2, 1e-2, 1e-2, 1e-3, 1e-3, 1e-3).finished(); // [rot (rad), pos (m)]
     double initVelSigma = 1e-3;
     double initAccelBiasSigma = 0.1;
-    double initGyroBiasSigma = 0.05;
+    double initGyroBiasSigma = 0.02;
 
     // Continuous-time IMU bias random-walk noise densities
     double accelBiasRwSigma = 3e-3;
@@ -82,16 +82,16 @@ struct BackendConfig{
 
     // Global pose graph odometry and loop closure weighting
     double odomRotSigma = 0.005;
-    double odomTransSigma = 0.03;
-    double loopCovScale = 4.0;
+    double odomTransSigma = 0.05;
+    double loopCovScale = 1.2;
     double loopMinRotSigma = 0.02;
-    double loopMinTransSigma = 0.05;
+    double loopMinTransSigma = 0.04;
     double loopMaxTransResidual = 2.5;
     double loopMaxRotResidual = 0.6;
-    double loopCauchyK = 3.0;
+    double loopCauchyK = 2.0;
 
     size_t keyframeWindowSize = 20; // Number of keyframes to keep in trackedKeyframes
-    size_t slidingWindowSize = 10; // Maximum number of frames in the iSAM2 sliding window
+    size_t slidingWindowSize = 20; // Maximum number of frames in the iSAM2 sliding window
 };
 
 class DepthFactor : public gtsam::NoiseModelFactorN<gtsam::Pose3>{

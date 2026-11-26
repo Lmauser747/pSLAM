@@ -26,7 +26,7 @@ namespace PoolSLAM{
 
 struct LfTrackerConfig{
     size_t w, h; // Width and height of image
-    size_t numBuckets = 300; // Number of buckets for features to go in
+    size_t numBuckets = 400; // Number of buckets for features to go in
 
     Eigen::Matrix3f K; // Camera matrix
     Distortion dist; // Distortion parameters
@@ -35,13 +35,13 @@ struct LfTrackerConfig{
     // size_t targetFeatureCount; // Target number of QOV features per-frame
     // float fastThreshold = 20.0f; // Threshold for FAST in QOV
 
-    float minTfIdfScore = 0.05f; // Minimum score for TF-IDF
+    float minTfIdfScore = 0.03f; // Minimum score for TF-IDF
     size_t excludedFrames = 20; // Number of previous frames to exclude to ensure long-term matches
 
     uint32_t ransacInliearThreshold = 12; // Minimum number of RANSAC inliers
-    int ransacIters = 150;
+    int ransacIters = 400;
     float minInliearRatio = 0.30f; // Minimum ratio of inlier to total landmarks
-    float maxReprojectionError = 3.00f; // Maximum reprojection error from mathec frame to current frame
+    float maxReprojectionError = 2.50f; // Maximum reprojection error from mathec frame to current frame
     
 
 };
@@ -103,7 +103,7 @@ private:
     static constexpr int FEATURE_RADIUS = 5; // Radius of the feature patch from HfTracker
     static constexpr int QOV_RADIUS = 15; // Radius of the patched used by QOV
     static constexpr int UNDISTORT_ITERS = 10; // Number of iterations in undistortion
-    static constexpr float MIN_SCORE_RATIO = 0.3f; // Min ratio between score of matched keyframe and score of previous keyframe
+    static constexpr float MIN_SCORE_RATIO = 0.25f; // Min ratio between score of matched keyframe and score of previous keyframe
     static constexpr float MAX_FEATURE_DIST_RATIO = 0.80f; // Max ratio between best feature match and second best match
     static constexpr int MAX_HAMMING_DIST = 64; // Maximum Hamming distance allowed for descriptor matching
 
