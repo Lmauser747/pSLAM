@@ -243,6 +243,9 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
     }
     trackedKeyframes.push_back(kf);
     
+    hasClosedLoop = false;
+    vioToGlobalDrift = gtsam::Pose3::Identity();
+
     isInitialized = true;
 
     lastCommittedFrameId = pkt.frameId;
@@ -255,11 +258,14 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
 }
 
 void Backend::publishPose(const gtsam::Pose3 &pose, const gtsam::Vector3 &velocity, double timestamp){
+    const gtsam::Pose3 correctedPose = vioToGlobalDrift * pose;
+    const gtsam::Vector3 correctedVelocity = vioToGlobalDrift.rotation().rotate(velocity);
+
     uint8_t inactivePose = activePose.load(std::memory_order_relaxed) == 0 ? 1 : 0;
     poseBuffer[inactivePose].timestamp = timestamp;
-    poseBuffer[inactivePose].t = pose.translation();
-    poseBuffer[inactivePose].r = pose.rotation().toQuaternion();
-    poseBuffer[inactivePose].v = velocity;
+    poseBuffer[inactivePose].t = correctedPose.translation();
+    poseBuffer[inactivePose].r = correctedPose.rotation().toQuaternion();
+    poseBuffer[inactivePose].v = correctedVelocity;
 
     activePose.store(inactivePose, std::memory_order_release);
 }

@@ -77,6 +77,7 @@ bool Backend::processLfPacket(const BackendLfPacket &lfPkt){
         loopNoise = gtsam::noiseModel::Robust::Create(cauchyKernel, baseGaussian);
     }
     globalPoseGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(lfPkt.matchedFrameId), X(lfPkt.currentFrameId), betweenPose, loopNoise);
+    hasClosedLoop = true;
     return true;
 }
 
@@ -100,6 +101,14 @@ bool Backend::solveGlobal(uint32_t currentFrameId){
     }
 
     globalPoseValues = newValues;
+
+    if(hasClosedLoop &&
+       globalPoseValues.exists(X(currentFrameId)) &&
+       smootherEstimate.exists(X(currentFrameId))){
+        const gtsam::Pose3 globalPose = globalPoseValues.at<gtsam::Pose3>(X(currentFrameId));
+        const gtsam::Pose3 vioPose = smootherEstimate.at<gtsam::Pose3>(X(currentFrameId));
+        vioToGlobalDrift = globalPose * vioPose.inverse();
+    }
 
     return true;
 }

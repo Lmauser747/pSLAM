@@ -150,6 +150,8 @@ class Backend{
     gtsam::Values globalPoseValues;
     gtsam::SharedNoiseModel odomNoise;
     std::deque<std::tuple<uint32_t, uint32_t, size_t>> activeGlobalOdomEdges;
+    bool hasClosedLoop = false;
+    gtsam::Pose3 vioToGlobalDrift = gtsam::Pose3::Identity();
 
     // Pre-allocated noise models for priors and depth factors
     gtsam::SharedNoiseModel initPoseNoise;

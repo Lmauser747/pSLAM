@@ -190,6 +190,14 @@ protected:
         return b.activeGlobalOdomEdges;
     }
 
+    static bool getHasClosedLoop(const Backend& b) {
+        return b.hasClosedLoop;
+    }
+
+    static const gtsam::Pose3& getVioToGlobalDrift(const Backend& b) {
+        return b.vioToGlobalDrift;
+    }
+
     // Direct invocation of Backend private methods
     static void callInitializeSystem(Backend& b, const BackendHfPacket& pkt) {
         b.initializeSystem(pkt);

@@ -893,4 +893,93 @@ TEST_F(BackendTest, InWindowGlobalOdomEdgesRefreshAfterRefinement) {
     }
 }
 
+TEST_F(BackendTest, OpenLoopBeforeLoopClosurePreservesVioPose) {
+    BackendConfig cfg = makeDefaultBackendConfig();
+    TestHarness harness(cfg);
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.isKeyframe = true;
+    pkt0.depth = 5.0;
+    callInitializeSystem(harness.backend, pkt0);
+
+    for (uint32_t fid = 1; fid <= 5; ++fid) {
+        BackendHfPacket pkt;
+        pkt.frameId = fid;
+        pkt.timestamp = static_cast<double>(fid) * 0.25;
+        pkt.isKeyframe = true;
+        pkt.depth = 5.0;
+        pkt.imuDelta = makePim(Vector3(0.05, 0.0, 9.81), Vector3::Zero(), 0.25);
+        callProcessFrame(harness.backend, pkt);
+    }
+
+    EXPECT_FALSE(getHasClosedLoop(harness.backend));
+    EXPECT_TRUE(getVioToGlobalDrift(harness.backend).equals(Pose3::Identity(), 1e-12));
+
+    const Pose published = harness.backend.getCurrentPose();
+    const Pose3 vioPose = getSmootherEstimate(harness.backend).at<Pose3>(X(5));
+    const Vector3 vioVel = getSmootherEstimate(harness.backend).at<Vector3>(V(5));
+    EXPECT_NEAR((published.t - vioPose.translation()).norm(), 0.0, 1e-9);
+    EXPECT_NEAR((published.v - vioVel).norm(), 0.0, 1e-9);
+}
+
+TEST_F(BackendTest, ClosedLoopFeedbackUpdatesPublishedPoseAndVelocity) {
+    BackendConfig cfg = makeDefaultBackendConfig();
+    cfg.bodyToCameraFrame = Pose3::Identity();
+    TestHarness harness(cfg);
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.isKeyframe = true;
+    pkt0.depth = 5.0;
+    callInitializeSystem(harness.backend, pkt0);
+
+    for (uint32_t fid = 1; fid <= 15; ++fid) {
+        BackendHfPacket pkt;
+        pkt.frameId = fid;
+        pkt.timestamp = static_cast<double>(fid) * 0.25;
+        pkt.isKeyframe = true;
+        pkt.depth = 5.0;
+        pkt.imuDelta = makePim(Vector3(0.04, 0.0, 9.81), Vector3::Zero(), 0.25);
+        callProcessFrame(harness.backend, pkt);
+    }
+
+    // Inject loop closure with both translation and yaw correction
+    BackendLfPacket lfPkt;
+    lfPkt.matchedFrameId = 0;
+    lfPkt.currentFrameId = 15;
+    lfPkt.relativePose = Pose3(Rot3::Yaw(-0.2), Point3::Zero());
+    lfPkt.noiseModel = gtsam::noiseModel::Isotropic::Sigma(6, 0.002);
+
+    ASSERT_TRUE(callProcessLfPacket(harness.backend, lfPkt));
+    ASSERT_TRUE(callSolveGlobal(harness.backend, 15));
+    EXPECT_TRUE(getHasClosedLoop(harness.backend));
+
+    const Pose3 global15 = getGlobalPoseValues(harness.backend).at<Pose3>(X(15));
+    const Pose3 vio15 = getSmootherEstimate(harness.backend).at<Pose3>(X(15));
+    const Pose3 expectedDrift = global15 * vio15.inverse();
+    EXPECT_TRUE(getVioToGlobalDrift(harness.backend).equals(expectedDrift, 1e-9));
+
+    // Propagate a subsequent non-keyframe and verify published pose and velocity use drift transform
+    BackendHfPacket pkt16;
+    pkt16.frameId = 16;
+    pkt16.timestamp = 4.25;
+    pkt16.isKeyframe = false;
+    pkt16.depth = 5.0;
+    pkt16.imuDelta = makePim(Vector3(0.04, 0.0, 9.81), Vector3::Zero(), 0.25);
+    callProcessFrame(harness.backend, pkt16);
+
+    const Pose published = harness.backend.getCurrentPose();
+    const Pose3 vio16 = getSmootherEstimate(harness.backend).at<Pose3>(X(16));
+    const Vector3 vioVel16 = getSmootherEstimate(harness.backend).at<Vector3>(V(16));
+    const Pose3 expectedPose = expectedDrift * vio16;
+    const Vector3 expectedVel = expectedDrift.rotation().rotate(vioVel16);
+
+    EXPECT_NEAR((published.t - expectedPose.translation()).norm(), 0.0, 1e-9);
+    EXPECT_TRUE(Rot3(published.r).equals(expectedPose.rotation(), 1e-9));
+    EXPECT_NEAR((published.v - expectedVel).norm(), 0.0, 1e-9);
+}
+
 } // namespace PoolSLAM
