@@ -85,6 +85,12 @@ Backend::Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &
     prevBias = gtsam::imuBias::ConstantBias();
 
     visualNoise = gtsam::noiseModel::Isotropic::Sigma(2, 1.0 / config.K(0, 0));
+    zuptVelNoise = gtsam::noiseModel::Isotropic::Sigma(3, config.zuptVelSigma);
+
+    gtsam::Vector6 zuptPoseSigmas;
+    zuptPoseSigmas << config.zuptPoseRotSigma, config.zuptPoseRotSigma, config.zuptPoseRotSigma,
+                      config.zuptPoseTransSigma, config.zuptPoseTransSigma, config.zuptPoseTransSigma;
+    zuptPoseNoise = gtsam::noiseModel::Diagonal::Sigmas(zuptPoseSigmas);
 }
 
 Backend::~Backend(){
@@ -181,11 +187,19 @@ void Backend::initializeSystem(const BackendHfPacket &pkt){
     publishPose(prevNavState.pose(), prevNavState.velocity(), pkt.timestamp);
 
     // Intialize biases
-    if(pkt.initialGyro.has_value()){
-        prevBias = gtsam::imuBias::ConstantBias(gtsam::Vector3(0, 0, 0), *pkt.initialGyro);
-    }else{
-        prevBias = gtsam::imuBias::ConstantBias();
+    gtsam::Vector3 initGyroBias = pkt.initialGyro.value_or(gtsam::Vector3::Zero());
+    gtsam::Vector3 initAccelBias = gtsam::Vector3::Zero();
+    if(config.initialPose.has_value() && pkt.initialAccel.has_value()){
+        // Recover static accel bias from known attitude when startup motion is negligible
+        const gtsam::Vector3 expectedSpecificForce =
+            prevNavState.pose().rotation().unrotate(gtsam::Vector3(0.0, 0.0, config.gravity));
+        const gtsam::Vector3 candidateBias = *pkt.initialAccel - expectedSpecificForce;
+        if(std::abs(pkt.initialAccel->norm() - config.gravity) < config.initMaxAccelBiasNorm &&
+           candidateBias.norm() < config.initMaxAccelBiasNorm){
+            initAccelBias = candidateBias;
+        }
     }
+    prevBias = gtsam::imuBias::ConstantBias(initAccelBias, initGyroBias);
 
     // Emplace initial factors for smoother
     stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(pkt.frameId), prevNavState.pose(), priorPoseNoise);

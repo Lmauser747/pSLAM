@@ -334,4 +334,42 @@ TEST_F(TestFrontend, VisualFeatureObservationsPopulated) {
     sync.stop();
 }
 
+TEST_F(TestFrontend, StationaryDetectionFlagsStaticFramesAndClearsOnMotion) {
+    ImuStream imuStream;
+    DepthStream depthStream;
+    ImageStream imageStream(W, H);
+    Synchronizer sync(imuStream, depthStream, imageStream);
+
+    Frontend fe(makeConfig(), sync, "");
+    pushInertialAndDepthWindow(imuStream, depthStream, 1.000, 1.150, 5.0, Eigen::Vector3d(0.0, 0.0, 9.81), Eigen::Vector3d::Zero());
+
+    sync.start();
+    fe.start();
+
+    auto imgStatic = makeTexturedImage(0, 0);
+    // Frames 0, 1, 2 observe identical static scene and zero-motion IMU
+    for (size_t i = 0; i < 3; ++i) {
+        const double t = 1.020 + static_cast<double>(i) * 0.050;
+        ASSERT_TRUE(imageStream.pushFrame(imgStatic.data(), t));
+        auto pkt = popHfPacketWithTimeout(fe, std::chrono::milliseconds(500));
+        ASSERT_NE(pkt, nullptr);
+        if (i == 0) {
+            EXPECT_FALSE(pkt->isStationary);
+        } else {
+            EXPECT_TRUE(pkt->isStationary);
+        }
+    }
+
+    // Push dynamic IMU and shifted frame 3 to verify stationary flag clears
+    pushInertialAndDepthWindow(imuStream, depthStream, 1.155, 1.260, 5.0, Eigen::Vector3d(0.8, 0.0, 9.81), Eigen::Vector3d(0.25, 0.0, 0.0));
+    auto imgMoved = makeTexturedImage(6, 0);
+    ASSERT_TRUE(imageStream.pushFrame(imgMoved.data(), 1.170));
+    auto pktMoved = popHfPacketWithTimeout(fe, std::chrono::milliseconds(500));
+    ASSERT_NE(pktMoved, nullptr);
+    EXPECT_FALSE(pktMoved->isStationary);
+
+    fe.end();
+    sync.stop();
+}
+
 } // namespace PoolSLAM

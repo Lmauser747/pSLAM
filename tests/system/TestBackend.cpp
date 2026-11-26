@@ -661,4 +661,128 @@ TEST_F(BackendTest, MarginOldPreservesSuccessorFactorsAcrossBatchRelinearization
     EXPECT_TRUE(smoother.valueExists(X(win.back().frameId)));
 }
 
+TEST_F(BackendTest, BootstrappingStaticAccelBiasWithKnownPose) {
+    BackendConfig cfg = makeDefaultBackendConfig();
+    // 90 deg rotation around Y maps world +Z onto body -X
+    cfg.initialPose = Pose3(Rot3::Ry(M_PI / 2.0), Point3(1.0, -2.0, 3.0));
+    TestHarness harness(cfg);
+
+    const Vector3 trueAccelBias(-0.025, 0.12, 0.075);
+    const Vector3 expectedGravityInBody(-cfg.gravity, 0.0, 0.0);
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.isKeyframe = true;
+    pkt0.depth = 3.0;
+    pkt0.initialAccel = expectedGravityInBody + trueAccelBias;
+    pkt0.initialGyro = Vector3(0.01, -0.02, 0.03);
+
+    callInitializeSystem(harness.backend, pkt0);
+    ASSERT_TRUE(isInitialized(harness.backend));
+
+    const auto bias0 = getSmootherEstimate(harness.backend).at<gtsam::imuBias::ConstantBias>(B(0));
+    EXPECT_NEAR(bias0.accelerometer().x(), trueAccelBias.x(), 1e-6);
+    EXPECT_NEAR(bias0.accelerometer().y(), trueAccelBias.y(), 1e-6);
+    EXPECT_NEAR(bias0.accelerometer().z(), trueAccelBias.z(), 1e-6);
+
+    const auto feBias = TestFrontend::getImuBias(harness.frontend);
+    EXPECT_NEAR(feBias.accelerometer().x(), trueAccelBias.x(), 1e-6);
+    EXPECT_NEAR(feBias.accelerometer().y(), trueAccelBias.y(), 1e-6);
+    EXPECT_NEAR(feBias.accelerometer().z(), trueAccelBias.z(), 1e-6);
+}
+
+TEST_F(BackendTest, BootstrappingStaticAccelBiasRejectsDynamicAccel) {
+    BackendConfig cfg = makeDefaultBackendConfig();
+    cfg.initialPose = Pose3(Rot3::Identity(), Point3::Zero());
+    TestHarness harness(cfg);
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.depth = 3.0;
+    pkt0.initialAccel = Vector3(0.0, 0.0, 15.0);
+
+    callInitializeSystem(harness.backend, pkt0);
+    ASSERT_TRUE(isInitialized(harness.backend));
+
+    const auto bias0 = getSmootherEstimate(harness.backend).at<gtsam::imuBias::ConstantBias>(B(0));
+    EXPECT_NEAR(bias0.accelerometer().norm(), 0.0, 1e-6);
+}
+
+TEST_F(BackendTest, ZuptClampsStandstillDriftAndTransitionsCleanlyToMotion) {
+    BackendConfig cfg = makeDefaultBackendConfig();
+    cfg.slidingWindowSize = 5;
+    cfg.initialPose = Pose3(Rot3::Identity(), Point3(0.0, 0.0, 5.0));
+    TestHarness harness(cfg);
+
+    auto makeImuBatch = [](double tStart, double tEnd, const Vector3& accel) {
+        std::vector<Imu> samples;
+        for (double t = tStart + 0.005; t <= tEnd + 1e-9; t += 0.005) {
+            Imu s;
+            s.timestamp = t;
+            s.a = accel;
+            s.w = Vector3::Zero();
+            s.t = 20.0f;
+            samples.push_back(s);
+        }
+        return samples;
+    };
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.isKeyframe = true;
+    pkt0.depth = 5.0;
+    callInitializeSystem(harness.backend, pkt0);
+
+    // Feed stationary keyframes and non-keyframes carrying an uncompensated +0.2 m/s^2 accel bias
+    const Vector3 biasedAccel(0.2, -0.15, 9.81);
+    double ts = 0.0;
+    uint32_t lastStationaryId = 0;
+    for (uint32_t fid = 1; fid <= 12; ++fid) {
+        BackendHfPacket pkt;
+        pkt.frameId = fid;
+        ts += 0.05;
+        pkt.timestamp = ts;
+        pkt.isKeyframe = (fid % 2 == 0) && (fid != 12);
+        pkt.isStationary = true;
+        pkt.depth = 5.0;
+        pkt.imuDelta = makePim(biasedAccel, Vector3::Zero(), 0.05);
+        pkt.rawImu = makeImuBatch(ts - 0.05, ts, biasedAccel);
+        callProcessFrame(harness.backend, pkt);
+        lastStationaryId = fid;
+    }
+
+    const auto& estStatic = getSmootherEstimate(harness.backend);
+    ASSERT_TRUE(estStatic.exists(X(lastStationaryId)));
+    ASSERT_TRUE(estStatic.exists(V(lastStationaryId)));
+    const Pose3 staticPose = estStatic.at<Pose3>(X(lastStationaryId));
+    const Vector3 staticVel = estStatic.at<Vector3>(V(lastStationaryId));
+
+    // ZUPT should hold horizontal drift and velocity tight despite 0.6s of biased acceleration
+    EXPECT_LT(staticPose.translation().head<2>().norm(), 0.02);
+    EXPECT_LT(staticVel.norm(), 0.02);
+
+    // Transition to moving keyframe, collapsing stationary non-keyframe 12 cleanly
+    BackendHfPacket movePkt;
+    movePkt.frameId = 13;
+    ts += 0.05;
+    movePkt.timestamp = ts;
+    movePkt.isKeyframe = true;
+    movePkt.isStationary = false;
+    movePkt.depth = 5.0;
+    movePkt.imuDelta = makePim(Vector3(1.5, 0.0, 9.81), Vector3::Zero(), 0.05);
+    movePkt.rawImu = makeImuBatch(ts - 0.05, ts, Vector3(1.5, 0.0, 9.81));
+    callProcessFrame(harness.backend, movePkt);
+
+    const auto& win = getWindow(harness.backend);
+    const auto& smoother = getSmoother(harness.backend);
+    EXPECT_FALSE(smoother.valueExists(X(12)));
+    EXPECT_FALSE(smoother.valueExists(V(12)));
+    EXPECT_TRUE(smoother.valueExists(X(13)));
+    EXPECT_TRUE(smoother.valueExists(V(13)));
+    EXPECT_FALSE(win.front().zuptPoseFactorSlot.has_value());
+}
+
 } // namespace PoolSLAM

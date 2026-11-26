@@ -71,6 +71,8 @@ struct BackendHfPacket{
     std::optional<gtsam::Vector3> initialAccel;
     // Initial angular velocity reading for stationary gyro bias initialization
     std::optional<gtsam::Vector3> initialGyro;
+
+    bool isStationary = false;
 };
 
 // Data passed from the Lf frontend to the backend

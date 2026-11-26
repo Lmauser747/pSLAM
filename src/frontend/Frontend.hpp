@@ -40,6 +40,13 @@ struct FrontendConfig{
     double maxTimeBetweenKf = 1.0; // Maximum time between keyframes
     size_t hfQueueSize = 10; // Max size of hfQueue
     Eigen::Matrix3d bodyToCameraRot = Eigen::Matrix3d::Identity(); // Rotation from body/IMU frame to camera frame
+
+    size_t zuptMinFeatures = 15;
+    float zuptMaxFlowPx = 0.5f;
+    float zuptMaxKfParallaxPx = 1.0f;
+    double zuptMaxGyroRadSec = 0.05;
+    double zuptMaxAccelDiff = 0.4;
+    double zuptMaxAccelStd = 2.0;
 };
 
 class Frontend{

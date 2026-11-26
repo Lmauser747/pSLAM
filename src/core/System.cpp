@@ -53,6 +53,9 @@ System::System(SystemConfig sysConfig)
         );
     }
     beConfig.K = K.cast<double>();
+    if (feConfig.preintParams) {
+        beConfig.gravity = feConfig.preintParams->n_gravity.norm();
+    }
 
     if (!config.vocabPath.empty()) {
         std::ifstream testStream(config.vocabPath, std::ios::binary);

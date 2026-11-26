@@ -33,13 +33,19 @@ void Frontend::processPacket(){
         }
 
         std::unique_ptr<gtsam::PreintegratedImuMeasurements> frameImuDelta;
+        gtsam::imuBias::ConstantBias biasSnapshot;
         {
             std::lock_guard<std::mutex> lock(m_imuBias);
-            frameImuDelta = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, imuBias);
+            biasSnapshot = imuBias;
+            frameImuDelta = std::make_unique<gtsam::PreintegratedImuMeasurements>(config.preintParams, biasSnapshot);
         }
+        Eigen::Vector3d imuSumA = Eigen::Vector3d::Zero();
+        Eigen::Vector3d imuSumW = Eigen::Vector3d::Zero();
         if(!syncPkt.imu.empty()){
             double tPrev = (lastImuTimestamp >= 0.0) ? lastImuTimestamp : syncPkt.imu.front().timestamp;
             for(size_t i = 0; i < syncPkt.imu.size(); i++){
+                imuSumA += syncPkt.imu[i].a;
+                imuSumW += syncPkt.imu[i].w;
                 double tCurr = syncPkt.imu[i].timestamp;
                 double dt = tCurr - tPrev;
                 if(dt > 0.0){
@@ -60,7 +66,7 @@ void Frontend::processPacket(){
         auto Rcam = config.bodyToCameraRot.transpose() * frameImuDelta->deltaRij().matrix() * config.bodyToCameraRot; // Frame to frame relative camera rotation
         
         // Track the existing features using IC-LK
-        (void)hf.trackExistingFeatures(syncPkt.image->arr.data(), Rcam.cast<float>()); 
+        const float meanDisplacement = hf.trackExistingFeatures(syncPkt.image->arr.data(), Rcam.cast<float>()); 
         
         auto featureCount = hf.getActiveFeatures().size();
 
@@ -70,6 +76,34 @@ void Frontend::processPacket(){
             RcamKf = config.bodyToCameraRot.transpose() * keyframeImuDelta->deltaRij().matrix() * config.bodyToCameraRot;
         }
         const float keyframeParallax = hf.computeKeyframeParallax(RcamKf.cast<float>());
+
+        bool isStationary = false;
+        if(frameId > 0 &&
+           !syncPkt.imu.empty() &&
+           featureCount >= config.zuptMinFeatures &&
+           meanDisplacement <= config.zuptMaxFlowPx &&
+           keyframeParallax <= config.zuptMaxKfParallaxPx){
+            const double invN = 1.0 / static_cast<double>(syncPkt.imu.size());
+            const Eigen::Vector3d meanA = imuSumA * invN;
+            const Eigen::Vector3d meanW = imuSumW * invN;
+            const double gyroNorm = (meanW - biasSnapshot.gyroscope()).norm();
+            const double gravity = config.preintParams ? config.preintParams->n_gravity.norm() : 9.81;
+            const double accelDiffRaw = std::abs(meanA.norm() - gravity);
+            const double accelDiffCorr = std::abs((meanA - biasSnapshot.accelerometer()).norm() - gravity);
+            const double accelDiff = std::min(accelDiffRaw, accelDiffCorr);
+
+            double accelSqDev = 0.0;
+            for(const auto &sample : syncPkt.imu){
+                accelSqDev += (sample.a - meanA).squaredNorm();
+            }
+            const double accelStd = std::sqrt(accelSqDev * invN);
+
+            // Require both low visual flow and quiet mean IMU so neither cruise nor rotation triggers ZUPT
+            isStationary = (gyroNorm <= config.zuptMaxGyroRadSec) &&
+                           (accelDiff <= config.zuptMaxAccelDiff) &&
+                           (accelStd <= config.zuptMaxAccelStd);
+        }
+        hfPkt->isStationary = isStationary;
 
         // Determine if keyframe
         auto percentRetainedFeatures = (lastKfCount > 0) ? (static_cast<float>(featureCount) / static_cast<float>(lastKfCount)) : 0.0f;

@@ -27,6 +27,7 @@
 #include <gtsam/nonlinear/ISAM2Result.h>
 #include <gtsam/nonlinear/ISAM2UpdateParams.h>
 #include <gtsam/nonlinear/LinearContainerFactor.h>
+#include <gtsam/nonlinear/PriorFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/SmartProjectionPoseFactor.h>
 
@@ -100,6 +101,12 @@ void Backend::processFrame(const BackendHfPacket &pkt){
         }
         if(droppedFrame->depthFactorSlot.has_value()){
             removeIndices.push_back(*droppedFrame->depthFactorSlot);
+        }
+        if(droppedFrame->zuptVelFactorSlot.has_value()){
+            removeIndices.push_back(*droppedFrame->zuptVelFactorSlot);
+        }
+        if(droppedFrame->zuptPoseFactorSlot.has_value()){
+            removeIndices.push_back(*droppedFrame->zuptPoseFactorSlot);
         }
 
         const gtsam::Key dropPoseKey = X(droppedFrame->frameId);
@@ -189,6 +196,22 @@ void Backend::processFrame(const BackendHfPacket &pkt){
         depthGraphIdx = stagingGraph.size();
         stagingGraph.emplace_shared<DepthFactor>(
             X(pkt.frameId), pkt.depth.value(), depthNoise, config.bodyToDepthSensor
+        );
+    }
+
+    std::optional<size_t> zuptVelGraphIdx;
+    std::optional<size_t> zuptPoseGraphIdx;
+    if(pkt.isStationary){
+        const gtsam::Vector3 zeroVel = gtsam::Vector3::Zero();
+        stagingValues.update(X(pkt.frameId), prevState.pose());
+        stagingValues.update(V(pkt.frameId), zeroVel);
+        zuptVelGraphIdx = stagingGraph.size();
+        stagingGraph.emplace_shared<gtsam::PriorFactor<gtsam::Vector3>>(
+            V(pkt.frameId), zeroVel, zuptVelNoise
+        );
+        zuptPoseGraphIdx = stagingGraph.size();
+        stagingGraph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
+            X(prev.frameId), X(pkt.frameId), gtsam::Pose3::Identity(), zuptPoseNoise
         );
     }
 
@@ -294,6 +317,12 @@ void Backend::processFrame(const BackendHfPacket &pkt){
     }
     if(depthGraphIdx.has_value() && *depthGraphIdx < newFactors.size()){
         wf.depthFactorSlot = newFactors[*depthGraphIdx];
+    }
+    if(zuptVelGraphIdx.has_value() && *zuptVelGraphIdx < newFactors.size()){
+        wf.zuptVelFactorSlot = newFactors[*zuptVelGraphIdx];
+    }
+    if(zuptPoseGraphIdx.has_value() && *zuptPoseGraphIdx < newFactors.size()){
+        wf.zuptPoseFactorSlot = newFactors[*zuptPoseGraphIdx];
     }
     for(const auto &[featId, graphIdx] : stagedVisualEntries){
         if(graphIdx < newFactors.size()){
@@ -491,10 +520,11 @@ void Backend::marginalizeOldestFrame(const WindowFrame &oldFrame){
             smartFactorSlots[reStagedIds[i]] = res.newFactorsIndices[i];
         }
 
-        // Clear consumed IMU and bias slots on the new window front
+        // Clear consumed IMU bias and stationary pose between slots on the new window front
         if(!window.empty()){
             window.front().imuFactorSlot.reset();
             window.front().biasFactorSlot.reset();
+            window.front().zuptPoseFactorSlot.reset();
         }
 
         // Drop smart factors folded into the marginal prior

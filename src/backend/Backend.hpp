@@ -73,6 +73,12 @@ struct BackendConfig{
 
     double smartRankTolerance = 1e-3; 
 
+    double gravity = 9.81;
+    double zuptVelSigma = 0.005;
+    double zuptPoseTransSigma = 0.005;
+    double zuptPoseRotSigma = 0.01;
+    double initMaxAccelBiasNorm = 1.0;
+
     size_t keyframeWindowSize = 20; // Number of keyframes to keep in trackedKeyframes
     size_t slidingWindowSize = 10; // Maximum number of frames in the iSAM2 sliding window
 };
@@ -107,6 +113,8 @@ struct WindowFrame{
     std::optional<gtsam::FactorIndex> imuFactorSlot;
     std::optional<gtsam::FactorIndex> biasFactorSlot;
     std::optional<gtsam::FactorIndex> depthFactorSlot;
+    std::optional<gtsam::FactorIndex> zuptVelFactorSlot;
+    std::optional<gtsam::FactorIndex> zuptPoseFactorSlot;
 
 };
 
@@ -137,6 +145,8 @@ class Backend{
     gtsam::SharedNoiseModel visualNoise;
     gtsam::SharedNoiseModel initBiasNoise;
     gtsam::SharedNoiseModel depthNoise;
+    gtsam::SharedNoiseModel zuptVelNoise;
+    gtsam::SharedNoiseModel zuptPoseNoise;
 
     // Camera intrinsics
     const std::shared_ptr<gtsam::Cal3_S2> Kptr;
