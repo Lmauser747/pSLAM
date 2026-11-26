@@ -51,6 +51,7 @@ Backend::Backend(Frontend &frontend, LfTracker &lfTracker, const BackendConfig &
     smartParams.setLandmarkDistanceThreshold(100.0);
     smartParams.setEnableEPI(true);
     smartParams.setDynamicOutlierRejectionThreshold(5.0 / config.K(0, 0));
+    smartParams.setRankTolerance(config.smartRankTolerance);
     
     // Initial noise models
     gtsam::Vector6 initBiasSigmas;
