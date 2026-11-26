@@ -51,7 +51,8 @@ protected:
         float cy = 239.80f,
         const std::string& distCoeffs = "[-0.2814, 0.0912, 0.0004, -0.0002]",
         const std::string& tBodyDepth = "[-0.15, 0.00, 0.05]",
-        const std::string& initialPoseBlock = "") {
+        const std::string& initialPoseBlock = "",
+        const std::string& imuBlock = "") {
 
         std::string yaml =
             "pipeline:\n"
@@ -77,6 +78,9 @@ protected:
 
         if (!initialPoseBlock.empty()) {
             yaml += initialPoseBlock + "\n";
+        }
+        if (!imuBlock.empty()) {
+            yaml += imuBlock + "\n";
         }
 
         return yaml;

@@ -1,5 +1,6 @@
 #include "pool_slam/System.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -18,6 +19,18 @@ YAML::Node requireNode(const YAML::Node& parent, const std::string& key, const s
         throw std::runtime_error("SystemConfig: missing required key '" + path + "'");
     }
     return child;
+}
+
+double readPositiveDouble(const YAML::Node& parent, const std::string& key, double fallback, const std::string& path) {
+    YAML::Node child = parent[key];
+    if (!child || !child.IsDefined()) {
+        return fallback;
+    }
+    const double val = child.as<double>();
+    if (!std::isfinite(val) || val <= 0.0) {
+        throw std::runtime_error("SystemConfig: '" + path + "' must be finite and positive");
+    }
+    return val;
 }
 
 } // namespace
@@ -94,6 +107,20 @@ SystemConfig::SystemConfig(const std::string& configFile) {
                     initialPose(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(c)) = row[c].as<double>();
                 }
             }
+        }
+
+        // Optional IMU noise densities and gravity
+        const YAML::Node imuNode = root["imu"];
+        if (imuNode && imuNode.IsDefined()) {
+            if (!imuNode.IsMap()) {
+                throw std::runtime_error("SystemConfig: 'imu' must be a map");
+            }
+            accelNoiseDensity = readPositiveDouble(imuNode, "accelerometer_noise_density", accelNoiseDensity, "imu.accelerometer_noise_density");
+            accelBiasRw = readPositiveDouble(imuNode, "accelerometer_random_walk", accelBiasRw, "imu.accelerometer_random_walk");
+            gyroNoiseDensity = readPositiveDouble(imuNode, "gyroscope_noise_density", gyroNoiseDensity, "imu.gyroscope_noise_density");
+            gyroBiasRw = readPositiveDouble(imuNode, "gyroscope_random_walk", gyroBiasRw, "imu.gyroscope_random_walk");
+            imuIntegrationSigma = readPositiveDouble(imuNode, "integration_sigma", imuIntegrationSigma, "imu.integration_sigma");
+            gravity = readPositiveDouble(imuNode, "gravity", gravity, "imu.gravity");
         }
     } catch (const YAML::Exception& e) {
         throw std::runtime_error("SystemConfig: YAML error while parsing '" + configFile + "': " + e.what());

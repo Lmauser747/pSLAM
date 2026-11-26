@@ -9,6 +9,7 @@
 #include <gtsam/geometry/Point3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/geometry/Rot3.h>
+#include <gtsam/navigation/PreintegrationParams.h>
 
 #include "pool_slam/System.hpp"
 #include "backend/Backend.hpp"
@@ -34,6 +35,14 @@ System::System(SystemConfig sysConfig)
     feConfig.dist = {config.k1, config.k2, config.p1, config.p2};
     feConfig.bodyToCameraRot = config.bodyToCamera.block<3, 3>(0, 0);
 
+    feConfig.preintParams = gtsam::PreintegrationParams::MakeSharedU(config.gravity);
+    feConfig.preintParams->accelerometerCovariance =
+        Eigen::Matrix3d::Identity() * (config.accelNoiseDensity * config.accelNoiseDensity);
+    feConfig.preintParams->gyroscopeCovariance =
+        Eigen::Matrix3d::Identity() * (config.gyroNoiseDensity * config.gyroNoiseDensity);
+    feConfig.preintParams->integrationCovariance =
+        Eigen::Matrix3d::Identity() * (config.imuIntegrationSigma * config.imuIntegrationSigma);
+
     feConfig.lfConfig.w = feConfig.w;
     feConfig.lfConfig.h = feConfig.h;
     feConfig.lfConfig.K = feConfig.K;
@@ -53,9 +62,9 @@ System::System(SystemConfig sysConfig)
         );
     }
     beConfig.K = K.cast<double>();
-    if (feConfig.preintParams) {
-        beConfig.gravity = feConfig.preintParams->n_gravity.norm();
-    }
+    beConfig.gravity = config.gravity;
+    beConfig.accelBiasRwSigma = config.accelBiasRw;
+    beConfig.gyroBiasRwSigma = config.gyroBiasRw;
 
     if (!config.vocabPath.empty()) {
         std::ifstream testStream(config.vocabPath, std::ios::binary);

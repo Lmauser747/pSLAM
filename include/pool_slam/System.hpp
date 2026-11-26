@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <memory>
 #include <string>
 
@@ -21,6 +22,13 @@ public:
     Eigen::Matrix<double, 3, 1> bodyToDepth; // pose tranform between body and deoth sensor
     bool hasInitialPose = false;
     Eigen::Matrix<double, 3, 4> initialPose = Eigen::Matrix<double, 3, 4>::Identity();
+
+    double accelNoiseDensity = std::sqrt(1e-3);
+    double accelBiasRw = 3e-3;
+    double gyroNoiseDensity = std::sqrt(1e-4);
+    double gyroBiasRw = 3e-5;
+    double imuIntegrationSigma = std::sqrt(1e-5);
+    double gravity = 9.81;
 
     SystemConfig(const std::string& configFile);
 };

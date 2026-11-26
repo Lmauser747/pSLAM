@@ -175,6 +175,12 @@ PYBIND11_MODULE(pool_slam, m) {
                 }
             })
         .def_readwrite("has_initial_pose", &PoolSLAM::SystemConfig::hasInitialPose)
+        .def_readwrite("accel_noise_density", &PoolSLAM::SystemConfig::accelNoiseDensity)
+        .def_readwrite("accel_bias_rw", &PoolSLAM::SystemConfig::accelBiasRw)
+        .def_readwrite("gyro_noise_density", &PoolSLAM::SystemConfig::gyroNoiseDensity)
+        .def_readwrite("gyro_bias_rw", &PoolSLAM::SystemConfig::gyroBiasRw)
+        .def_readwrite("imu_integration_sigma", &PoolSLAM::SystemConfig::imuIntegrationSigma)
+        .def_readwrite("gravity", &PoolSLAM::SystemConfig::gravity)
         .def_property("initial_pose",
             [](const PoolSLAM::SystemConfig& cfg) {
                 py::list outer;

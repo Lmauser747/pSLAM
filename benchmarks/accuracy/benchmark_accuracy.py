@@ -245,6 +245,32 @@ def load_cam0_calibration(cam_dir: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def load_imu0_calibration(imu_dir: str) -> Optional[Dict[str, float]]:
+    yaml_path = os.path.join(imu_dir, "sensor.yaml")
+    if not os.path.isfile(yaml_path):
+        return None
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        required = (
+            "accelerometer_noise_density",
+            "accelerometer_random_walk",
+            "gyroscope_noise_density",
+            "gyroscope_random_walk",
+        )
+        if not isinstance(data, dict) or not all(k in data for k in required):
+            return None
+        return {
+            "accel_noise_density": float(data["accelerometer_noise_density"]),
+            "accel_bias_rw": float(data["accelerometer_random_walk"]),
+            "gyro_noise_density": float(data["gyroscope_noise_density"]),
+            "gyro_bias_rw": float(data["gyroscope_random_walk"]),
+            "integration_sigma": 1.0e-4,
+        }
+    except Exception:
+        return None
+
+
 class EurocDataset:
     def __init__(self, root_dir: str, time_cutoff: Optional[float] = None):
         self.root_dir = os.path.abspath(os.path.expanduser(root_dir))
@@ -312,6 +338,8 @@ class EurocDataset:
             self.dist = (-0.283408, 0.073959, 0.000194, 0.000018)
             self.t_bc = None
             self.calib_source = "Default EuRoC MT9V034 Factory Calibration"
+
+        self.imu_calib = load_imu0_calibration(self.imu_dir)
 
         if not self.frame_records:
             raise FileNotFoundError(f"No valid image frames found in '{self.cam_dir}'.")
@@ -496,6 +524,7 @@ def create_system_config_yaml(
     t_bc: Optional[List[List[float]]] = None,
     t_depth: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     initial_pose: Optional[List[List[float]]] = None,
+    imu_calib: Optional[Dict[str, float]] = None,
 ) -> str:
     if t_bc is None:
         t_bc = [
@@ -513,6 +542,17 @@ def create_system_config_yaml(
             f"  - [{initial_pose[1][0]}, {initial_pose[1][1]}, {initial_pose[1][2]}, {initial_pose[1][3]}]\n"
             f"  - [{initial_pose[2][0]}, {initial_pose[2][1]}, {initial_pose[2][2]}, {initial_pose[2][3]}]\n"
             f"  - [{initial_pose[3][0]}, {initial_pose[3][1]}, {initial_pose[3][2]}, {initial_pose[3][3]}]\n"
+        )
+
+    imu_block = ""
+    if imu_calib is not None:
+        imu_block = (
+            f"\nimu:\n"
+            f"  accelerometer_noise_density: {imu_calib['accel_noise_density']}\n"
+            f"  accelerometer_random_walk: {imu_calib['accel_bias_rw']}\n"
+            f"  gyroscope_noise_density: {imu_calib['gyro_noise_density']}\n"
+            f"  gyroscope_random_walk: {imu_calib['gyro_bias_rw']}\n"
+            f"  integration_sigma: {imu_calib['integration_sigma']}\n"
         )
 
     content = f"""pipeline:
@@ -534,7 +574,7 @@ extrinsics:
     - [{t_bc[1][0]}, {t_bc[1][1]}, {t_bc[1][2]}, {t_bc[1][3]}]
     - [{t_bc[2][0]}, {t_bc[2][1]}, {t_bc[2][2]}, {t_bc[2][3]}]
     - [{t_bc[3][0]}, {t_bc[3][1]}, {t_bc[3][2]}, {t_bc[3][3]}]
-  t_body_depth: [{t_depth[0]}, {t_depth[1]}, {t_depth[2]}]{initial_pose_block}
+  t_body_depth: [{t_depth[0]}, {t_depth[1]}, {t_depth[2]}]{initial_pose_block}{imu_block}
 """
     with open(output_yaml, "w", encoding="utf-8") as f:
         f.write(content)
@@ -594,6 +634,7 @@ def run_accuracy_benchmark(
             dist=dataset.dist,
             t_bc=dataset.t_bc,
             initial_pose=initial_pose,
+            imu_calib=getattr(dataset, "imu_calib", None),
         )
         calib_origin = getattr(dataset, "calib_source", "Auto-generated from sensor.yaml")
 
@@ -610,6 +651,10 @@ def run_accuracy_benchmark(
     print(f"Camera Matrix (K)   : fx={sys_config.fx:.3f}, fy={sys_config.fy:.3f}, cx={sys_config.cx:.3f}, cy={sys_config.cy:.3f}")
     print(f"Resolution          : {sys_config.w} x {sys_config.h}")
     print(f"Distortion (radtan) : [{sys_config.k1:.5f}, {sys_config.k2:.5f}, {sys_config.p1:.6f}, {sys_config.p2:.6f}]")
+    print(
+        f"IMU Noise           : sig_a={sys_config.accel_noise_density:.4e}, rw_a={sys_config.accel_bias_rw:.4e}, "
+        f"sig_g={sys_config.gyro_noise_density:.4e}, rw_g={sys_config.gyro_bias_rw:.4e}"
+    )
     print(f"Total Sequence Time : {dataset.duration:.2f} s ({len(dataset.frame_records)} frames)")
     print(f"Evaluation Interval : {eval_interval_sec:.2f} s")
     print(f"Depth Noise Sigma   : {depth_noise_sigma:.4f} m")

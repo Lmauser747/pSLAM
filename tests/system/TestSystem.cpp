@@ -47,6 +47,57 @@ TEST_F(TestSystem, NominalParsingAllFieldsMatch) {
     EXPECT_FALSE(cfg.hasInitialPose);
 }
 
+TEST_F(TestSystem, OptionalImuNoiseParsing) {
+    const std::string imuYaml =
+        "imu:\n"
+        "  accelerometer_noise_density: 2.0e-3\n"
+        "  accelerometer_random_walk: 3.0e-3\n"
+        "  gyroscope_noise_density: 1.6968e-4\n"
+        "  gyroscope_random_walk: 1.9393e-5\n"
+        "  integration_sigma: 1.0e-4\n"
+        "  gravity: 9.80665\n";
+
+    TempConfigFile tempWithImu(makeValidYamlContent("", W, H, 525.4f, 525.85f, 319.5f, 239.8f,
+                                                    "[-0.2814, 0.0912, 0.0004, -0.0002]",
+                                                    "[-0.15, 0.00, 0.05]",
+                                                    "",
+                                                    imuYaml));
+    SystemConfig cfg(tempWithImu.path);
+    EXPECT_DOUBLE_EQ(cfg.accelNoiseDensity, 2.0e-3);
+    EXPECT_DOUBLE_EQ(cfg.accelBiasRw, 3.0e-3);
+    EXPECT_DOUBLE_EQ(cfg.gyroNoiseDensity, 1.6968e-4);
+    EXPECT_DOUBLE_EQ(cfg.gyroBiasRw, 1.9393e-5);
+    EXPECT_DOUBLE_EQ(cfg.imuIntegrationSigma, 1.0e-4);
+    EXPECT_DOUBLE_EQ(cfg.gravity, 9.80665);
+
+    System system(cfg);
+    EXPECT_DOUBLE_EQ(system.getConfig().accelNoiseDensity, 2.0e-3);
+    EXPECT_NO_THROW(system.start());
+    EXPECT_NO_THROW(system.stop());
+}
+
+TEST_F(TestSystem, NonPositiveImuNoiseThrows) {
+    const std::string badAccelYaml =
+        "imu:\n"
+        "  accelerometer_noise_density: 0.0\n";
+    TempConfigFile fileBadAccel(makeValidYamlContent("", W, H, 525.4f, 525.85f, 319.5f, 239.8f,
+                                                     "[-0.2814, 0.0912, 0.0004, -0.0002]",
+                                                     "[-0.15, 0.00, 0.05]",
+                                                     "",
+                                                     badAccelYaml));
+    EXPECT_THROW(SystemConfig cfg(fileBadAccel.path), std::runtime_error);
+
+    const std::string badGravityYaml =
+        "imu:\n"
+        "  gravity: -9.81\n";
+    TempConfigFile fileBadGravity(makeValidYamlContent("", W, H, 525.4f, 525.85f, 319.5f, 239.8f,
+                                                       "[-0.2814, 0.0912, 0.0004, -0.0002]",
+                                                       "[-0.15, 0.00, 0.05]",
+                                                       "",
+                                                       badGravityYaml));
+    EXPECT_THROW(SystemConfig cfg(fileBadGravity.path), std::runtime_error);
+}
+
 TEST_F(TestSystem, OptionalInitialPoseParsing) {
     // Case 1: With valid initial_pose matrix in YAML
     const std::string initialPoseYaml =
