@@ -382,7 +382,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
     for(Eigen::Index i = 0; i < static_cast<Eigen::Index>(numFeatures); i++){
         auto p = epi.scratch.col(i).hnormalized();
         auto q = epi.currRays.col(i).hnormalized();
-        if((p - q).norm() <= ransacTau){
+        if((p - q).squaredNorm() <= ransacTauSq){
             pureRotations++;
         }
     }
@@ -393,7 +393,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             auto i = static_cast<Eigen::Index>(readIdx);
             auto p = epi.scratch.col(i).hnormalized();
             auto q = epi.currRays.col(i).hnormalized();
-            if((p - q).norm() <= ransacTau){
+            if((p - q).squaredNorm() <= ransacTauSq){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = activeFeatures[readIdx];
                 }
@@ -441,7 +441,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
 
             float sed = denomenator2 > 1e-7 ? numerator2 / denomenator2 : 1e9;
 
-            inliers = (sed < ransacTau * ransacTau) ? inliers + 1 : inliers;
+            inliers = (sed < ransacTauSq) ? inliers + 1 : inliers;
         }
         // END VECTORIZE
         
@@ -469,7 +469,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
 
             float sed = denomenator2 > 1e-7 ? numerator2 / denomenator2 : 1e9;
 
-            if(sed < ransacTau * ransacTau){
+            if(sed < ransacTauSq){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = std::move(activeFeatures[readIdx]);
                     epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
@@ -495,8 +495,6 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
 Eigen::Vector2f HfTracker::undistortPoint(float xDist, float yDist) const{
     float cx = K(0, 2);
     float cy = K(1, 2);
-    float fxInv = 1.0f / K(0, 0);
-    float fyInv = 1.0f / K(1, 1);
 
     float xd = (xDist - cx) * fxInv;
     float yd = (yDist - cy) * fyInv;
@@ -546,8 +544,8 @@ void HfTracker::enforceBucketDensity(){
             bucket.count = 1;
         }else if(bucket.count == 1){
             // Remove features that are too close
-            auto distL2 = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).norm();
-            if(distL2 < MIN_DIST_IN_BUCKET){
+            auto distL2Sq = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).squaredNorm();
+            if(distL2Sq < MIN_DIST_IN_BUCKET){
                 featureRemoved = true;
                 if(activeFeatures[bucket.olderIdx].age < feature.age){
                     keep[bucket.olderIdx] = false;
@@ -567,9 +565,9 @@ void HfTracker::enforceBucketDensity(){
         }else{
             featureRemoved = true;
             // Remove features that are too close
-            auto distOlderL2 = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).norm();
+            auto distOlderL2Sq = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).squaredNorm();
             if(activeFeatures[bucket.olderIdx].age < feature.age){
-                if(distOlderL2 < MIN_DIST_IN_BUCKET){
+                if(distOlderL2Sq < MIN_DIST_IN_BUCKET){
                     keep[bucket.olderIdx] = false;
                 }else{
                     keep[bucket.youngerIdx] = false;
@@ -577,7 +575,7 @@ void HfTracker::enforceBucketDensity(){
                 }
                 bucket.olderIdx = i;
             }else if(activeFeatures[bucket.youngerIdx].age < feature.age){
-                if(distOlderL2 < MIN_DIST_IN_BUCKET){
+                if(distOlderL2Sq < MIN_DIST_IN_BUCKET){
                     keep[i] = false;
                 }else{
                     keep[bucket.youngerIdx] = false;

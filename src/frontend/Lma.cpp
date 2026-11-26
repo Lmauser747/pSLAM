@@ -67,16 +67,18 @@ bool LfTracker::refinePoseLM(size_t numInliers, const Eigen::Matrix3d& K_cam, Ei
                 return 1e12;
             }
 
-            const Eigen::Vector2d pNorm = matching.curFeatures.col(i).hnormalized();
+            const Eigen::Vector2d pNorm = matching.curFeatures.col(i).head<2>();
             const Eigen::Vector2d err(
                 fx * (PCam.x() / PCam.z() - pNorm.x()),
                 fy * (PCam.y() / PCam.z() - pNorm.y())
             );
-            const double rNorm = err.norm();
+            const double rNormSq = err.squaredNorm();
 
-            if(rNorm <= HUBER_THRESHOLD){
-                cost += 0.5 * rNorm * rNorm;
+            constexpr double HUBER_SQRD = HUBER_THRESHOLD * HUBER_THRESHOLD;
+            if(rNormSq <= HUBER_SQRD){
+                cost += 0.5 * rNormSq;
             }else{
+                const double rNorm = err.norm();
                 cost += HUBER_THRESHOLD * (rNorm - 0.5 * HUBER_THRESHOLD);
             }
         }
@@ -102,7 +104,7 @@ bool LfTracker::refinePoseLM(size_t numInliers, const Eigen::Matrix3d& K_cam, Ei
             const double x = PCam.x();
             const double y = PCam.y();
 
-            const Eigen::Vector2d pNorm = matching.curFeatures.col(i).hnormalized();
+            const Eigen::Vector2d pNorm = matching.curFeatures.col(i).head<2>();
             const Eigen::Vector2d err(
                 fx * (x * invZ - pNorm.x()),
                 fy * (y * invZ - pNorm.y())

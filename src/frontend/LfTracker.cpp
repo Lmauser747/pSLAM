@@ -487,12 +487,12 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
             if(PCam.z() <= 1e-6){
                 continue;
             }
-            Eigen::Vector2d p = matching.curFeatures.col(static_cast<int>(match)).hnormalized();
+            Eigen::Vector2d p = matching.curFeatures.col(static_cast<int>(match)).head<2>();
             Eigen::Vector2d proj = PCam.hnormalized();
             Eigen::Vector2d diff(fx * (proj.x() - p.x()), fy * (proj.y() - p.y()));
             
-            auto e = diff.norm();
-            if(e <= config.maxReprojectionError){
+            auto e = diff.squaredNorm();
+            if(e <= maxReprojectionErrorSq){
                 inliers++;
             }
         }
@@ -522,12 +522,12 @@ std::optional<std::pair<Eigen::Matrix<double, 3, 4>, size_t>> LfTracker::ransac(
         if(PCam.z() <= 1e-6){
             continue;
         }
-        Eigen::Vector2d p = matching.curFeatures.col(readIdx).hnormalized();
+        Eigen::Vector2d p = matching.curFeatures.col(readIdx).head<2>();
         Eigen::Vector2d proj = PCam.hnormalized();
         Eigen::Vector2d diff(fx * (proj.x() - p.x()), fy * (proj.y() - p.y()));
         
-        auto e = diff.norm();
-        if(e <= config.maxReprojectionError){
+        auto e = diff.squaredNorm();
+        if(e <= maxReprojectionErrorSq){
             matching.curFeatures.col(writeIdx) = matching.curFeatures.col(readIdx);
             matching.matchLandmarks.col(writeIdx) = matching.matchLandmarks.col(readIdx);
             writeIdx++;
