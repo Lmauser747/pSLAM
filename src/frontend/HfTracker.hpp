@@ -134,15 +134,15 @@ private:
         size_t bufH,
         const Eigen::Vector2f &pt,
         std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
-        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
-        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+        std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+        std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
         Eigen::Matrix2f &HInv) const;
 
     // Core IC-LK alignment loop on a buffer of arbitrary size
     bool alignPatchICLK(
         const std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
-        const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
-        const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+        const std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+        const std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
         const Eigen::Matrix2f &HInv,
         const uint8_t *curBuffer,
         size_t bufW,

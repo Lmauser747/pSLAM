@@ -191,7 +191,7 @@ bool HfTracker::addKp(const uint8_t *curBuffer, Eigen::Vector2i &kp){
     // Top left of the grid
     const uint8_t *topLeft = curBuffer + (yPt - RADIUS) * static_cast<ptrdiff_t>(wImage) + (xPt - RADIUS);
 
-    int Tx, Ty;
+    int16_t Tx, Ty;
     int Txx = 0;
     int Tyy = 0;
     int Txy = 0;

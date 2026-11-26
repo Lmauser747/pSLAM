@@ -119,8 +119,8 @@ bool HfTracker::extractTemplate(
     size_t bufH,
     const Eigen::Vector2f &pt,
     std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
-    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
-    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+    std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+    std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
     Eigen::Matrix2f &HInv) const{
     // Leave one extra pixel margin for Sobel taps and floor plus one bilinear lookup
     const float ptLower = static_cast<float>(RADIUS + 1);
@@ -154,8 +154,8 @@ bool HfTracker::extractTemplate(
             const float bc = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(0.0f, 1.0f));
             const float br = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(1.0f, 1.0f));
 
-            const int tx = static_cast<int>(std::lround(2.0f * (ml - mr) + bl + tl - br - tr));
-            const int ty = static_cast<int>(std::lround(2.0f * (tc - bc) + tl + tr - bl - br));
+            const int16_t tx = static_cast<int16_t>(std::lround(2.0f * (ml - mr) + bl + tl - br - tr));
+            const int16_t ty = static_cast<int16_t>(std::lround(2.0f * (tc - bc) + tl + tr - bl - br));
 
             xGrad[idx] = tx;
             yGrad[idx] = ty;
@@ -181,8 +181,8 @@ bool HfTracker::extractTemplate(
 
 bool HfTracker::alignPatchICLK(
     const std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
-    const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
-    const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+    const std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+    const std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
     const Eigen::Matrix2f &HInv,
     const uint8_t *curBuffer,
     size_t bufW,
@@ -263,8 +263,8 @@ bool HfTracker::alignFeaturePyramidICLK(TrackedFeature<RADIUS> &feature, const u
         const auto &curPyr = pyramids[curPyrIdx];
 
         std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> coarsePatch;
-        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> coarseXGrad;
-        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> coarseYGrad;
+        std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> coarseXGrad;
+        std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> coarseYGrad;
         Eigen::Matrix2f coarseHInv;
 
         for(int lvl = static_cast<int>(PYR_LEVELS) - 1; lvl >= 1; lvl--){
@@ -639,8 +639,8 @@ float HfTracker::computeKeyframeParallax(const Eigen::Matrix3f &R_kf_curr) const
 void HfTracker::markKeyframe(){
     const uint8_t *kfBuffer = hasPrevPyramid ? pyramids[prevPyrIdx()].levels[0].data() : nullptr;
     std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> newPatch;
-    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> newXGrad;
-    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> newYGrad;
+    std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> newXGrad;
+    std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> newYGrad;
     Eigen::Matrix2f newHInv;
 
     for(auto &feat : activeFeatures){
