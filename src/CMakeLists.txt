@@ -54,6 +54,8 @@ target_link_libraries(poolslam_frontend
 find_package(GTSAM REQUIRED)
 add_library(poolslam_backend STATIC
     backend/Backend.cpp
+    backend/VioGraph.cpp
+    backend/GlobalGraph.cpp
     backend/DepthFactor.cpp
 )
 target_include_directories(poolslam_backend

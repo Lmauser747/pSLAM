@@ -23,7 +23,7 @@
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/Values.h>
 #include <gtsam/nonlinear/ISAM2.h>
-#include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
+#include <gtsam/nonlinear/ISAM2Result.h>
 #include <gtsam/slam/PriorFactor.h>
 #include <gtsam/slam/BetweenFactor.h>
 
@@ -152,8 +152,10 @@ protected:
     static const gtsam::Values& getStagingValues(const Backend& b) { return b.stagingValues; }
     static gtsam::Values& getStagingValues(Backend& b) { return b.stagingValues; }
 
-    static const gtsam::IncrementalFixedLagSmoother& getSmoother(const Backend& b) { return b.smoother; }
-    static gtsam::IncrementalFixedLagSmoother& getSmoother(Backend& b) { return b.smoother; }
+    static const gtsam::ISAM2& getSmoother(const Backend& b) { return b.smoother; }
+    static gtsam::ISAM2& getSmoother(Backend& b) { return b.smoother; }
+
+    static const std::deque<WindowFrame>& getWindow(const Backend& b) { return b.window; }
 
     static const gtsam::Values& getSmootherEstimate(const Backend& b) { return b.smootherEstimate; }
 
@@ -204,8 +206,8 @@ protected:
         b.publishPose(pose, velocity, timestamp);
     }
 
-    static bool callSolveSmoother(Backend& b, uint32_t currentFrameId, double timestamp = 0.0, const gtsam::FactorIndices& removeIndices = {}) {
-        return b.solveSmoother(currentFrameId, timestamp, removeIndices);
+    static bool callSolveSmoother(Backend& b, uint32_t currentFrameId, double = 0.0, const gtsam::FactorIndices& removeIndices = {}) {
+        return b.solveSmoother(currentFrameId, removeIndices).has_value();
     }
 
     static bool callSolveGlobal(Backend& b, uint32_t currentFrameId) {

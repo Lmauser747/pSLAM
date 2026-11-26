@@ -497,4 +497,168 @@ TEST_F(BackendTest, IndeterminantLinearSystemExceptionHandling) {
     EXPECT_TRUE(getStagingValues(harness.backend).empty());
 }
 
+TEST_F(BackendTest, NonKeyframeMarginSecondNewCollapsesFrame) {
+    TestHarness harness;
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.isKeyframe = true;
+    pkt0.depth = 5.0;
+    callInitializeSystem(harness.backend, pkt0);
+    ASSERT_EQ(getWindow(harness.backend).size(), 1u);
+
+    auto makeImuBatch = [](double tStart, double tEnd) {
+        std::vector<Imu> samples;
+        for (double t = tStart + 0.005; t <= tEnd + 1e-9; t += 0.005) {
+            Imu s;
+            s.timestamp = t;
+            s.a = Vector3(0.0, 0.0, 9.81);
+            s.w = Vector3::Zero();
+            s.t = 20.0f;
+            samples.push_back(s);
+        }
+        return samples;
+    };
+
+    // Frame 1: non-keyframe
+    BackendHfPacket pkt1;
+    pkt1.frameId = 1;
+    pkt1.timestamp = 0.05;
+    pkt1.isKeyframe = false;
+    pkt1.depth = 5.0;
+    pkt1.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.05);
+    pkt1.rawImu = makeImuBatch(0.0, 0.05);
+    pkt1.visualFeatures.emplace_back(201, Point2(0.0, 0.0), true);
+    callProcessFrame(harness.backend, pkt1);
+
+    EXPECT_EQ(getWindow(harness.backend).size(), 2u);
+    EXPECT_TRUE(getSmoother(harness.backend).valueExists(X(1)));
+
+    // Frame 2: non-keyframe collapses frame 1 via MARGIN_SECOND_NEW
+    BackendHfPacket pkt2;
+    pkt2.frameId = 2;
+    pkt2.timestamp = 0.10;
+    pkt2.isKeyframe = false;
+    pkt2.depth = 5.0;
+    pkt2.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.05);
+    pkt2.rawImu = makeImuBatch(0.05, 0.10);
+    pkt2.visualFeatures.emplace_back(201, Point2(0.0, 0.0), false);
+    callProcessFrame(harness.backend, pkt2);
+
+    const auto& win = getWindow(harness.backend);
+    ASSERT_EQ(win.size(), 2u);
+    EXPECT_EQ(win.front().frameId, 0u);
+    EXPECT_EQ(win.back().frameId, 2u);
+    EXPECT_FALSE(getSmoother(harness.backend).valueExists(X(1)));
+    EXPECT_TRUE(getSmoother(harness.backend).valueExists(X(2)));
+}
+
+TEST_F(BackendTest, OldestKeyframeMarginOldCapsWindowSize) {
+    BackendConfig cfg = makeDefaultBackendConfig();
+    cfg.slidingWindowSize = 5;
+    TestHarness harness(cfg);
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.isKeyframe = true;
+    pkt0.depth = 5.0;
+    pkt0.visualFeatures.emplace_back(301, Point2(-0.1, 0.0), true);
+    callInitializeSystem(harness.backend, pkt0);
+
+    for (uint32_t i = 1; i <= 8; ++i) {
+        BackendHfPacket pkt;
+        pkt.frameId = i;
+        pkt.timestamp = static_cast<double>(i) * 0.2;
+        pkt.isKeyframe = true;
+        pkt.depth = 5.0;
+        pkt.imuDelta = makePim(Vector3(0.0, 0.0, 9.81), Vector3::Zero(), 0.2);
+        pkt.visualFeatures.emplace_back(301, Point2(-0.1 + 0.02 * static_cast<double>(i), 0.0), false);
+        callProcessFrame(harness.backend, pkt);
+    }
+
+    const auto& win = getWindow(harness.backend);
+    EXPECT_EQ(win.size(), cfg.slidingWindowSize);
+    EXPECT_EQ(win.front().frameId, 4u);
+    EXPECT_EQ(win.back().frameId, 8u);
+    EXPECT_FALSE(getSmoother(harness.backend).valueExists(X(0)));
+    EXPECT_FALSE(getSmoother(harness.backend).valueExists(X(3)));
+    EXPECT_TRUE(getSmoother(harness.backend).valueExists(X(4)));
+    EXPECT_TRUE(getSmoother(harness.backend).valueExists(X(8)));
+    EXPECT_EQ(getSmartFactorSlots(harness.backend).count(301), 1u);
+}
+
+TEST_F(BackendTest, MarginOldPreservesSuccessorFactorsAcrossBatchRelinearization) {
+    BackendConfig cfg = makeDefaultBackendConfig();
+    cfg.slidingWindowSize = 5;
+    cfg.relinearizeThreshold = 0.01;
+    cfg.relinearizeSkip = 1;
+    TestHarness harness(cfg);
+
+    auto makeImuBatch = [](double tStart, double tEnd, const Vector3& accel) {
+        std::vector<Imu> samples;
+        for (double t = tStart + 0.005; t <= tEnd + 1e-9; t += 0.005) {
+            Imu s;
+            s.timestamp = t;
+            s.a = accel;
+            s.w = Vector3::Zero();
+            s.t = 20.0f;
+            samples.push_back(s);
+        }
+        return samples;
+    };
+
+    BackendHfPacket pkt0;
+    pkt0.frameId = 0;
+    pkt0.timestamp = 0.0;
+    pkt0.isKeyframe = true;
+    pkt0.depth = 5.0;
+    pkt0.visualFeatures.emplace_back(401, Point2(0.0, 0.0), true);
+    pkt0.visualFeatures.emplace_back(402, Point2(0.1, -0.05), true);
+    callInitializeSystem(harness.backend, pkt0);
+
+    // Interleave keyframes and non-keyframes with slight acceleration to force batch relinearization
+    uint32_t fid = 1;
+    double ts = 0.0;
+    for (int step = 0; step < 12; ++step) {
+        for (int sub = 0; sub < 2; ++sub) {
+            const bool isKf = (sub == 1);
+            const Vector3 accel(0.2 * std::sin(0.5 * step), 0.1 * std::cos(0.5 * step), 9.81);
+            BackendHfPacket pkt;
+            pkt.frameId = fid;
+            ts += 0.05;
+            pkt.timestamp = ts;
+            pkt.isKeyframe = isKf;
+            pkt.depth = 5.0;
+            pkt.imuDelta = makePim(accel, Vector3::Zero(), 0.05);
+            pkt.rawImu = makeImuBatch(ts - 0.05, ts, accel);
+            const double shift = 0.01 * static_cast<double>(fid);
+            pkt.visualFeatures.emplace_back(401, Point2(shift, 0.0), false);
+            pkt.visualFeatures.emplace_back(402, Point2(0.1 + shift, -0.05), false);
+            callProcessFrame(harness.backend, pkt);
+            ++fid;
+        }
+    }
+
+    const auto& win = getWindow(harness.backend);
+    const auto& smoother = getSmoother(harness.backend);
+    ASSERT_EQ(win.size(), cfg.slidingWindowSize);
+
+    // Oldest frame in window must remain connected in VariableIndex (bias key not orphaned)
+    EXPECT_FALSE(smoother.getVariableIndex().empty(B(win.front().frameId)));
+    EXPECT_FALSE(win.front().imuFactorSlot.has_value());
+    EXPECT_FALSE(win.front().biasFactorSlot.has_value());
+
+    // Subsequent window frames must retain valid IMU/bias factors in ISAM2
+    for (size_t i = 1; i < win.size(); ++i) {
+        ASSERT_TRUE(win[i].imuFactorSlot.has_value());
+        ASSERT_TRUE(win[i].biasFactorSlot.has_value());
+        EXPECT_NE(smoother.getFactorsUnsafe().at(*win[i].imuFactorSlot), nullptr);
+        EXPECT_NE(smoother.getFactorsUnsafe().at(*win[i].biasFactorSlot), nullptr);
+    }
+
+    EXPECT_TRUE(smoother.valueExists(X(win.back().frameId)));
+}
+
 } // namespace PoolSLAM

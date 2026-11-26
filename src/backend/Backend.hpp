@@ -13,6 +13,8 @@
 
 #include <Eigen/Core>
 
+#include <gtsam/base/FastList.h>
+#include <gtsam/base/FastMap.h>
 #include <gtsam/base/Vector.h>
 #include <gtsam/base/types.h>
 #include <gtsam/geometry/Cal3_S2.h>
@@ -24,7 +26,8 @@
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/navigation/NavState.h>
 #include <gtsam/nonlinear/ISAM2.h>
-#include <gtsam/nonlinear/IncrementalFixedLagSmoother.h>
+#include <gtsam/nonlinear/ISAM2Result.h>
+#include <gtsam/nonlinear/ISAM2UpdateParams.h>
 #include <gtsam/nonlinear/NoiseModelFactorN.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
@@ -51,7 +54,7 @@ struct BackendConfig{
 
     // iSAM2 incremental solver parameters
     double relinearizeThreshold = 0.1;
-    int relinearizeSkip = 10;
+    int relinearizeSkip = 1;
 
     // Initial state prior standard deviations (Frame 0 bootstrapping)
     Eigen::Matrix<double, 6, 1> initPoseSigma =
@@ -61,15 +64,15 @@ struct BackendConfig{
     double initGyroBiasSigma = 0.05;
 
     // Continuous-time IMU bias random-walk noise densities
-    double accelBiasRwSigma = 1e-4;
-    double gyroBiasRwSigma = 1e-5;
+    double accelBiasRwSigma = 3e-3;
+    double gyroBiasRwSigma = 3e-5;
 
     // 1D Depth sensor noise and robust M-estimator threshold
     double depthSigma = 0.05; 
     double depthHuberK = 1.345;
 
     size_t keyframeWindowSize = 20; // Number of keyframes to keep in trackedKeyframes
-    double smootherLag = 2.0; // Lag for fixed-lag smoother in seconds
+    size_t slidingWindowSize = 10; // Maximum number of frames in the iSAM2 sliding window
 };
 
 class DepthFactor : public gtsam::NoiseModelFactorN<gtsam::Pose3>{
@@ -93,6 +96,18 @@ struct TrackedKeyframe{
     size_t lastLandmarkCount = 0;
 };
 
+struct WindowFrame{
+    uint32_t frameId = 0;
+    double timestamp = 0.0;
+    bool isKeyframe = false;
+    std::vector<uint32_t> observedFeatureIds;
+    std::vector<Imu> rawImu;
+    std::optional<gtsam::FactorIndex> imuFactorSlot;
+    std::optional<gtsam::FactorIndex> biasFactorSlot;
+    std::optional<gtsam::FactorIndex> depthFactorSlot;
+
+};
+
 class Backend{
     friend class BackendTest;
 
@@ -103,7 +118,7 @@ class Backend{
 
     BackendConfig config;
 
-    gtsam::IncrementalFixedLagSmoother smoother; // Fixed-lag smoother for local VIO
+    gtsam::ISAM2 smoother; // Incremental smoother for local VIO
     gtsam::NonlinearFactorGraph stagingGraph; 
     gtsam::Values stagingValues;
     std::vector<uint32_t> stagedFeatureIds;
@@ -145,6 +160,9 @@ class Backend{
     // Queue of recent keyframes and their associated features
     std::deque<TrackedKeyframe> trackedKeyframes;
 
+
+    std::deque<WindowFrame> window;
+
     std::atomic<uint8_t> activePose{0}; // Index of active pose
     std::array<Pose, 2> poseBuffer; // Buffer to hold active pose
 
@@ -169,8 +187,11 @@ class Backend{
     // Published pose to the buffer
     void publishPose(const gtsam::Pose3 &pose, const gtsam::Vector3 &velocity, double timestamp);
 
+    // Marginalize the oldest frame out of iSAM2 and update smart factor slots
+    void marginalizeOldestFrame(const WindowFrame &oldFrame);
+
     // Solve the smoother factor graph
-    bool solveSmoother(uint32_t currentFrameId, double timestamp, const gtsam::FactorIndices &removeIndices = {});
+    std::optional<gtsam::ISAM2Result> solveSmoother(uint32_t currentFrameId, const gtsam::FactorIndices &removeIndices = {});
 
     // Solve the global factor graph
     bool solveGlobal(uint32_t currentFrameId);
@@ -189,4 +210,4 @@ public:
     void end();
 };
 
-} // namespace PoolSLAM
+}
