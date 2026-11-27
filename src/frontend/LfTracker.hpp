@@ -107,6 +107,8 @@ private:
     static constexpr float MAX_FEATURE_DIST_RATIO = 0.80f; // Max ratio between best feature match and second best match
     static constexpr int MAX_HAMMING_DIST = 64; // Maximum Hamming distance allowed for descriptor matching
 
+    double maxReprojectionErrorSq;
+
     const LfTrackerConfig config; // Class configuration
 
     std::unique_ptr<uint8_t[]> localBuffer; // Local buffer to store image frame
@@ -168,6 +170,7 @@ public:
 
         matching.curFeatures.resize(3, 2 * static_cast<int>(config.numBuckets));
         matching.matchLandmarks.resize(3, 2 * static_cast<int>(config.numBuckets));
+        maxReprojectionErrorSq = config.maxReprojectionError * config.maxReprojectionError;
     }
 
     ~LfTracker(){

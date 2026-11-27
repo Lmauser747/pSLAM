@@ -335,8 +335,8 @@ void Backend::processFrame(const BackendHfPacket &pkt){
     // Refresh active global odometry edges using refined window poses before marginalization
     for(const auto &[kfA, kfB, factorIdx] : activeGlobalOdomEdges){
         if(factorIdx < globalPoseGraph.size() &&
-           smootherEstimate.exists(X(kfA)) &&
-           smootherEstimate.exists(X(kfB))){
+        smootherEstimate.exists(X(kfA)) &&
+        smootherEstimate.exists(X(kfB))){
             const auto refinedRel = smootherEstimate.at<gtsam::Pose3>(X(kfA)).between(
                 smootherEstimate.at<gtsam::Pose3>(X(kfB))
             );
@@ -346,7 +346,7 @@ void Backend::processFrame(const BackendHfPacket &pkt){
             );
         }
     }
-
+    
     while(window.size() > config.slidingWindowSize){
         WindowFrame oldFrame = std::move(window.front());
         window.pop_front();
@@ -506,12 +506,12 @@ void Backend::marginalizeOldestFrame(const WindowFrame &oldFrame){
 
     try{
         // Eliminate oldest frame via QR Schur complement to avoid ISAM2 clique merges
-        const gtsam::Values linPoint = smoother.calculateEstimate();
+        //const auto &linPoint = smootherEstimate;//smoother.calculateEstimate();
         const gtsam::KeySet subKeys = leafSubGraph.keys();
         gtsam::Values subValues;
         for(gtsam::Key k : subKeys){
-            if(linPoint.exists(k)){
-                subValues.insert(k, linPoint.at(k));
+            if(smootherEstimate.exists(k)){
+                subValues.insert(k, smootherEstimate.at(k));
             }
         }
 
@@ -570,6 +570,15 @@ void Backend::marginalizeOldestFrame(const WindowFrame &oldFrame){
                 }else{
                     factorIt++;
                 }
+            }
+        }
+
+        for(auto factorIt = smartFactorSlots.begin(); factorIt != smartFactorSlots.end(); ){
+            if(leafFactorIndexSet.count(factorIt->second) > 0){
+                smartFactors.erase(factorIt->first);
+                factorIt = smartFactorSlots.erase(factorIt);
+            }else{
+                factorIt++;
             }
         }
 

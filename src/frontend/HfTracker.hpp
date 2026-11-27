@@ -59,11 +59,14 @@ private:
     static constexpr float RANSAC_TRANS_EP = 1e-6f; // Epislon to exclude translations which are too close to zero
     static constexpr float RANSAC_EARLY_CONSENSUS = 0.9f; // If consenus exceeds this threshold, exit RANSAC early
     static constexpr int RANSAC_MIN_INLIERS = 20; // Minimum inliers for RANSAC to succeed 
-    static constexpr float MIN_DIST_IN_BUCKET = 6.0; // Minimum squared distance between two points in a bucket
+    static constexpr float MIN_DIST_IN_BUCKET = 36.0; // Minimum squared distance between two points in a bucket
     static constexpr uint8_t FAST_THRESHOLD = 20; // Threshold for FAST keypoint detection
     static constexpr float ST_THRESHOLD = 500.0f; // Minimum Shi-Tomasi score of canidate feature
     static constexpr int ST_PATCH_SIZE = 7; // Width and height of patch for Shi-Tomasi gradient computation
     static constexpr float HESSIAN_STABILITY_THRESHOLD = 409.6f; // Minimum absolute value of the determinant of the Hessian (scaled by 64^2)
+
+    float fxInv;
+    float fyInv;
 
     struct ImagePyramid{
         std::array<std::vector<uint8_t>, PYR_LEVELS> levels;
@@ -80,7 +83,7 @@ private:
 
     Eigen::Matrix3f K, KInv; 
 
-    float ransacTau; // Inliear-outlier threshold for RANSAC
+    float ransacTauSq; // Inliear-outlier threshold for RANSAC
 
     Distortion dist; // Disortion coefficients
 
@@ -134,15 +137,15 @@ private:
         size_t bufH,
         const Eigen::Vector2f &pt,
         std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
-        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
-        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+        std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+        std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
         Eigen::Matrix2f &HInv) const;
 
     // Core IC-LK alignment loop on a buffer of arbitrary size
     bool alignPatchICLK(
         const std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
-        const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
-        const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+        const std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+        const std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
         const Eigen::Matrix2f &HInv,
         const uint8_t *curBuffer,
         size_t bufW,
@@ -217,7 +220,11 @@ public:
         ransacRng.seed(0); 
 
         // 1.5 / (average focal length)
-        ransacTau = 3.0f / (K(0, 0) + K(1, 1));
+        ransacTauSq = 3.0f / (K(0, 0) + K(1, 1));
+        ransacTauSq = ransacTauSq * ransacTauSq;
+
+        fxInv = 1.0f / K(0, 0);
+        fyInv = 1.0f / K(1, 1);
 
         size_t maxFeatures = totalBuckets * 2;
 

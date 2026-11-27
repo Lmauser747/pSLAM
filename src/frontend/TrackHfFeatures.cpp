@@ -74,26 +74,32 @@ void HfTracker::downsampleLevel(const uint8_t *src, size_t srcW, size_t srcH, ui
     const int maxX = static_cast<int>(srcW) - 1;
     const int maxY = static_cast<int>(srcH) - 1;
 
+    // Deal with x = 0 and x = dstW - 1
+    for(size_t y = 0; y < srcH; y++){
+        const uint8_t *rowPtr = src + y * srcW;
+        uint16_t *scratchRow = pyrBlurScratch.data() + y * dstW;
+        for(size_t x = 0; x < dstW; x += dstW - 1){
+            const int cx = static_cast<int>(x * 2);
+            const int xm2 = std::clamp(cx - 2, 0, maxX);
+            const int xm1 = std::clamp(cx - 1, 0, maxX);
+            const int x0 = std::clamp(cx, 0, maxX);
+            const int xp1 = std::clamp(cx + 1, 0, maxX);
+            const int xp2 = std::clamp(cx + 2, 0, maxX);
+            scratchRow[x] = static_cast<uint16_t>(
+                rowPtr[xm2] + 4 * rowPtr[xm1] + 6 * rowPtr[x0] + 4 * rowPtr[xp1] + rowPtr[xp2]
+            );
+        }
+    }
+
     // Blur only even columns needed for 2x horizontal decimation
     for(size_t y = 0; y < srcH; y++){
         const uint8_t *rowPtr = src + y * srcW;
         uint16_t *scratchRow = pyrBlurScratch.data() + y * dstW;
-        for(size_t x = 0; x < dstW; x++){
+        for(size_t x = 1; x < dstW - 1; x++){
             const int cx = static_cast<int>(x * 2);
-            if(cx >= 2 && cx + 2 <= maxX){
-                scratchRow[x] = static_cast<uint16_t>(
-                    rowPtr[cx - 2] + 4 * rowPtr[cx - 1] + 6 * rowPtr[cx] + 4 * rowPtr[cx + 1] + rowPtr[cx + 2]
-                );
-            }else{
-                const int xm2 = std::clamp(cx - 2, 0, maxX);
-                const int xm1 = std::clamp(cx - 1, 0, maxX);
-                const int x0 = std::clamp(cx, 0, maxX);
-                const int xp1 = std::clamp(cx + 1, 0, maxX);
-                const int xp2 = std::clamp(cx + 2, 0, maxX);
-                scratchRow[x] = static_cast<uint16_t>(
-                    rowPtr[xm2] + 4 * rowPtr[xm1] + 6 * rowPtr[x0] + 4 * rowPtr[xp1] + rowPtr[xp2]
-                );
-            }
+            scratchRow[x] = static_cast<uint16_t>(
+                rowPtr[cx - 2] + 4 * rowPtr[cx - 1] + 6 * rowPtr[cx] + 4 * rowPtr[cx + 1] + rowPtr[cx + 2]
+            );
         }
     }
 
@@ -119,8 +125,8 @@ bool HfTracker::extractTemplate(
     size_t bufH,
     const Eigen::Vector2f &pt,
     std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
-    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
-    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+    std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+    std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
     Eigen::Matrix2f &HInv) const{
     // Leave one extra pixel margin for Sobel taps and floor plus one bilinear lookup
     const float ptLower = static_cast<float>(RADIUS + 1);
@@ -154,8 +160,8 @@ bool HfTracker::extractTemplate(
             const float bc = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(0.0f, 1.0f));
             const float br = bilinearFloatStride(buffer, bufW, c + Eigen::Vector2f(1.0f, 1.0f));
 
-            const int tx = static_cast<int>(std::lround(2.0f * (ml - mr) + bl + tl - br - tr));
-            const int ty = static_cast<int>(std::lround(2.0f * (tc - bc) + tl + tr - bl - br));
+            const int16_t tx = static_cast<int16_t>(std::lround(2.0f * (ml - mr) + bl + tl - br - tr));
+            const int16_t ty = static_cast<int16_t>(std::lround(2.0f * (tc - bc) + tl + tr - bl - br));
 
             xGrad[idx] = tx;
             yGrad[idx] = ty;
@@ -181,8 +187,8 @@ bool HfTracker::extractTemplate(
 
 bool HfTracker::alignPatchICLK(
     const std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> &patch,
-    const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
-    const std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
+    const std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &xGrad,
+    const std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> &yGrad,
     const Eigen::Matrix2f &HInv,
     const uint8_t *curBuffer,
     size_t bufW,
@@ -263,8 +269,8 @@ bool HfTracker::alignFeaturePyramidICLK(TrackedFeature<RADIUS> &feature, const u
         const auto &curPyr = pyramids[curPyrIdx];
 
         std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> coarsePatch;
-        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> coarseXGrad;
-        std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> coarseYGrad;
+        std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> coarseXGrad;
+        std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> coarseYGrad;
         Eigen::Matrix2f coarseHInv;
 
         for(int lvl = static_cast<int>(PYR_LEVELS) - 1; lvl >= 1; lvl--){
@@ -382,7 +388,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
     for(Eigen::Index i = 0; i < static_cast<Eigen::Index>(numFeatures); i++){
         auto p = epi.scratch.col(i).hnormalized();
         auto q = epi.currRays.col(i).hnormalized();
-        if((p - q).norm() <= ransacTau){
+        if((p - q).squaredNorm() <= ransacTauSq){
             pureRotations++;
         }
     }
@@ -393,7 +399,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
             auto i = static_cast<Eigen::Index>(readIdx);
             auto p = epi.scratch.col(i).hnormalized();
             auto q = epi.currRays.col(i).hnormalized();
-            if((p - q).norm() <= ransacTau){
+            if((p - q).squaredNorm() <= ransacTauSq){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = activeFeatures[readIdx];
                 }
@@ -441,7 +447,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
 
             float sed = denomenator2 > 1e-7 ? numerator2 / denomenator2 : 1e9;
 
-            inliers = (sed < ransacTau * ransacTau) ? inliers + 1 : inliers;
+            inliers = (sed < ransacTauSq) ? inliers + 1 : inliers;
         }
         // END VECTORIZE
         
@@ -454,7 +460,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
         }
     }
 
-    if(maxInliers >= RANSAC_MIN_INLIERS || (numFeatures >= RANSAC_MIN_INLIERS && maxInliers >= 8)){
+    if(maxInliers >= RANSAC_MIN_INLIERS || maxInliers >= 8){
         size_t writeIdx = 0;
         for(size_t readIdx = 0; readIdx < numFeatures; readIdx++){
             auto i = static_cast<Eigen::Index>(readIdx);
@@ -469,7 +475,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
 
             float sed = denomenator2 > 1e-7 ? numerator2 / denomenator2 : 1e9;
 
-            if(sed < ransacTau * ransacTau){
+            if(sed < ransacTauSq){
                 if(writeIdx != readIdx){
                     activeFeatures[writeIdx] = std::move(activeFeatures[readIdx]);
                     epi.currRays.col(static_cast<Eigen::Index>(writeIdx)) = epi.currRays.col(static_cast<Eigen::Index>(readIdx));
@@ -495,8 +501,6 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
 Eigen::Vector2f HfTracker::undistortPoint(float xDist, float yDist) const{
     float cx = K(0, 2);
     float cy = K(1, 2);
-    float fxInv = 1.0f / K(0, 0);
-    float fyInv = 1.0f / K(1, 1);
 
     float xd = (xDist - cx) * fxInv;
     float yd = (yDist - cy) * fyInv;
@@ -538,7 +542,7 @@ void HfTracker::enforceBucketDensity(){
     std::fill(gridOccupancy.begin(), gridOccupancy.end(), GridBucket{0, UINT32_MAX, UINT32_MAX});
     keep.assign(activeFeatures.size(), true);
     for(uint32_t i = 0; i < activeFeatures.size(); i++){
-        auto feature = activeFeatures[i];
+        const auto &feature = activeFeatures[i];
         auto &bucket = gridOccupancy[getBucketIdx(feature.ptCurr.x(), feature.ptCurr.y())];
         
         if(bucket.count == 0){
@@ -546,8 +550,8 @@ void HfTracker::enforceBucketDensity(){
             bucket.count = 1;
         }else if(bucket.count == 1){
             // Remove features that are too close
-            auto distL2 = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).norm();
-            if(distL2 < MIN_DIST_IN_BUCKET){
+            auto distL2Sq = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).squaredNorm();
+            if(distL2Sq < MIN_DIST_IN_BUCKET){
                 featureRemoved = true;
                 if(activeFeatures[bucket.olderIdx].age < feature.age){
                     keep[bucket.olderIdx] = false;
@@ -567,9 +571,9 @@ void HfTracker::enforceBucketDensity(){
         }else{
             featureRemoved = true;
             // Remove features that are too close
-            auto distOlderL2 = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).norm();
+            auto distOlderL2Sq = (feature.ptCurr - activeFeatures[bucket.olderIdx].ptCurr).squaredNorm();
             if(activeFeatures[bucket.olderIdx].age < feature.age){
-                if(distOlderL2 < MIN_DIST_IN_BUCKET){
+                if(distOlderL2Sq < MIN_DIST_IN_BUCKET){
                     keep[bucket.olderIdx] = false;
                 }else{
                     keep[bucket.youngerIdx] = false;
@@ -577,7 +581,7 @@ void HfTracker::enforceBucketDensity(){
                 }
                 bucket.olderIdx = i;
             }else if(activeFeatures[bucket.youngerIdx].age < feature.age){
-                if(distOlderL2 < MIN_DIST_IN_BUCKET){
+                if(distOlderL2Sq < MIN_DIST_IN_BUCKET){
                     keep[i] = false;
                 }else{
                     keep[bucket.youngerIdx] = false;
@@ -639,8 +643,8 @@ float HfTracker::computeKeyframeParallax(const Eigen::Matrix3f &R_kf_curr) const
 void HfTracker::markKeyframe(){
     const uint8_t *kfBuffer = hasPrevPyramid ? pyramids[prevPyrIdx()].levels[0].data() : nullptr;
     std::array<uint8_t, TrackedFeature<RADIUS>::NUM_PIXELS> newPatch;
-    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> newXGrad;
-    std::array<int, TrackedFeature<RADIUS>::NUM_PIXELS> newYGrad;
+    std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> newXGrad;
+    std::array<int16_t, TrackedFeature<RADIUS>::NUM_PIXELS> newYGrad;
     Eigen::Matrix2f newHInv;
 
     for(auto &feat : activeFeatures){

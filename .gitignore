@@ -74,15 +74,7 @@ Testing/
 # venv
 .venv
 
-# test outputs
-test.*
-
 test_dataset
 
 benchmarks/accuracy/runs
 benchmarks/accuracy/__*
-
-ARCH*
-
-tests/*.md
-benchmarks/*.md
