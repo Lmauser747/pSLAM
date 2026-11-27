@@ -8,6 +8,7 @@
 #include <eigen3/Eigen/Dense>
 
 #include "frontend/HfTracker.hpp"
+#include "simd/Downsample.hpp"
 #include "CoreTypes.hpp"
 
 namespace PoolSLAM{
@@ -73,12 +74,14 @@ void HfTracker::buildPyramid(const uint8_t *curBuffer, ImagePyramid &dst){
 void HfTracker::downsampleLevel(const uint8_t *src, size_t srcW, size_t srcH, uint8_t *dst, size_t dstW, size_t dstH){
     const int maxX = static_cast<int>(srcW) - 1;
     const int maxY = static_cast<int>(srcH) - 1;
+    const size_t xEdgeStep = (dstW > 1) ? (dstW - 1) : 1;
+    const size_t yEdgeStep = (dstH > 1) ? (dstH - 1) : 1;
 
     // Deal with x = 0 and x = dstW - 1
     for(size_t y = 0; y < srcH; y++){
         const uint8_t *rowPtr = src + y * srcW;
         uint16_t *scratchRow = pyrBlurScratch.data() + y * dstW;
-        for(size_t x = 0; x < dstW; x += dstW - 1){
+        for(size_t x = 0; x < dstW; x += xEdgeStep){
             const int cx = static_cast<int>(x * 2);
             const int xm2 = std::clamp(cx - 2, 0, maxX);
             const int xm1 = std::clamp(cx - 1, 0, maxX);
@@ -95,15 +98,29 @@ void HfTracker::downsampleLevel(const uint8_t *src, size_t srcW, size_t srcH, ui
     for(size_t y = 0; y < srcH; y++){
         const uint8_t *rowPtr = src + y * srcW;
         uint16_t *scratchRow = pyrBlurScratch.data() + y * dstW;
-        for(size_t x = 1; x < dstW - 1; x++){
-            const int cx = static_cast<int>(x * 2);
-            scratchRow[x] = static_cast<uint16_t>(
-                rowPtr[cx - 2] + 4 * rowPtr[cx - 1] + 6 * rowPtr[cx] + 4 * rowPtr[cx + 1] + rowPtr[cx + 2]
-            );
+        #ifdef POOL_SLAM_SIMD
+        if(dstW >= 18){
+            size_t dx = 1;
+            for(; dx + 16 <= dstW - 1; dx += 16){
+                simd::downsampleRow16(rowPtr + 2 * dx, scratchRow + dx);
+            }
+            if(dx < dstW - 1){
+                const size_t tailDx = dstW - 17;
+                simd::downsampleRow16(rowPtr + 2 * tailDx, scratchRow + tailDx);
+            }
+        }else
+        #endif
+        {
+            for(size_t dx = 1; dx + 1 < dstW; dx++){
+                const int cx = static_cast<int>(dx * 2);
+                scratchRow[dx] = static_cast<uint16_t>(
+                    rowPtr[cx - 2] + 4 * rowPtr[cx - 1] + 6 * rowPtr[cx] + 4 * rowPtr[cx + 1] + rowPtr[cx + 2]
+                );
+            }
         }
     }
 
-    for(size_t y = 0; y < dstH; y++){
+    for(size_t y = 0; y < dstH; y += yEdgeStep){
         const int cy = static_cast<int>(y * 2);
         const uint16_t *rm2 = pyrBlurScratch.data() + static_cast<size_t>(std::clamp(cy - 2, 0, maxY)) * dstW;
         const uint16_t *rm1 = pyrBlurScratch.data() + static_cast<size_t>(std::clamp(cy - 1, 0, maxY)) * dstW;
@@ -115,6 +132,36 @@ void HfTracker::downsampleLevel(const uint8_t *src, size_t srcW, size_t srcH, ui
         for(size_t x = 0; x < dstW; x++){
             const uint32_t sum = static_cast<uint32_t>(rm2[x]) + 4u * rm1[x] + 6u * r0[x] + 4u * rp1[x] + rp2[x];
             dstRow[x] = static_cast<uint8_t>((sum + 128u) >> 8);
+        }
+    }
+
+    for(size_t y = 1; y + 1 < dstH; y++){
+        const size_t cy = y * 2;
+        const uint16_t *srcRowPtr = pyrBlurScratch.data() + cy * dstW;
+        uint8_t *dstRowPtr = dst + y * dstW;
+
+        #ifdef POOL_SLAM_SIMD
+        if(dstW >= 16){
+            size_t x = 0;
+            for(; x + 16 <= dstW; x += 16){
+                simd::downsampleCol16(srcRowPtr + x, dstW, dstRowPtr + x);
+            }
+            if(x < dstW){
+                const size_t tailX = dstW - 16;
+                simd::downsampleCol16(srcRowPtr + tailX, dstW, dstRowPtr + tailX);
+            }
+        }else
+        #endif
+        {
+            const uint16_t *rm2 = srcRowPtr - 2 * dstW;
+            const uint16_t *rm1 = srcRowPtr - dstW;
+            const uint16_t *r0 = srcRowPtr;
+            const uint16_t *rp1 = srcRowPtr + dstW;
+            const uint16_t *rp2 = srcRowPtr + 2 * dstW;
+            for(size_t x = 0; x < dstW; x++){
+                const uint32_t sum = static_cast<uint32_t>(rm2[x]) + 4u * rm1[x] + 6u * r0[x] + 4u * rp1[x] + rp2[x];
+                dstRowPtr[x] = static_cast<uint8_t>((sum + 128u) >> 8);
+            }
         }
     }
 }
@@ -304,10 +351,6 @@ bool HfTracker::alignFeaturePyramidICLK(TrackedFeature<RADIUS> &feature, const u
     }
 
     return alignFeatureICLK(feature, curBuffer, ptEst);
-}
-
-float HfTracker::bilinearFloat(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const{
-    return bilinearFloatStride(curBuffer, wImage, pt);
 }
 
 float HfTracker::bilinearFloatStride(const uint8_t *curBuffer, size_t stride, const Eigen::Vector2f &pt) const{

@@ -53,66 +53,13 @@ size_t HfTracker::getFast(const uint8_t *curBuffer, size_t bucket){
     auto bucketOffset = offsetFromBucket(bucket);
     Eigen::Vector2i topLeft = topLeftBucket(bucket);
     size_t nPts = 0;
-    #ifdef POOL_SLAM_SIMD
     size_t lineWidth = 16;
-    #else
-    size_t lineWidth = 1;
-    std::array<uint8_t, 16> ring = {0};
-    #endif
     // START VECTORIZE
     for(size_t y = 0; y < hBucket; y++){
         auto rowPtr = curBuffer + bucketOffset + y * wImage;
         for(size_t x = 0; x < wBucket; x += lineWidth){
             auto centerPtr = rowPtr + x;
-            #ifdef POOL_SLAM_SIMD
             nPts += simd::fastLine16(centerPtr, topLeft + Eigen::Vector2i(x, y), fastOffsets, FAST_THRESHOLD, fastPoints);
-            #else
-            auto center = *centerPtr;
-
-            uint8_t upper = static_cast<uint8_t>(std::min(255, center + FAST_THRESHOLD));
-            uint8_t lower = static_cast<uint8_t>(std::max(0, center - FAST_THRESHOLD));
-
-            // Run the compass test to quickly tell if a keypoint is possible
-            ring[0] = *(centerPtr + fastOffsets[0]);
-            ring[4] = *(centerPtr + fastOffsets[4]);
-            ring[8] = *(centerPtr + fastOffsets[8]);
-            ring[12] = *(centerPtr + fastOffsets[12]);
-
-            bool bCompass = ((ring[0] > upper) || (ring[8] > upper)) && ((ring[4] > upper) || (ring[12] > upper));
-            bool dCompass = ((ring[0] < lower) || (ring[8] < lower)) && ((ring[4] < lower) || (ring[12] < lower));
-
-            if(!(bCompass || dCompass)){
-                continue;
-            }
-
-
-            // Extract masks for brighter and darker pixels
-            uint32_t brighter = 0;
-            uint32_t darker = 0;
-
-            for(size_t i = 0; i < 16; i++){
-                ring[i] = *(centerPtr + fastOffsets[i]);
-                brighter |= (ring[i] > upper) ? 1u << i : 0u;
-                darker |= (ring[i] < lower) ? 1u << i : 0u;
-            }
-
-            uint32_t brighter32 = (brighter << 16) | brighter;
-            uint32_t darker32 = (darker << 16) | darker;
-
-            // Check for runs of 9 consecutive bits using bit magic
-            uint32_t brighterRun = ~0u;
-            uint32_t darkerRun = ~0u;
-
-            for(size_t i = 0; i < 9; i++){
-                brighterRun &= brighter32 >> i;
-                darkerRun &= darker32 >> i;
-            }
-
-            if(((brighterRun | darkerRun) & 0xFFFF)!= 0){
-                fastPoints.push_back(topLeft + Eigen::Vector2i(static_cast<int>(x), static_cast<int>(y)));
-                nPts++;
-            }
-            #endif
         }
     }
     // END VECTORIZE

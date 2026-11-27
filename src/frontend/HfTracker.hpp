@@ -162,7 +162,6 @@ private:
 
     // Biliner interpolation helper
     int16_t bilinear(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const;
-    float bilinearFloat(const uint8_t *curBuffer, const Eigen::Vector2f &pt) const;
     float bilinearFloatStride(const uint8_t *curBuffer, size_t stride, const Eigen::Vector2f &pt) const;
 
     // Does RANSAC on the active features using R as the IMU prior
