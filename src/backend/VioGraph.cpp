@@ -333,19 +333,17 @@ void Backend::processFrame(const BackendHfPacket &pkt){
     window.push_back(std::move(wf));
 
     // Refresh active global odometry edges using refined window poses before marginalization
-    if(pkt.isKeyframe || prev.isKeyframe){
-        for(const auto &[kfA, kfB, factorIdx] : activeGlobalOdomEdges){
-            if(factorIdx < globalPoseGraph.size() &&
-            smootherEstimate.exists(X(kfA)) &&
-            smootherEstimate.exists(X(kfB))){
-                const auto refinedRel = smootherEstimate.at<gtsam::Pose3>(X(kfA)).between(
-                    smootherEstimate.at<gtsam::Pose3>(X(kfB))
-                );
-                globalPoseGraph.replace(
-                    factorIdx,
-                    std::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(kfA), X(kfB), refinedRel, odomNoise)
-                );
-            }
+    for(const auto &[kfA, kfB, factorIdx] : activeGlobalOdomEdges){
+        if(factorIdx < globalPoseGraph.size() &&
+        smootherEstimate.exists(X(kfA)) &&
+        smootherEstimate.exists(X(kfB))){
+            const auto refinedRel = smootherEstimate.at<gtsam::Pose3>(X(kfA)).between(
+                smootherEstimate.at<gtsam::Pose3>(X(kfB))
+            );
+            globalPoseGraph.replace(
+                factorIdx,
+                std::make_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(kfA), X(kfB), refinedRel, odomNoise)
+            );
         }
     }
     

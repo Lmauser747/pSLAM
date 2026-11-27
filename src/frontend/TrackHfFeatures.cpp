@@ -460,7 +460,7 @@ int HfTracker::ransac(const Eigen::Matrix3f &R){
         }
     }
 
-    if(maxInliers >= RANSAC_MIN_INLIERS || (numFeatures >= RANSAC_MIN_INLIERS && maxInliers >= 8)){
+    if(maxInliers >= RANSAC_MIN_INLIERS || maxInliers >= 8){
         size_t writeIdx = 0;
         for(size_t readIdx = 0; readIdx < numFeatures; readIdx++){
             auto i = static_cast<Eigen::Index>(readIdx);
